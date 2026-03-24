@@ -1426,7 +1426,7 @@ function createItem(file) {
   return {
     id: makeId(),
     file,
-    origDataUrl: '',
+    previewUrl: (typeof URL !== 'undefined' && URL.createObjectURL) ? URL.createObjectURL(file) : '',
     origExif: {},
     modDataUrl: null,
     modBlob: null,
@@ -1457,12 +1457,20 @@ function getUploadedItems() {
 }
 
 function getDisplayUrl(item) {
-  return item?.modDataUrl || item?.origDataUrl || '';
+  return item?.modDataUrl || item?.previewUrl || '';
 }
 
 function getOutputName(item) {
   const base = (item?.file?.name || 'image').replace(/\.[^.]+$/, '');
   return `${base}_metafaked.jpg`;
+}
+
+function releaseItemResources(item) {
+  if (!item?.previewUrl || !window.URL?.revokeObjectURL) return;
+  try {
+    window.URL.revokeObjectURL(item.previewUrl);
+  } catch (e) {}
+  item.previewUrl = '';
 }
 
 function describeItemStatus(item) {
@@ -1512,10 +1520,13 @@ function renderBatchStrip() {
   const processed = getProcessedItems().length;
   const uploaded = getUploadedItems().length;
   summary.textContent = `${S.items.length} image${S.items.length === 1 ? '' : 's'} queued | ${processed} processed | ${uploaded} uploaded`;
+  const lightBatchMode = S.items.length > 24;
   strip.innerHTML = S.items.map(item => {
     const status = describeItemStatus(item);
-    const thumb = getDisplayUrl(item)
-      ? `<img class="batch-thumb" src="${getDisplayUrl(item)}" alt="${escapeHtml(item.file.name)}">`
+    const displayUrl = getDisplayUrl(item);
+    const canRenderThumb = !!displayUrl && (!lightBatchMode || item.id === S.activeId || !!item.modDataUrl);
+    const thumb = canRenderThumb
+      ? `<img class="batch-thumb" loading="lazy" decoding="async" src="${displayUrl}" alt="${escapeHtml(item.file.name)}">`
       : `<div class="batch-thumb-empty">IMG</div>`;
     return `
       <div class="batch-item${item.id === S.activeId ? ' active' : ''}" onclick="App.select('${item.id}')">
@@ -1675,7 +1686,6 @@ function renderCurrentItem() {
 async function hydrateItem(file) {
   const item = createItem(file);
   item.processing = true;
-  item.origDataUrl = await fileToDataUrl(file);
   try {
     const raw = await exifr.parse(file, { all:true, gps:true, tiff:true, exif:true, iptc:true });
     item.origExif = raw || {};
@@ -1736,7 +1746,7 @@ async function processRandomizeItem(item) {
 
   try {
     const fake = generateFake();
-    const cleanJpeg = await stripViaCanvas(item.origDataUrl);
+    const cleanJpeg = await stripViaCanvas(item.previewUrl);
     const px = window.piexif;
     const bytes = px.dump(fake.piexif);
     let modDataUrl = px.insert(bytes, cleanJpeg);
@@ -1786,7 +1796,7 @@ async function processClearItem(item) {
   renderCurrentItem();
 
   try {
-    item.modDataUrl = await stripViaCanvas(item.origDataUrl);
+    item.modDataUrl = await stripViaCanvas(item.previewUrl);
     item.modBlob = dataUrlToBlob(item.modDataUrl);
     item.fakeExif = null;
     item.fakePiexif = null;
@@ -1858,13 +1868,16 @@ const App = {
 
     document.getElementById('contentGrid').style.display = 'grid';
     let added = 0;
+    const renderEvery = files.length > 20 ? 8 : files.length > 8 ? 4 : 1;
     for (const file of files) {
       try {
         const item = await hydrateItem(file);
         S.items.push(item);
         S.activeId = item.id;
         added++;
-        renderCurrentItem();
+        if (added === 1 || added === files.length || added % renderEvery === 0) {
+          renderCurrentItem();
+        }
       } catch (e) {
         showToast(`Could not load ${file.name}: ${e.message}`, 'error');
       }
@@ -2017,6 +2030,7 @@ const App = {
   },
 
   reset() {
+    S.items.forEach(releaseItemResources);
     S.items = [];
     S.activeId = null;
     S.tab = 'orig';
