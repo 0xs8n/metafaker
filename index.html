@@ -1430,6 +1430,7 @@ function createItem(file) {
     origExif: {},
     modDataUrl: null,
     modBlob: null,
+    modPreviewUrl: '',
     fakeExif: null,
     fakePiexif: null,
     fakeCamera: null,
@@ -1449,7 +1450,7 @@ function getActiveItem() {
 }
 
 function getProcessedItems() {
-  return S.items.filter(item => item.modDataUrl);
+  return S.items.filter(item => item.modBlob || item.modDataUrl);
 }
 
 function getUploadedItems() {
@@ -1457,7 +1458,7 @@ function getUploadedItems() {
 }
 
 function getDisplayUrl(item) {
-  return item?.modDataUrl || item?.previewUrl || '';
+  return item?.modPreviewUrl || item?.modDataUrl || item?.previewUrl || '';
 }
 
 function getOutputName(item) {
@@ -1473,13 +1474,28 @@ function releaseItemResources(item) {
   item.previewUrl = '';
 }
 
+function releaseProcessedResources(item) {
+  if (item?.modPreviewUrl && window.URL?.revokeObjectURL) {
+    try {
+      window.URL.revokeObjectURL(item.modPreviewUrl);
+    } catch (e) {}
+  }
+  item.modPreviewUrl = '';
+  item.modBlob = null;
+  item.modDataUrl = null;
+}
+
+function hasProcessedOutput(item) {
+  return !!(item?.modBlob || item?.modDataUrl);
+}
+
 function describeItemStatus(item) {
   if (!item) return { text: 'Idle', className: '' };
   if (item.processing) return { text: 'Processing', className: 'processing' };
   if (item.error) return { text: 'Error', className: 'error' };
   if (item.upload?.url) return { text: 'Uploaded', className: 'uploaded' };
-  if (item.modDataUrl && item.fakeExif) return { text: 'Randomized', className: 'ready' };
-  if (item.modDataUrl) return { text: 'Stripped', className: 'ready' };
+  if (hasProcessedOutput(item) && item.fakeExif) return { text: 'Randomized', className: 'ready' };
+  if (hasProcessedOutput(item)) return { text: 'Stripped', className: 'ready' };
   return { text: 'Loaded', className: '' };
 }
 
@@ -1524,7 +1540,7 @@ function renderBatchStrip() {
   strip.innerHTML = S.items.map(item => {
     const status = describeItemStatus(item);
     const displayUrl = getDisplayUrl(item);
-    const canRenderThumb = !!displayUrl && (!lightBatchMode || item.id === S.activeId || !!item.modDataUrl);
+    const canRenderThumb = !!displayUrl && (!lightBatchMode || item.id === S.activeId);
     const thumb = canRenderThumb
       ? `<img class="batch-thumb" loading="lazy" decoding="async" src="${displayUrl}" alt="${escapeHtml(item.file.name)}">`
       : `<div class="batch-thumb-empty">IMG</div>`;
@@ -1545,7 +1561,7 @@ function renderBatchStrip() {
 function updateActionButtons() {
   const current = getActiveItem();
   const hasCurrent = !!current;
-  const hasOutput = !!current?.modDataUrl;
+  const hasOutput = hasProcessedOutput(current);
   const hasCloudConfig = !!(S.cloud.cloudName && S.cloud.uploadPreset);
   const anyProcessing = S.items.some(item => item.processing);
 
@@ -1589,7 +1605,7 @@ function renderTransferTab() {
   const uploadedItems = getUploadedItems();
   const currentPanel = current?.upload?.url
     ? renderTransferRows([current])
-    : `<div class="transfer-note">${current?.modDataUrl ? 'This image is processed and ready to upload.' : 'Process the current image first, then upload it from here.'}</div>`;
+    : `<div class="transfer-note">${hasProcessedOutput(current) ? 'This image is processed and ready to upload.' : 'Process the current image first, then upload it from here.'}</div>`;
 
   return `
     <div class="transfer-card">
@@ -1607,7 +1623,7 @@ function renderTransferTab() {
       </div>
       <div class="transfer-actions">
         <button class="btn btn-secondary" onclick="App.saveCloudSettings()">Save Transfer Settings</button>
-        <button class="btn btn-secondary" onclick="App.uploadCurrent()" ${current?.modDataUrl ? '' : 'disabled'}>Upload Current Image</button>
+        <button class="btn btn-secondary" onclick="App.uploadCurrent()" ${hasProcessedOutput(current) ? '' : 'disabled'}>Upload Current Image</button>
         <button class="btn btn-secondary" onclick="App.uploadAll()" ${getProcessedItems().length ? '' : 'disabled'}>Upload Entire Batch</button>
         <button class="btn btn-secondary" onclick="App.copyAllUploadUrls()" ${uploadedItems.length ? '' : 'disabled'}>Copy All Uploaded URLs</button>
       </div>
@@ -1643,7 +1659,7 @@ function renderActiveTab() {
     }
     setBadge('original', 'Original');
   } else if (S.tab === 'fake') {
-    if (current.modDataUrl && !current.fakeExif) {
+    if (hasProcessedOutput(current) && !current.fakeExif) {
       body.innerHTML = `<div class="no-meta"><div class="no-meta-icon">CLR</div><p>Metadata was stripped from this image.</p></div>`;
       S.fieldCounts.fake = 0;
       setBadge('cleared', 'Cleared');
@@ -1738,13 +1754,15 @@ function saveCloudSettingsFromInputs() {
   localStorage.setItem('metafaker.uploadPreset', S.cloud.uploadPreset);
 }
 
-async function processRandomizeItem(item) {
+async function processRandomizeItem(item, options = {}) {
+  const { deferRender = false } = options;
   item.processing = true;
   item.error = null;
   item.upload = null;
-  renderCurrentItem();
+  if (!deferRender) renderCurrentItem();
 
   try {
+    releaseProcessedResources(item);
     const fake = generateFake();
     const cleanJpeg = await stripViaCanvas(item.previewUrl);
     const px = window.piexif;
@@ -1754,8 +1772,9 @@ async function processRandomizeItem(item) {
     modDataUrl = injectXmpGps(modDataUrl, fake.loc, fake.display.GPSAltitude);
 
     const verified = await readBackExifStrict(modDataUrl);
-    item.modDataUrl = modDataUrl;
     item.modBlob = verified.blob;
+    item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL) ? URL.createObjectURL(verified.blob) : modDataUrl;
+    item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
     item.fakeExif = fake.loc
       ? {
           ...verified.exif,
@@ -1778,26 +1797,29 @@ async function processRandomizeItem(item) {
     }
   } catch (e) {
     item.error = e.message;
-    item.modDataUrl = null;
-    item.modBlob = null;
+    releaseProcessedResources(item);
     item.fakeExif = null;
     item.fakePiexif = null;
     throw e;
   } finally {
     item.processing = false;
-    renderCurrentItem();
+    if (!deferRender) renderCurrentItem();
   }
 }
 
-async function processClearItem(item) {
+async function processClearItem(item, options = {}) {
+  const { deferRender = false } = options;
   item.processing = true;
   item.error = null;
   item.upload = null;
-  renderCurrentItem();
+  if (!deferRender) renderCurrentItem();
 
   try {
-    item.modDataUrl = await stripViaCanvas(item.previewUrl);
-    item.modBlob = dataUrlToBlob(item.modDataUrl);
+    releaseProcessedResources(item);
+    const modDataUrl = await stripViaCanvas(item.previewUrl);
+    item.modBlob = dataUrlToBlob(modDataUrl);
+    item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL) ? URL.createObjectURL(item.modBlob) : modDataUrl;
+    item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
     item.fakeExif = null;
     item.fakePiexif = null;
     item.fakeCamera = null;
@@ -1805,12 +1827,11 @@ async function processClearItem(item) {
     showToast(`Metadata stripped from ${item.file.name}.`, 'success');
   } catch (e) {
     item.error = e.message;
-    item.modDataUrl = null;
-    item.modBlob = null;
+    releaseProcessedResources(item);
     throw e;
   } finally {
     item.processing = false;
-    renderCurrentItem();
+    if (!deferRender) renderCurrentItem();
   }
 }
 
@@ -1913,10 +1934,14 @@ const App = {
     let completed = 0;
     for (const item of S.items) {
       S.activeId = item.id;
-      renderCurrentItem();
+      if (completed === 0 || completed % 4 === 0) renderCurrentItem();
       try {
-        await processRandomizeItem(item);
+        await processRandomizeItem(item, { deferRender: true });
         completed++;
+        if (completed % 4 === 0) {
+          renderCurrentItem();
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
       } catch (e) {
         showToast(`Batch failed for ${item.file.name}: ${e.message}`, 'error');
       }
@@ -1940,7 +1965,7 @@ const App = {
 
   async download() {
     const item = getActiveItem();
-    if (!item?.modDataUrl) return;
+    if (!hasProcessedOutput(item)) return;
     try {
       const blob = await ensureBlob(item);
       downloadBlob(blob, getOutputName(item));
@@ -1971,7 +1996,7 @@ const App = {
 
   async uploadCurrent() {
     const item = getActiveItem();
-    if (!item?.modDataUrl) return;
+    if (!hasProcessedOutput(item)) return;
     saveCloudSettingsFromInputs();
     try {
       await uploadItemToCloud(item);
@@ -2030,7 +2055,10 @@ const App = {
   },
 
   reset() {
-    S.items.forEach(releaseItemResources);
+    S.items.forEach(item => {
+      releaseItemResources(item);
+      releaseProcessedResources(item);
+    });
     S.items = [];
     S.activeId = null;
     S.tab = 'orig';
