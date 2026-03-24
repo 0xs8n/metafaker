@@ -913,14 +913,19 @@ const LOCATIONS = [
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // STATE
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const DEFAULT_CLOUD = {
+  cloudName: 'dt35oppkf',
+  uploadPreset: 'metafaker-transfers',
+};
+
 const S = {
   items: [],
   activeId: null,
   tab: 'orig',
   fieldCounts: { orig: 0, fake: 0, cloud: 0 },
   cloud: {
-    cloudName: localStorage.getItem('metafaker.cloudName') || '',
-    uploadPreset: localStorage.getItem('metafaker.uploadPreset') || '',
+    cloudName: localStorage.getItem('metafaker.cloudName') || DEFAULT_CLOUD.cloudName,
+    uploadPreset: localStorage.getItem('metafaker.uploadPreset') || DEFAULT_CLOUD.uploadPreset,
   },
 };
 
