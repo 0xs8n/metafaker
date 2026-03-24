@@ -1562,7 +1562,8 @@ function updateActionButtons() {
   const current = getActiveItem();
   const hasCurrent = !!current;
   const hasOutput = hasProcessedOutput(current);
-  const hasCloudConfig = !!(S.cloud.cloudName && S.cloud.uploadPreset);
+  const draftCloud = getCloudDraft();
+  const hasCloudConfig = !!(draftCloud.cloudName && draftCloud.uploadPreset);
   const anyProcessing = S.items.some(item => item.processing);
 
   document.getElementById('btnRandom').disabled = !hasCurrent || current.processing;
@@ -1580,6 +1581,22 @@ function syncCloudInputs() {
   if (!cloudNameInput || !uploadPresetInput) return;
   cloudNameInput.value = S.cloud.cloudName;
   uploadPresetInput.value = S.cloud.uploadPreset;
+}
+
+function getCloudDraft() {
+  const cloudNameInput = document.getElementById('cloudNameInput');
+  const uploadPresetInput = document.getElementById('uploadPresetInput');
+  return {
+    cloudName: (cloudNameInput?.value || S.cloud.cloudName || '').trim(),
+    uploadPreset: (uploadPresetInput?.value || S.cloud.uploadPreset || '').trim(),
+  };
+}
+
+function syncCloudDraftFromInputs() {
+  const draft = getCloudDraft();
+  S.cloud.cloudName = draft.cloudName;
+  S.cloud.uploadPreset = draft.uploadPreset;
+  updateActionButtons();
 }
 
 function renderTransferRows(items) {
@@ -1614,11 +1631,11 @@ function renderTransferTab() {
       <div class="transfer-grid">
         <div class="field">
           <label for="cloudNameInput">Cloudinary Cloud Name</label>
-          <input id="cloudNameInput" type="text" placeholder="your-cloud-name">
+          <input id="cloudNameInput" type="text" placeholder="your-cloud-name" oninput="App.syncCloudDraft()">
         </div>
         <div class="field">
           <label for="uploadPresetInput">Unsigned Upload Preset</label>
-          <input id="uploadPresetInput" type="text" placeholder="unsigned-upload-preset">
+          <input id="uploadPresetInput" type="text" placeholder="unsigned-upload-preset" oninput="App.syncCloudDraft()">
         </div>
       </div>
       <div class="transfer-actions">
@@ -1992,6 +2009,10 @@ const App = {
     saveCloudSettingsFromInputs();
     renderCurrentItem();
     showToast('Cloud transfer settings saved.', 'success');
+  },
+
+  syncCloudDraft() {
+    syncCloudDraftFromInputs();
   },
 
   async uploadCurrent() {
