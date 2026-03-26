@@ -1466,9 +1466,29 @@ function getDisplayUrl(item) {
   return item?.modPreviewUrl || item?.modDataUrl || item?.previewUrl || '';
 }
 
+function splitFileName(name) {
+  const safeName = String(name || 'image.jpg').trim() || 'image.jpg';
+  const match = safeName.match(/^(.*?)(\.[^.]+)?$/);
+  const base = (match?.[1] || safeName).trim() || 'image';
+  const ext = (match?.[2] || '').trim();
+  return { base, ext };
+}
+
 function getOutputName(item) {
-  const base = (item?.file?.name || 'image').replace(/\.[^.]+$/, '');
-  return `${base}_metafaked.jpg`;
+  const { base, ext } = splitFileName(item?.file?.name || 'image.jpg');
+  if (/^\.(jpe?g)$/i.test(ext)) return `${base}${ext}`;
+  return `${base}.jpg`;
+}
+
+function getCloudPublicId(item) {
+  const { base } = splitFileName(getOutputName(item));
+  const publicId = base
+    .replace(/\s+/g, '_')
+    .replace(/[?&#\\%<>]/g, '_')
+    .replace(/^\/+|\/+$/g, '')
+    .replace(/_+/g, '_')
+    .trim();
+  return publicId || 'image';
 }
 
 function releaseItemResources(item) {
@@ -1871,6 +1891,8 @@ async function uploadItemToCloud(item) {
     const form = new FormData();
     form.append('file', blob, getOutputName(item));
     form.append('upload_preset', S.cloud.uploadPreset);
+    form.append('public_id', getCloudPublicId(item));
+    form.append('filename_override', getOutputName(item));
 
     const response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(S.cloud.cloudName)}/upload`, {
       method: 'POST',
