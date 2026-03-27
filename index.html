@@ -1079,7 +1079,7 @@ function toJpeg(dataUrl) {
       c.width  = img.naturalWidth;
       c.height = img.naturalHeight;
       c.getContext('2d').drawImage(img, 0, 0);
-      res(c.toDataURL('image/jpeg', 0.96));
+      res(c.toDataURL('image/jpeg', 0.82));
     };
     img.onerror = rej;
     img.src = dataUrl;
@@ -1094,7 +1094,7 @@ function stripViaCanvas(dataUrl) {
       c.width  = img.naturalWidth;
       c.height = img.naturalHeight;
       c.getContext('2d').drawImage(img, 0, 0);
-      res(c.toDataURL('image/jpeg', 0.96));
+      res(c.toDataURL('image/jpeg', 0.82));
     };
     img.onerror = rej;
     img.src = dataUrl;
