@@ -1356,7 +1356,7 @@ function generateFake() {
   };
   if (loc) {
     display.GPSLatitude  = loc.lat;
-    display.GPSLongitude = loc.lon;
+    display.GPSLongitude = -Math.abs(loc.lon);
     display.GPSAltitude  = randInt(0, 400);
   }
 
@@ -1813,7 +1813,6 @@ async function processRandomizeItem(item, options = {}) {
     const bytes = px.dump(fake.piexif);
     let modDataUrl = px.insert(bytes, cleanJpeg);
     modDataUrl = enforceUsGpsOnDataUrl(modDataUrl, fake.loc, fake.display.GPSAltitude);
-    modDataUrl = injectXmpGps(modDataUrl, fake.loc, fake.display.GPSAltitude);
 
     const verified = await readBackExifStrict(modDataUrl);
     item.modBlob = verified.blob;
