@@ -13,7 +13,7 @@
 import exifr from 'https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.esm.js';
 import {
   pick, randInt, clamp, US_GPS_BOUNDS,
-  jitterUsLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate, randInt,
+  jitterUsLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate,
   decToDMS, dmsToDec, dataUrlToBlob,
   fmtBytes, fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
