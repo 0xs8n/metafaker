@@ -59,8 +59,8 @@
       <div class="action-card">
         <div class="action-card-title">Actions</div>
         <label class="option-row">
-          <input type="checkbox" id="chkTodayDate">
-          <span>Keep today's date</span>
+          <input type="checkbox" id="chkKeepDate">
+          <span>Keep original date</span>
         </label>
         <button class="btn btn-primary" id="btnRandom" onclick="App.randomize()">Randomize Current</button>
         <button class="btn btn-secondary" id="btnRandomAll" onclick="App.randomizeAll()">Randomize Entire Batch</button>
@@ -82,9 +82,6 @@
       <div class="meta-tabs">
         <div class="tab active" id="tabOrig" onclick="App.setTab('orig')">
           Current <span class="tab-count" id="countOrig">0</span>
-        </div>
-        <div class="tab" id="tabFake" onclick="App.setTab('fake')">
-          Randomized <span class="tab-count" id="countFake">0</span>
         </div>
         <div class="tab" id="tabCloud" onclick="App.setTab('cloud')">
           Transfer <span class="tab-count" id="countCloud">0</span>

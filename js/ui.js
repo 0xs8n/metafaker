@@ -28,7 +28,7 @@ export const S = {
   items: [],          // Array of image items in the batch queue
   activeId: null,     // ID of the currently selected item
   tab: 'orig',        // Active metadata tab: 'orig' | 'fake' | 'cloud'
-  fieldCounts: { orig: 0, fake: 0, cloud: 0 },
+  fieldCounts: { orig: 0, cloud: 0 },
   cloud: {
     cloudName:    localStorage.getItem('metafaker.cloudName')    || DEFAULT_CLOUD.cloudName,
     uploadPreset: localStorage.getItem('metafaker.uploadPreset') || DEFAULT_CLOUD.uploadPreset,
@@ -150,17 +150,16 @@ function setBadge(type, text) {
 
 function setTabs() {
   document.getElementById('tabOrig').classList.toggle('active', S.tab === 'orig');
-  document.getElementById('tabFake').classList.toggle('active', S.tab === 'fake');
   document.getElementById('tabCloud').classList.toggle('active', S.tab === 'cloud');
 }
 
 function updateTabCounts() {
   const current = getActiveItem();
-  S.fieldCounts.orig = current?.origExif && Object.keys(current.origExif).length ? renderMeta(current.origExif, false).count : 0;
-  S.fieldCounts.fake = current?.fakeExif && Object.keys(current.fakeExif).length ? renderMeta(current.fakeExif, true).count : 0;
+  // Show count from fakeExif if randomized, origExif otherwise
+  const displayExif = current?.fakeExif || current?.origExif;
+  S.fieldCounts.orig = displayExif && Object.keys(displayExif).length ? renderMeta(displayExif, !!current?.fakeExif).count : 0;
   S.fieldCounts.cloud = getUploadedItems().length;
   document.getElementById('countOrig').textContent = S.fieldCounts.orig || '0';
-  document.getElementById('countFake').textContent = S.fieldCounts.fake || '0';
   document.getElementById('countCloud').textContent = S.fieldCounts.cloud || '0';
 }
 
@@ -324,29 +323,26 @@ function renderActiveTab() {
   }
 
   if (S.tab === 'orig') {
-    if (!current.origExif || Object.keys(current.origExif).length === 0) {
+    if (hasProcessedOutput(current) && !current.fakeExif) {
+      // Stripped — metadata was removed
+      body.innerHTML = `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">cleaning_services</span></div><p>Metadata was stripped from this image.</p></div>`;
+      S.fieldCounts.orig = 0;
+      setBadge('cleared', 'Cleared');
+    } else if (current.fakeExif) {
+      // Randomized — show the generated EXIF directly in Current tab
+      const res = renderMeta(current.fakeExif, true);
+      body.innerHTML = res.html;
+      S.fieldCounts.orig = res.count;
+      setBadge('fake', 'Randomized');
+    } else if (!current.origExif || Object.keys(current.origExif).length === 0) {
       body.innerHTML = `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">photo_camera</span></div><p>No EXIF metadata found.</p></div>`;
       S.fieldCounts.orig = 0;
+      setBadge('original', 'Original');
     } else {
       const res = renderMeta(current.origExif, false);
       body.innerHTML = res.html;
       S.fieldCounts.orig = res.count;
-    }
-    setBadge('original', 'Original');
-  } else if (S.tab === 'fake') {
-    if (hasProcessedOutput(current) && !current.fakeExif) {
-      body.innerHTML = `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">cleaning_services</span></div><p>Metadata was stripped from this image.</p></div>`;
-      S.fieldCounts.fake = 0;
-      setBadge('cleared', 'Cleared');
-    } else if (!current.fakeExif) {
-      body.innerHTML = `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">shuffle</span></div><p>Use <strong>Randomize Current</strong> or <strong>Randomize Entire Batch</strong> to generate new EXIF data.</p></div>`;
-      S.fieldCounts.fake = 0;
-      setBadge('none', 'Not set');
-    } else {
-      const res = renderMeta(current.fakeExif, true);
-      body.innerHTML = res.html;
-      S.fieldCounts.fake = res.count;
-      setBadge('fake', 'Randomized');
+      setBadge('original', 'Original');
     }
   } else {
     body.innerHTML = renderTransferTab();
@@ -409,9 +405,18 @@ async function processRandomizeItem(item, options = {}) {
   if (!deferRender) renderCurrentItem();
 
   try {
-    // Read the "keep today's date" checkbox
-    const useTodaysDate = !!document.getElementById('chkTodayDate')?.checked;
-    const fake = generateFake({ useTodaysDate });
+    // If "keep original date" is checked, extract the date from the original EXIF
+    let originalDate = null;
+    if (document.getElementById('chkKeepDate')?.checked && item.origExif) {
+      const raw = item.origExif.DateTimeOriginal || item.origExif.DateTime || item.origExif.CreateDate;
+      if (raw instanceof Date) {
+        originalDate = raw;
+      } else if (typeof raw === 'string') {
+        const parts = raw.match(/(\d{4}):(\d{2}):(\d{2})/);
+        if (parts) originalDate = new Date(parseInt(parts[1]), parseInt(parts[2]) - 1, parseInt(parts[3]));
+      }
+    }
+    const fake = generateFake({ originalDate });
     const canvasResult = await stripViaCanvas(item.previewUrl);
     const cleanJpeg = canvasResult.dataUrl;
 
@@ -572,7 +577,7 @@ export const App = {
   async randomize() {
     const item = getActiveItem();
     if (!item) return;
-    try { await processRandomizeItem(item); S.tab = 'fake'; renderCurrentItem(); }
+    try { await processRandomizeItem(item); renderCurrentItem(); }
     catch (e) { showToast(`Error generating metadata: ${e.message}`, 'error'); }
   },
 
@@ -588,7 +593,6 @@ export const App = {
         if (completed % 4 === 0) { renderCurrentItem(); await new Promise(r => setTimeout(r, 0)); }
       } catch (e) { showToast(`Batch failed for ${item.file.name}: ${e.message}`, 'error'); }
     }
-    S.tab = 'fake';
     renderCurrentItem();
     showToast(`Randomized ${completed} image${completed === 1 ? '' : 's'} in the batch.`, 'success');
   },
@@ -596,7 +600,7 @@ export const App = {
   async clear() {
     const item = getActiveItem();
     if (!item) return;
-    try { await processClearItem(item); S.tab = 'fake'; renderCurrentItem(); }
+    try { await processClearItem(item); renderCurrentItem(); }
     catch (e) { showToast(`Strip failed: ${e.message}`, 'error'); }
   },
 

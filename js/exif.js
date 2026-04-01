@@ -13,7 +13,7 @@
 import exifr from 'https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.esm.js';
 import {
   pick, randInt, clamp, US_GPS_BOUNDS,
-  jitterUsLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate, randomTimeToday,
+  jitterUsLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate, randInt,
   decToDMS, dmsToDec, dataUrlToBlob,
   fmtBytes, fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
@@ -175,7 +175,14 @@ export function generateFake(options = {}) {
   const aperture = pick(cam.apertures);
   const iso      = pick(cam.isos);
   const focal    = pick(cam.focals);
-  const date     = options.useTodaysDate ? randomTimeToday() : randomDate();
+  // If an original date is provided, keep the same calendar date but randomize time
+  let date;
+  if (options.originalDate instanceof Date && !isNaN(options.originalDate)) {
+    const d = options.originalDate;
+    date = new Date(d.getFullYear(), d.getMonth(), d.getDate(), randInt(0, 23), randInt(0, 59), randInt(0, 59));
+  } else {
+    date = randomDate();
+  }
   const flash    = pick([0, 16, 24]);
   const meteringMode = cam.type === 'phone' ? 5 : pick([2, 3, 5]);
   const exposureProgram = cam.type === 'phone' ? 2 : pick([1, 2, 3, 4]);
