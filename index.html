@@ -1363,9 +1363,9 @@ function generateFake() {
   const loc      = useLoc ? jitterUsLocation(pick(LOCATIONS)) : null;
   const lens     = getLensInfo(cam, focal, aperture);
 
-  const orientation = cam.type === 'phone'
-    ? pick([1, 1, 1, 6, 6, 8])
-    : pick([1, 1, 1, 1, 6, 8]);
+  // Always 1 (normal) — canvas output is already correctly oriented,
+  // so writing 6 or 8 would cause browsers to double-rotate.
+  const orientation = 1;
 
   const dpi = cam.type === 'phone' ? 72 : pick([240, 300]);
 
