@@ -13,7 +13,7 @@
 import exifr from 'https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.esm.js';
 import {
   pick, randInt, clamp, US_GPS_BOUNDS,
-  jitterUsLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate,
+  jitterUsLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate, randomTimeToday,
   decToDMS, dmsToDec, dataUrlToBlob,
   fmtBytes, fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
@@ -169,13 +169,13 @@ export async function readBackExifStrict(dataUrl) {
  *
  * Returns { display, piexif, cam, loc }.
  */
-export function generateFake() {
+export function generateFake(options = {}) {
   const cam      = pick(CAMERAS);
   const shutter  = pick(cam.shutters);
   const aperture = pick(cam.apertures);
   const iso      = pick(cam.isos);
   const focal    = pick(cam.focals);
-  const date     = randomDate();
+  const date     = options.useTodaysDate ? randomTimeToday() : randomDate();
   const flash    = pick([0, 16, 24]);
   const meteringMode = cam.type === 'phone' ? 5 : pick([2, 3, 5]);
   const exposureProgram = cam.type === 'phone' ? 2 : pick([1, 2, 3, 4]);

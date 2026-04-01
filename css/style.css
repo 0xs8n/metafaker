@@ -341,6 +341,21 @@
       color: var(--text-muted);
       margin-bottom: 2px;
     }
+    .option-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      padding: 2px 0 6px;
+      color: var(--text);
+    }
+    .option-row input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
 
     /* --- Buttons --- */
     .btn {

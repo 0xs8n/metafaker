@@ -67,6 +67,15 @@ export function randomDate() {
   return new Date(now - Math.random() * 730 * 864e5);
 }
 
+/** Generate today's date with a random time (for "keep today's date" option). */
+export function randomTimeToday() {
+  const now = new Date();
+  return new Date(
+    now.getFullYear(), now.getMonth(), now.getDate(),
+    randInt(0, 23), randInt(0, 59), randInt(0, 59),
+  );
+}
+
 // ── GPS Coordinate Conversion ────────────────────────────────────
 
 /** Convert decimal degrees to EXIF DMS rational array: [[d,1],[m,1],[s*1000,1000]] */

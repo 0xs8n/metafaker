@@ -409,8 +409,9 @@ async function processRandomizeItem(item, options = {}) {
   if (!deferRender) renderCurrentItem();
 
   try {
-    releaseProcessedResources(item);
-    const fake = generateFake();
+    // Read the "keep today's date" checkbox
+    const useTodaysDate = !!document.getElementById('chkTodayDate')?.checked;
+    const fake = generateFake({ useTodaysDate });
     const canvasResult = await stripViaCanvas(item.previewUrl);
     const cleanJpeg = canvasResult.dataUrl;
 
@@ -428,6 +429,11 @@ async function processRandomizeItem(item, options = {}) {
 
     // Verify the EXIF was written correctly
     const verified = await readBackExifStrict(modDataUrl);
+
+    // Release old resources AFTER new output is ready — prevents the preview
+    // from falling back to the original image (which may have EXIF orientation
+    // that causes a visible rotation flash).
+    releaseProcessedResources(item);
     item.modBlob = verified.blob;
     item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL) ? URL.createObjectURL(verified.blob) : modDataUrl;
     item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
@@ -467,9 +473,11 @@ async function processClearItem(item, options = {}) {
   if (!deferRender) renderCurrentItem();
 
   try {
-    releaseProcessedResources(item);
     const canvasResult = await stripViaCanvas(item.previewUrl);
-    item.modBlob = dataUrlToBlob(canvasResult.dataUrl);
+    const newBlob = dataUrlToBlob(canvasResult.dataUrl);
+    // Release old resources AFTER new output is ready (prevents rotation flash)
+    releaseProcessedResources(item);
+    item.modBlob = newBlob;
     item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL) ? URL.createObjectURL(item.modBlob) : canvasResult.dataUrl;
     item.modDataUrl = item.modPreviewUrl ? null : canvasResult.dataUrl;
     item.fakeExif = null; item.fakePiexif = null;
