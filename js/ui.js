@@ -144,6 +144,7 @@ function showToast(msg, type = 'info') {
 
 function setBadge(type, text) {
   const b = document.getElementById('metaBadge');
+  if (!b) return;
   b.className = `badge badge-${type}`;
   b.textContent = text;
 }
@@ -159,8 +160,10 @@ function updateTabCounts() {
   const displayExif = current?.fakeExif || current?.origExif;
   S.fieldCounts.orig = displayExif && Object.keys(displayExif).length ? renderMeta(displayExif, !!current?.fakeExif).count : 0;
   S.fieldCounts.cloud = getUploadedItems().length;
-  document.getElementById('countOrig').textContent = S.fieldCounts.orig || '0';
-  document.getElementById('countCloud').textContent = S.fieldCounts.cloud || '0';
+  const origEl = document.getElementById('countOrig');
+  const cloudEl = document.getElementById('countCloud');
+  if (origEl) origEl.textContent = S.fieldCounts.orig || '0';
+  if (cloudEl) cloudEl.textContent = S.fieldCounts.cloud || '0';
 }
 
 /** Render the batch thumbnail strip at the top. */
