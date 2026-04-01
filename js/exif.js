@@ -375,7 +375,7 @@ export function fmtVal(key, v) {
  */
 export function renderMeta(exifObj, isFake = false) {
   if (!exifObj || Object.keys(exifObj).length === 0) {
-    return `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">photo_camera</span></div><p>No EXIF metadata found in this image.</p></div>`;
+    return { html: `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">photo_camera</span></div><p>No EXIF metadata found in this image.</p></div>`, count: 0 };
   }
 
   let html = '';
@@ -419,7 +419,7 @@ export function renderMeta(exifObj, isFake = false) {
   }
 
   if (!html) {
-    html = `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">photo_camera</span></div><p>No recognized EXIF fields found.</p></div>`;
+    return { html: `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">photo_camera</span></div><p>No recognized EXIF fields found.</p></div>`, count: 0 };
   }
 
   return { html, count };
