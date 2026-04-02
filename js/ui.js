@@ -86,16 +86,57 @@ function splitFileName(name) {
 }
 
 /**
- * Generate a Telegram-style output filename: photo_YYYY-MM-DD_HH-MM-SS.jpg
- * Uses today's real date with a random time, matching the format Telegram
- * uses when saving photos (e.g. photo_2026-03-15_16-29-58.jpg).
+ * Generate a camera-appropriate filename using today's date and random time.
+ * Matches the real naming convention of the faked camera model:
+ *   Apple:    IMG_NNNN.JPG
+ *   Samsung:  YYYYMMDD_HHMMSS.jpg
+ *   Google:   PXL_YYYYMMDD_HHMMSSmmm.jpg
+ *   Canon:    IMG_NNNN.JPG  (same as iPhone — Canon uses this format)
+ *   Nikon:    DSC_NNNN.JPG
+ *   Sony:     DSC_NNNN.JPG  (Sony uses DSC prefix)
+ *   Fujifilm: DSCF_NNNN.JPG
+ * Falls back to IMG_YYYYMMDD_HHMMSS.jpg if no camera info available.
  */
-function getOutputName() {
+function getOutputName(item) {
   const now = new Date();
   const p = n => String(n).padStart(2, '0');
-  const date = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
-  const time = `${p(Math.floor(Math.random() * 24))}-${p(Math.floor(Math.random() * 60))}-${p(Math.floor(Math.random() * 60))}`;
-  return `photo_${date}_${time}.jpg`;
+  const YYYY = now.getFullYear();
+  const MM = p(now.getMonth() + 1);
+  const DD = p(now.getDate());
+  const hh = p(Math.floor(Math.random() * 24));
+  const mm = p(Math.floor(Math.random() * 60));
+  const ss = p(Math.floor(Math.random() * 60));
+  const ms = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+  const seq = Math.floor(Math.random() * 9000) + 1000; // 4-digit sequence 1000-9999
+
+  const make = item?.fakeCamera?.make || '';
+
+  switch (make) {
+    case 'Apple':
+      // iPhones: IMG_NNNN.JPG (uppercase extension, 4-digit sequence)
+      return `IMG_${seq}.JPG`;
+    case 'Samsung':
+      // Samsung: YYYYMMDD_HHMMSS.jpg
+      return `${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+    case 'Google':
+      // Pixel: PXL_YYYYMMDD_HHMMSSmmm.jpg (with milliseconds)
+      return `PXL_${YYYY}${MM}${DD}_${hh}${mm}${ss}${ms}.jpg`;
+    case 'Canon':
+      // Canon: IMG_NNNN.JPG
+      return `IMG_${seq}.JPG`;
+    case 'Nikon':
+      // Nikon: DSC_NNNN.JPG
+      return `DSC_${seq}.JPG`;
+    case 'Sony':
+      // Sony: DSC0NNNN.JPG
+      return `DSC0${seq}.JPG`;
+    case 'FUJIFILM':
+      // Fujifilm: DSCF_NNNN.JPG
+      return `DSCF${seq}.JPG`;
+    default:
+      // Generic Android / fallback
+      return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+  }
 }
 
 /** Generate a Cloudinary-safe public ID from the filename. */
