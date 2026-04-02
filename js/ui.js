@@ -85,11 +85,17 @@ function splitFileName(name) {
   return { base, ext };
 }
 
-/** Get the output filename, preserving original name but ensuring .jpg extension. */
-function getOutputName(item) {
-  const { base, ext } = splitFileName(item?.file?.name || 'image.jpg');
-  if (/^\.(jpe?g)$/i.test(ext)) return `${base}${ext}`;
-  return `${base}.jpg`;
+/**
+ * Generate a Telegram-style output filename: photo_YYYY-MM-DD_HH-MM-SS.jpg
+ * Uses today's real date with a random time, matching the format Telegram
+ * uses when saving photos (e.g. photo_2026-03-15_16-29-58.jpg).
+ */
+function getOutputName() {
+  const now = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const date = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+  const time = `${p(Math.floor(Math.random() * 24))}-${p(Math.floor(Math.random() * 60))}-${p(Math.floor(Math.random() * 60))}`;
+  return `photo_${date}_${time}.jpg`;
 }
 
 /** Generate a Cloudinary-safe public ID from the filename. */
