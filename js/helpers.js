@@ -167,48 +167,89 @@ export function addPixelNoise(ctx, w, h) {
   ctx.putImageData(imageData, 0, 0);
 }
 
-/** Re-encode an image data URL as JPEG via canvas. Returns { dataUrl, width, height }. */
+/**
+ * Core anti-forensic canvas pipeline used by both toJpeg and stripViaCanvas.
+ * Applies five layers of transformation to defeat forensic analysis:
+ *
+ *   1. Random crop (1-6px per edge) — shifts the pixel grid so PRNU sensor
+ *      noise patterns no longer align between images from the same device.
+ *   2. Micro-rotation (±0.3°) — forces sub-pixel interpolation on every pixel,
+ *      destroying fixed-pattern noise. Imperceptible to the eye.
+ *   3. Random resize — varies output dimensions to prevent size-based clustering.
+ *   4. Pixel noise (±1 per RGB) — breaks canvas/GPU rendering fingerprints.
+ *   5. Random JPEG quality — varies quantization tables between images.
+ *
+ * Returns { dataUrl, width, height }.
+ */
+function antiForensicRender(img) {
+  // 1. Random crop: remove 1-6px from each edge
+  const cropT = randInt(1, 6);
+  const cropB = randInt(1, 6);
+  const cropL = randInt(1, 6);
+  const cropR = randInt(1, 6);
+  const srcX = cropL;
+  const srcY = cropT;
+  const srcW = img.naturalWidth - cropL - cropR;
+  const srcH = img.naturalHeight - cropT - cropB;
+
+  // Skip if image is too small to crop safely
+  if (srcW < 100 || srcH < 100) {
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    return { dataUrl: c.toDataURL('image/jpeg', randomJpegQuality()), width: c.width, height: c.height };
+  }
+
+  // 3. Random resize (applied to cropped dimensions)
+  const maxEdge = randomMaxEdge();
+  const size = getExportDimensions(srcW, srcH, maxEdge);
+
+  const c = document.createElement('canvas');
+  c.width = size.width;
+  c.height = size.height;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  // 2. Micro-rotation: ±0.3° — forces interpolation on every pixel,
+  //    destroying PRNU sensor noise patterns. Scale up 1% to cover
+  //    tiny corner gaps left by the rotation.
+  const angle = (Math.random() - 0.5) * 0.6 * (Math.PI / 180);
+  ctx.translate(size.width / 2, size.height / 2);
+  ctx.rotate(angle);
+  ctx.scale(1.01, 1.01);
+  ctx.translate(-size.width / 2, -size.height / 2);
+
+  // Draw cropped + rotated + resized
+  ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, size.width, size.height);
+
+  // 4. Pixel noise
+  addPixelNoise(ctx, size.width, size.height);
+
+  // 5. Random JPEG quality
+  return { dataUrl: c.toDataURL('image/jpeg', randomJpegQuality()), width: size.width, height: size.height };
+}
+
+/** Re-encode an image data URL as JPEG via the anti-forensic pipeline. */
 export function toJpeg(dataUrl) {
   return new Promise((res, rej) => {
     const img = new Image();
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      const maxEdge = randomMaxEdge();
-      const size = getExportDimensions(img.naturalWidth, img.naturalHeight, maxEdge);
-      c.width = size.width;
-      c.height = size.height;
-      const ctx = c.getContext('2d');
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, 0, 0, size.width, size.height);
-      addPixelNoise(ctx, size.width, size.height);
-      res({ dataUrl: c.toDataURL('image/jpeg', randomJpegQuality()), width: size.width, height: size.height });
-    };
+    img.onload = () => res(antiForensicRender(img));
     img.onerror = rej;
     img.src = dataUrl;
   });
 }
 
 /**
- * Strip all metadata from an image by re-drawing through a canvas.
+ * Strip all metadata and apply anti-forensic transforms.
  * Returns { dataUrl, width, height } — a clean JPEG with no EXIF.
  */
 export function stripViaCanvas(dataUrl) {
   return new Promise((res, rej) => {
     const img = new Image();
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      const maxEdge = randomMaxEdge();
-      const size = getExportDimensions(img.naturalWidth, img.naturalHeight, maxEdge);
-      c.width = size.width;
-      c.height = size.height;
-      const ctx = c.getContext('2d');
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, 0, 0, size.width, size.height);
-      addPixelNoise(ctx, size.width, size.height);
-      res({ dataUrl: c.toDataURL('image/jpeg', randomJpegQuality()), width: size.width, height: size.height });
-    };
+    img.onload = () => res(antiForensicRender(img));
     img.onerror = rej;
     img.src = dataUrl;
   });
