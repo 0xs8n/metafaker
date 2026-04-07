@@ -264,11 +264,6 @@
       border-color: rgba(245,158,11,0.3);
       background: rgba(245,158,11,0.06);
     }
-    .batch-status-tag.uploaded {
-      color: var(--info);
-      border-color: rgba(59,130,246,0.3);
-      background: rgba(59,130,246,0.06);
-    }
     .batch-status-tag.error {
       color: var(--danger);
       border-color: rgba(239,68,68,0.3);
@@ -526,101 +521,6 @@
       margin-left: 6px;
     }
 
-    .transfer-card {
-      padding: 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-    .transfer-card h3 { font-size: 15px; font-weight: 700; }
-    .transfer-card p {
-      color: var(--text-muted);
-      font-size: 13px;
-      line-height: 1.5;
-    }
-    .transfer-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-    }
-    .field label {
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--text-muted);
-    }
-    .field input {
-      width: 100%;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--surface2);
-      color: var(--text);
-      padding: 10px 12px;
-      font: inherit;
-      font-size: 13px;
-    }
-    .field input:focus {
-      outline: none;
-      border-color: var(--accent);
-      box-shadow: 0 0 0 2px rgba(37,99,235,0.1);
-    }
-    [data-theme="dark"] .field input:focus {
-      box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
-    }
-    .transfer-actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .transfer-actions .btn { width: auto; min-width: 160px; }
-    .transfer-note {
-      padding: 10px 14px;
-      border-radius: 8px;
-      background: rgba(59,130,246,0.06);
-      border: 1px solid rgba(59,130,246,0.15);
-      color: var(--accent);
-      font-size: 12px;
-      line-height: 1.5;
-    }
-    .transfer-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .transfer-row {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      background: var(--surface2);
-      padding: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    .transfer-row-main {
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-      flex: 1;
-    }
-    .transfer-row-name { font-size: 13px; font-weight: 600; word-break: break-word; }
-    .transfer-row-url {
-      color: var(--info);
-      text-decoration: none;
-      word-break: break-all;
-      font-size: 12px;
-    }
-    .transfer-row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .transfer-row-actions .btn { width: auto; min-width: 100px; padding-inline: 12px; }
-
     /* --- Responsive --- */
     @media (max-width: 800px) {
       body { overscroll-behavior-y: contain; }
@@ -639,8 +539,6 @@
       .meta-body { height: auto; min-height: 300px; }
       .meta-section { padding: 12px; }
       .meta-row { grid-template-columns: 1fr; gap: 2px; }
-      .transfer-grid { grid-template-columns: 1fr; }
-      .transfer-actions .btn, .transfer-row-actions .btn { width: 100%; min-width: 0; }
       #toast { right: 12px; left: 12px; bottom: 14px; max-width: none; }
     }
 

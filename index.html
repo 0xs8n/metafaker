@@ -67,8 +67,6 @@
         <button class="btn btn-danger" id="btnClear" onclick="App.clear()">Strip Current Metadata</button>
         <button class="btn btn-success" id="btnDownload" disabled onclick="App.download()">Download Current</button>
         <button class="btn btn-success" id="btnDownloadAll" disabled onclick="App.downloadAll()">Download Entire Batch</button>
-        <button class="btn btn-secondary" id="btnUploadCurrent" disabled onclick="App.uploadCurrent()">Upload Current To Cloud</button>
-        <button class="btn btn-secondary" id="btnUploadAll" disabled onclick="App.uploadAll()">Upload Batch To Cloud</button>
         <button class="btn btn-secondary" onclick="App.reset()">Clear Queue</button>
       </div>
     </div>
@@ -83,9 +81,6 @@
         <div class="tab active" id="tabOrig" onclick="App.setTab('orig')">
           Current <span class="tab-count" id="countOrig">0</span>
         </div>
-        <div class="tab" id="tabCloud" onclick="App.setTab('cloud')">
-          Transfer <span class="tab-count" id="countCloud">0</span>
-        </div>
       </div>
       <div class="meta-body" id="metaBody">
         <div class="no-meta">
@@ -98,7 +93,7 @@
 </main>
 
 <footer>
-  MetaFaker &mdash; 100% client-side, nothing uploaded. Open source on <a href="https://github.com/0xs8n/metafaker" target="_blank" rel="noopener">GitHub</a>.
+  MetaFaker &mdash; 100% client-side processing. Open source on <a href="https://github.com/0xs8n/metafaker" target="_blank" rel="noopener">GitHub</a>.
 </footer>
 
 <div id="toast"></div>
