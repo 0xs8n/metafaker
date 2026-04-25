@@ -67,11 +67,34 @@ function splitFileName(name) {
   return { base, ext };
 }
 
+/**
+ * Camera-appropriate filename matching the faked camera model.
+ * Uses today's actual date with random time for date-based formats.
+ */
 function getOutputName(item) {
-  const { base, ext } = splitFileName(item?.file?.name || 'image.jpg');
-  const normalizedExt = ext.toLowerCase();
-  if (normalizedExt === '.jpg' || normalizedExt === '.jpeg') return `${base}${ext || '.jpg'}`;
-  return `${base}.jpg`;
+  const now = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const YYYY = now.getFullYear();
+  const MM = p(now.getMonth() + 1);
+  const DD = p(now.getDate());
+  const hh = p(Math.floor(Math.random() * 24));
+  const mm = p(Math.floor(Math.random() * 60));
+  const ss = p(Math.floor(Math.random() * 60));
+  const ms = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+  const seq = Math.floor(Math.random() * 9000) + 1000;
+
+  const make = item?.fakeCamera?.make || '';
+
+  switch (make) {
+    case 'Apple':    return `IMG_${seq}.JPG`;
+    case 'Samsung':  return `${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+    case 'Google':   return `PXL_${YYYY}${MM}${DD}_${hh}${mm}${ss}${ms}.jpg`;
+    case 'Canon':    return `IMG_${seq}.JPG`;
+    case 'Nikon':    return `DSC_${seq}.JPG`;
+    case 'Sony':     return `DSC0${seq}.JPG`;
+    case 'FUJIFILM': return `DSCF${seq}.JPG`;
+    default:         return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+  }
 }
 
 function releaseItemResources(item) {
@@ -272,8 +295,14 @@ function downloadBlob(blob, name) {
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setTimeout(() => {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 1000);
 }
 
 async function processRandomizeItem(item, options = {}) {
