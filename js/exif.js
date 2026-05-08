@@ -12,8 +12,8 @@
 
 import exifr from 'https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.esm.js';
 import {
-  pick, randInt, clamp, US_GPS_BOUNDS,
-  jitterUsLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate,
+  pick, randInt, clamp, cryptoRandInt,
+  jitterLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate,
   decToDMS, dmsToDec, dataUrlToBlob,
   fmtBytes, fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
@@ -22,23 +22,26 @@ import { CAMERAS, LOCATIONS, getLensInfo } from './data.js';
 // ── GPS Enforcement ──────────────────────────────────────────────
 
 /**
- * Re-write GPS tags on a data URL to ensure valid US coordinates.
+ * Re-write GPS tags on a data URL to ensure valid global coordinates.
  * This is a second pass after piexif.insert to fix any GPS inconsistencies.
+ * Handles both hemispheres: lat can be N/S, lon can be E/W.
  */
-export function enforceUsGpsOnDataUrl(dataUrl, loc, altitude = 0) {
+export function enforceValidGps(dataUrl, loc, altitude = 0) {
   if (!loc) return dataUrl;
   const px = window.piexif;
   const exifObj = px.load(dataUrl);
   exifObj["GPS"] = exifObj["GPS"] || {};
 
-  const safeLat = clamp(Math.abs(loc.lat), US_GPS_BOUNDS.minLat, US_GPS_BOUNDS.maxLat);
-  const safeLon = clamp(Math.abs(loc.lon), Math.abs(US_GPS_BOUNDS.maxLon), Math.abs(US_GPS_BOUNDS.minLon));
+  const safeLat = clamp(Math.abs(loc.lat), 0, 89.99);
+  const safeLon = clamp(Math.abs(loc.lon), 0, 179.99);
+  const latRef  = loc.lat >= 0 ? "N" : "S";
+  const lonRef  = loc.lon >= 0 ? "E" : "W";
   const safeAlt = Math.max(0, Math.round(Number(altitude) || 0));
 
   exifObj["GPS"][px.GPSIFD.GPSVersionID]    = [2, 3, 0, 0];
-  exifObj["GPS"][px.GPSIFD.GPSLatitudeRef]  = "N";
+  exifObj["GPS"][px.GPSIFD.GPSLatitudeRef]  = latRef;
   exifObj["GPS"][px.GPSIFD.GPSLatitude]     = decToDMS(safeLat);
-  exifObj["GPS"][px.GPSIFD.GPSLongitudeRef] = "W";
+  exifObj["GPS"][px.GPSIFD.GPSLongitudeRef] = lonRef;
   exifObj["GPS"][px.GPSIFD.GPSLongitude]    = decToDMS(safeLon);
   exifObj["GPS"][px.GPSIFD.GPSAltitudeRef]  = 0;
   exifObj["GPS"][px.GPSIFD.GPSAltitude]     = [safeAlt, 1];
@@ -175,7 +178,7 @@ export function generateFake(options = {}) {
   const aperture = pick(cam.apertures);
   const iso      = pick(cam.isos);
   const focal    = pick(cam.focals);
-  // If an original date is provided, keep the same calendar date but randomize time
+
   let date;
   if (options.originalDate instanceof Date && !isNaN(options.originalDate)) {
     const d = options.originalDate;
@@ -183,26 +186,33 @@ export function generateFake(options = {}) {
   } else {
     date = randomDate();
   }
-  const flash    = pick([0, 16, 24]);
-  const meteringMode = cam.type === 'phone' ? 5 : pick([2, 3, 5]);
+
+  const flash           = pick([0, 16, 24]);
+  const meteringMode    = cam.type === 'phone' ? 5 : pick([2, 3, 5]);
   const exposureProgram = cam.type === 'phone' ? 2 : pick([1, 2, 3, 4]);
-  const whiteBalance = pick([0, 0, 0, 1]); // mostly auto
-  const loc = jitterUsLocation(pick(LOCATIONS));
-  const lens = getLensInfo(cam, focal, aperture);
+  const whiteBalance    = pick([0, 0, 0, 1]);
+  const loc             = jitterLocation(pick(LOCATIONS));
+  const lens            = getLensInfo(cam, focal, aperture);
+  const orientation     = 1;
+  const exposureMode    = exposureProgram === 1 ? 1 : 0;
 
-  // Canvas output is already correctly oriented, so always write 1 (normal)
-  const orientation = 1;
+  // Per-image randomised fields — formerly all fixed constants (forensic red flags)
+  const dpi             = cam.type === 'phone' ? pick([72, 72, 72, 96]) : pick([240, 240, 300, 350, 360]);
+  const subSec          = String(cryptoRandInt(10, 999)).padStart(3, '0');
+  const contrast        = pick([0, 0, 0, 1, 2]);
+  const saturation      = pick([0, 0, 0, 1, 2]);
+  const sharpness       = pick([0, 0, 0, 1, 2]);
+  const customRendered  = cam.type === 'phone' ? pick([0, 0, 6]) : 0;    // 6 = HDR
+  const digitalZoom     = cam.type === 'phone' ? pick([[100,100],[120,100],[150,100],[200,100]]) : [100, 100];
+  const colorSpace      = cam.type === 'phone' ? pick([1, 1, 1, 65535]) : 1;
+  const sensingMethod   = cam.type === 'phone' ? pick([1, 2, 2, 2]) : 2;
+  const flashpixVersion = pick(["0100", "0101"]);
 
-  // DPI: phones use 72, DSLRs use 240 or 300
-  const dpi = cam.type === 'phone' ? 72 : pick([240, 300]);
+  // GPS direction refs
+  const latRef = loc.lat >= 0 ? "N" : "S";
+  const lonRef = loc.lon >= 0 ? "E" : "W";
 
-  // Sub-second precision — real cameras always write this
-  const subSec = String(randInt(10, 999)).padStart(3, '0');
-
-  // Exposure mode: manual if program is manual, auto otherwise
-  const exposureMode = exposureProgram === 1 ? 1 : 0;
-
-  // ── Display object (flat key-value for UI rendering)
+  // ── Display object
   const display = {
     Make: cam.make, Model: cam.model, Software: cam.sw,
     LensMake: lens.make, LensModel: lens.model,
@@ -211,18 +221,17 @@ export function generateFake(options = {}) {
     FocalLength: focal, FocalLengthIn35mmFormat: focal,
     Flash: flash, MeteringMode: meteringMode,
     ExposureProgram: exposureProgram, ExposureMode: exposureMode,
-    WhiteBalance: whiteBalance, SceneCaptureType: 0, SensingMethod: 2,
-    Orientation: orientation, ColorSpace: 1,
+    WhiteBalance: whiteBalance, SceneCaptureType: 0, SensingMethod: sensingMethod,
+    Orientation: orientation, ColorSpace: colorSpace,
     XResolution: dpi, YResolution: dpi,
     GPSLatitude: loc.lat, GPSLongitude: loc.lon, GPSAltitude: randInt(0, 400),
   };
 
-  // ── Piexif write object (structured for binary EXIF injection)
+  // ── Piexif write object
   const px = window.piexif;
   const dateStr = fmtDate(date);
   const p = { "0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {} };
 
-  // 0th IFD — basic image info
   p["0th"][px.ImageIFD.Make]           = cam.make;
   p["0th"][px.ImageIFD.Model]          = cam.model;
   p["0th"][px.ImageIFD.Software]       = cam.sw;
@@ -232,7 +241,6 @@ export function generateFake(options = {}) {
   p["0th"][px.ImageIFD.ResolutionUnit] = 2;
   p["0th"][px.ImageIFD.Orientation]    = orientation;
 
-  // Exif IFD — capture settings
   p["Exif"][px.ExifIFD.ExposureTime]          = shutter;
   p["Exif"][px.ExifIFD.FNumber]               = [Math.round(aperture * 100), 100];
   p["Exif"][px.ExifIFD.ISOSpeedRatings]       = iso;
@@ -244,44 +252,39 @@ export function generateFake(options = {}) {
   p["Exif"][px.ExifIFD.MeteringMode]          = meteringMode;
   p["Exif"][px.ExifIFD.ExposureProgram]       = exposureProgram;
   p["Exif"][px.ExifIFD.WhiteBalance]          = whiteBalance;
-  p["Exif"][px.ExifIFD.ColorSpace]            = 1; // sRGB
+  p["Exif"][px.ExifIFD.ColorSpace]            = colorSpace;
 
-  // Exposure bias: mostly 0, sometimes +/- 0.3 or 0.7 EV
   const biasChoices = [[0,1],[0,1],[0,1],[1,3],[-1,3],[2,3],[-2,3],[1,1],[-1,1]];
   p["Exif"][px.ExifIFD.ExposureBiasValue] = pick(biasChoices);
 
-  // APEX brightness/speed/aperture values (derived from settings)
   const et = shutter[0] / shutter[1];
   p["Exif"][px.ExifIFD.ShutterSpeedValue] = [Math.round(-Math.log2(et) * 100), 100];
   p["Exif"][px.ExifIFD.ApertureValue]     = [Math.round(2 * Math.log2(aperture) * 100), 100];
   p["Exif"][px.ExifIFD.MaxApertureValue]  = [Math.round(2 * Math.log2(Math.min(...cam.apertures)) * 100), 100];
 
-  // Standard tags that real cameras always write (absence is a forensic red flag)
   p["Exif"][px.ExifIFD.ExifVersion]             = "0232";
-  p["Exif"][px.ExifIFD.FlashpixVersion]         = "0100";
-  p["Exif"][px.ExifIFD.ComponentsConfiguration] = "\x01\x02\x03\x00"; // YCbCr
-  p["Exif"][px.ExifIFD.FileSource]              = "\x03";              // digital still camera
-  p["Exif"][px.ExifIFD.SceneType]               = "\x01";              // directly photographed
-  p["Exif"][px.ExifIFD.CustomRendered]          = 0;                   // normal processing
+  p["Exif"][px.ExifIFD.FlashpixVersion]         = flashpixVersion;
+  p["Exif"][px.ExifIFD.ComponentsConfiguration] = "\x01\x02\x03\x00";
+  p["Exif"][px.ExifIFD.FileSource]              = "\x03";
+  p["Exif"][px.ExifIFD.SceneType]               = "\x01";
+  p["Exif"][px.ExifIFD.CustomRendered]          = customRendered;
   p["Exif"][px.ExifIFD.ExposureMode]            = exposureMode;
-  p["Exif"][px.ExifIFD.SceneCaptureType]        = 0;                   // standard
-  p["Exif"][px.ExifIFD.SensingMethod]           = 2;                   // one-chip color area sensor
+  p["Exif"][px.ExifIFD.SceneCaptureType]        = 0;
+  p["Exif"][px.ExifIFD.SensingMethod]           = sensingMethod;
   p["Exif"][px.ExifIFD.SubSecTime]              = subSec;
   p["Exif"][px.ExifIFD.SubSecTimeOriginal]      = subSec;
   p["Exif"][px.ExifIFD.SubSecTimeDigitized]     = subSec;
-  p["Exif"][px.ExifIFD.DigitalZoomRatio]        = [100, 100];          // 1.0x (no zoom)
-  p["Exif"][px.ExifIFD.Contrast]                = 0;                   // normal
-  p["Exif"][px.ExifIFD.Saturation]              = 0;                   // normal
-  p["Exif"][px.ExifIFD.Sharpness]               = 0;                   // normal
+  p["Exif"][px.ExifIFD.DigitalZoomRatio]        = digitalZoom;
+  p["Exif"][px.ExifIFD.Contrast]                = contrast;
+  p["Exif"][px.ExifIFD.Saturation]              = saturation;
+  p["Exif"][px.ExifIFD.Sharpness]               = sharpness;
   p["Exif"][px.ExifIFD.LensMake]                = lens.make;
   p["Exif"][px.ExifIFD.LensModel]               = lens.model;
-  // PixelXDimension / PixelYDimension are set later in processRandomizeItem
-  // after the canvas render determines actual output dimensions.
+  // PixelXDimension / PixelYDimension set later after canvas render
 
-  // GPS IFD — US location
-  p["GPS"][px.GPSIFD.GPSLatitudeRef]  = "N";
-  p["GPS"][px.GPSIFD.GPSLatitude]     = decToDMS(loc.lat);
-  p["GPS"][px.GPSIFD.GPSLongitudeRef] = "W";
+  p["GPS"][px.GPSIFD.GPSLatitudeRef]  = latRef;
+  p["GPS"][px.GPSIFD.GPSLatitude]     = decToDMS(Math.abs(loc.lat));
+  p["GPS"][px.GPSIFD.GPSLongitudeRef] = lonRef;
   p["GPS"][px.GPSIFD.GPSLongitude]    = decToDMS(Math.abs(loc.lon));
   p["GPS"][px.GPSIFD.GPSAltitudeRef]  = 0;
   p["GPS"][px.GPSIFD.GPSAltitude]     = [display.GPSAltitude, 1];
@@ -289,7 +292,7 @@ export function generateFake(options = {}) {
   p["GPS"][px.GPSIFD.GPSTimeStamp]    = gpsTimeStamp(date);
   p["GPS"][px.GPSIFD.GPSMapDatum]     = "WGS-84";
 
-  return { display, piexif: p, cam, loc };
+  return { display, piexif: p, cam, loc, iso };
 }
 
 // ── Metadata Display ─────────────────────────────────────────────

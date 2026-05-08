@@ -6,11 +6,11 @@
  */
 
 import {
-  fmtBytes, escapeHtml, makeId,
+  fmtBytes, escapeHtml, makeId, cryptoRandInt,
   dataUrlToBlob, stripViaCanvas,
 } from './helpers.js';
 import {
-  generateFake, enforceUsGpsOnDataUrl, readBackExifStrict,
+  generateFake, enforceValidGps, readBackExifStrict,
   parseFileExif, renderMeta,
 } from './exif.js';
 
@@ -81,7 +81,7 @@ function getOutputName(item) {
   const mm = p(Math.floor(Math.random() * 60));
   const ss = p(Math.floor(Math.random() * 60));
   const ms = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
-  const seq = Math.floor(Math.random() * 9000) + 1000;
+  const seq = cryptoRandInt(1000, 9999);
 
   const make = item?.fakeCamera?.make || '';
 
@@ -324,7 +324,8 @@ async function processRandomizeItem(item, options = {}) {
     }
 
     const fake = generateFake({ originalDate });
-    const canvasResult = await stripViaCanvas(item.previewUrl);
+    const camWithIso = { ...fake.cam, iso: fake.display.ISO };
+    const canvasResult = await stripViaCanvas(item.previewUrl, camWithIso);
     const cleanJpeg = canvasResult.dataUrl;
 
     const px = window.piexif;
@@ -335,7 +336,7 @@ async function processRandomizeItem(item, options = {}) {
 
     const bytes = px.dump(fake.piexif);
     let modDataUrl = px.insert(bytes, cleanJpeg);
-    modDataUrl = enforceUsGpsOnDataUrl(modDataUrl, fake.loc, fake.display.GPSAltitude);
+    modDataUrl = enforceValidGps(modDataUrl, fake.loc, fake.display.GPSAltitude);
 
     const verified = await readBackExifStrict(modDataUrl);
 
@@ -347,15 +348,15 @@ async function processRandomizeItem(item, options = {}) {
     item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
     item.fakeExif = {
       ...verified.exif,
-      GPSLatitude: fake.loc.lat,
-      GPSLongitude: -Math.abs(fake.loc.lon),
-      GPSAltitude: fake.display.GPSAltitude,
-      GPSLatitudeRef: 'N',
-      GPSLongitudeRef: 'W',
+      GPSLatitude:    fake.loc.lat,
+      GPSLongitude:   fake.loc.lon,
+      GPSAltitude:    fake.display.GPSAltitude,
+      GPSLatitudeRef: fake.loc.lat >= 0 ? 'N' : 'S',
+      GPSLongitudeRef: fake.loc.lon >= 0 ? 'E' : 'W',
     };
     item.fakePiexif = fake.piexif;
     item.fakeCamera = fake.cam;
-    item.fakeLocation = { ...fake.loc, lon: -Math.abs(fake.loc.lon) };
+    item.fakeLocation = { ...fake.loc };
 
     const locTxt = item.fakeLocation?.city ? ` | ${item.fakeLocation.city}` : '';
     if (verified.warning) {

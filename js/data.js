@@ -1,5 +1,5 @@
 /**
- * data.js — Static databases for camera profiles, US locations, and lens models.
+ * data.js — Static databases for camera profiles, global locations, and lens models.
  *
  * Each camera entry includes realistic specs (apertures, ISOs, shutter speeds,
  * focal lengths) so that generated EXIF is internally consistent. Lens data
@@ -18,13 +18,19 @@ export const CAMERAS = [
   { make:"Apple",    model:"iPhone 14 Pro Max",       sw:"iOS 16.7.8",               type:"phone", apertures:[1.78,2.2],                isos:[25,32,50,64,100,125,200,400,640,1600,2500],                                 shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],       focals:[24,77] },
   { make:"Apple",    model:"iPhone 13 Pro",           sw:"iOS 15.8.3",               type:"phone", apertures:[1.5,1.8,2.8],            isos:[25,50,100,200,400,800,1600,2000],                                           shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60]],             focals:[26,77] },
   { make:"Apple",    model:"iPhone 12",               sw:"iOS 14.8.1",               type:"phone", apertures:[1.6,2.4],                isos:[25,50,100,200,400,800,1600],                                                shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60]],             focals:[26,52] },
+  { make:"Apple",    model:"iPhone 11",               sw:"iOS 14.8.1",               type:"phone", apertures:[1.8,2.4],                isos:[25,50,100,200,400,800,1600],                                                shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60]],             focals:[26,52] },
   // Samsung Galaxy
   { make:"Samsung",  model:"SM-S928B",                sw:"S928BXXU1AWIM",            type:"phone", apertures:[1.7,2.2,3.4],            isos:[50,100,200,400,800,1600,3200],                                              shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],       focals:[13,23,69,230] },
   { make:"Samsung",  model:"SM-S916B",                sw:"S916BXXU7EXA1",            type:"phone", apertures:[1.8,2.4],                isos:[50,100,200,400,800,1600,3200],                                              shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60]],             focals:[13,23,69] },
   { make:"Samsung",  model:"SM-A546B",                sw:"A546BXXS4EXD2",            type:"phone", apertures:[1.8,2.4],                isos:[50,100,200,400,800,1600],                                                   shutters:[[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],               focals:[25,63] },
+  { make:"Samsung",  model:"SM-G991B",                sw:"G991BXXU8FXD1",            type:"phone", apertures:[1.8,2.2,3.5],            isos:[50,100,200,400,800,1600,3200],                                              shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],       focals:[13,26,64] },
   // Google Pixel
   { make:"Google",   model:"Pixel 8 Pro",             sw:"android.14",               type:"phone", apertures:[1.68,2.2,2.8],           isos:[50,100,200,400,800,1600,3200],                                              shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60]],             focals:[10,25,113] },
   { make:"Google",   model:"Pixel 7a",                sw:"android.13",               type:"phone", apertures:[1.89,2.2],               isos:[50,100,200,400,800,1600,3200],                                              shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60]],             focals:[25,116] },
+  { make:"Google",   model:"Pixel 6a",                sw:"android.13",               type:"phone", apertures:[1.85,2.2],               isos:[50,100,200,400,800,1600,3200],                                              shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60]],             focals:[24,108] },
+  // OnePlus & Xiaomi (globally common)
+  { make:"OnePlus",  model:"CPH2583",                 sw:"ColorOS 14.0",             type:"phone", apertures:[1.6,2.0,2.6],            isos:[64,100,200,400,800,1600,3200,6400],                                         shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],       focals:[14,23,73] },
+  { make:"Xiaomi",   model:"2312GS7BD",               sw:"MIUI 14.0.7.0",            type:"phone", apertures:[1.42,2.0,3.2],           isos:[50,100,200,400,800,1600,3200,6400],                                         shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],       focals:[14,24,75] },
   // Canon
   { make:"Canon",    model:"Canon EOS R5",            sw:"Firmware Version 1.8.2",   type:"dslr",  apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],    isos:[100,125,160,200,250,320,400,640,800,1600,3200,6400,12800,25600,51200],      shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4],[1,2],[1,1],[2,1],[4,1]], focals:[24,35,50,85,100,135,200] },
   { make:"Canon",    model:"Canon EOS 5D Mark IV",    sw:"Firmware Version 1.3.3",   type:"dslr",  apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],         isos:[100,200,400,800,1600,3200,6400,12800,25600],                                shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4]], focals:[24,35,50,85,135,200] },
@@ -41,8 +47,8 @@ export const CAMERAS = [
   { make:"FUJIFILM", model:"X100VI",                 sw:"Firmware Ver2.10",         type:"dslr",  apertures:[2.0,2.8,4.0,5.6,8.0,11],                     isos:[125,200,400,800,1600,3200,6400,12800,25600],                                shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]], focals:[23] },
 ];
 
-// ── US Location Database ─────────────────────────────────────────
-// Cities across all US regions for realistic GPS coordinate generation.
+// ── Location Database ────────────────────────────────────────────
+// Cities across US and international regions. lon: negative = West, positive = East.
 
 export const LOCATIONS = [
   // Northeast
@@ -109,6 +115,40 @@ export const LOCATIONS = [
   { city:"Boise, ID",             lat: 43.6150,  lon:-116.2023  },
   { city:"Anchorage, AK",         lat: 61.2181,  lon:-149.9003  },
   { city:"Honolulu, HI",          lat: 21.3069,  lon:-157.8583  },
+  // Western Europe
+  { city:"London, UK",            lat: 51.5074,  lon:  -0.1278  },
+  { city:"Paris, France",         lat: 48.8566,  lon:   2.3522  },
+  { city:"Berlin, Germany",       lat: 52.5200,  lon:  13.4050  },
+  { city:"Amsterdam, Netherlands",lat: 52.3676,  lon:   4.9041  },
+  { city:"Madrid, Spain",         lat: 40.4168,  lon:  -3.7038  },
+  { city:"Barcelona, Spain",      lat: 41.3851,  lon:   2.1734  },
+  { city:"Rome, Italy",           lat: 41.9028,  lon:  12.4964  },
+  { city:"Lisbon, Portugal",      lat: 38.7169,  lon:  -9.1395  },
+  { city:"Vienna, Austria",       lat: 48.2082,  lon:  16.3738  },
+  { city:"Zürich, Switzerland",   lat: 47.3769,  lon:   8.5417  },
+  { city:"Stockholm, Sweden",     lat: 59.3293,  lon:  18.0686  },
+  { city:"Manchester, UK",        lat: 53.4808,  lon:  -2.2426  },
+  // Canada
+  { city:"Toronto, ON",           lat: 43.6532,  lon: -79.3832  },
+  { city:"Vancouver, BC",         lat: 49.2827,  lon:-123.1207  },
+  { city:"Montreal, QC",          lat: 45.5017,  lon: -73.5673  },
+  { city:"Calgary, AB",           lat: 51.0447,  lon:-114.0719  },
+  // Australia
+  { city:"Sydney, NSW",           lat:-33.8688,  lon: 151.2093  },
+  { city:"Melbourne, VIC",        lat:-37.8136,  lon: 144.9631  },
+  { city:"Brisbane, QLD",         lat:-27.4698,  lon: 153.0251  },
+  // Asia-Pacific
+  { city:"Tokyo, Japan",          lat: 35.6762,  lon: 139.6503  },
+  { city:"Osaka, Japan",          lat: 34.6937,  lon: 135.5023  },
+  { city:"Seoul, South Korea",    lat: 37.5665,  lon: 126.9780  },
+  { city:"Singapore",             lat:  1.3521,  lon: 103.8198  },
+  // Latin America
+  { city:"São Paulo, Brazil",     lat:-23.5505,  lon: -46.6333  },
+  { city:"Mexico City, Mexico",   lat: 19.4326,  lon: -99.1332  },
+  { city:"Buenos Aires, Argentina",lat:-34.6037, lon: -58.3816  },
+  // Middle East / Other
+  { city:"Dubai, UAE",            lat: 25.2048,  lon:  55.2708  },
+  { city:"Istanbul, Turkey",      lat: 41.0082,  lon:  28.9784  },
 ];
 
 // ── Lens Database ────────────────────────────────────────────────
