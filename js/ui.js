@@ -86,9 +86,13 @@ function getOutputName(item) {
   const make = item?.fakeCamera?.make || '';
 
   switch (make) {
-    case 'Apple':    return `IMG_${seq}.JPG`;
+    // Phones: modern OS exports always produce lowercase .jpg
+    case 'Apple':    return `IMG_${seq}.jpg`;
     case 'Samsung':  return `${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
     case 'Google':   return `PXL_${YYYY}${MM}${DD}_${hh}${mm}${ss}${ms}.jpg`;
+    case 'OnePlus':  return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+    case 'Xiaomi':   return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+    // Dedicated cameras: uppercase .JPG is the genuine on-camera format
     case 'Canon':    return `IMG_${seq}.JPG`;
     case 'Nikon':    return `DSC_${seq}.JPG`;
     case 'Sony':     return `DSC0${seq}.JPG`;
