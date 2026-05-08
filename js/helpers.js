@@ -337,8 +337,19 @@ function antiForensicRender(img, cam = {}) {
     : 1.0 + Math.random() * 1.0);  // 1.0–2.0°
   const angle = angleDeg * (Math.PI / 180);
 
-  // Dynamic scale to cover corners
-  const scale = 1 / Math.cos(Math.abs(angle)) + 0.005;
+  // Aspect-ratio-aware scale so rotated image covers all four canvas corners.
+  // For portrait images the binding constraint is the x-axis:
+  //   s ≥ cos(θ) + (H/W)·sin(θ)
+  // For landscape images it's the y-axis:
+  //   s ≥ cos(θ) + sin(θ)/(H/W)
+  // Using just 1/cos(θ) only works for squares and badly underestimates for
+  // portrait/landscape content, leaving visible black bars on the edges.
+  const ar    = size.height / size.width;
+  const absA  = Math.abs(angle);
+  const scale = Math.max(
+    Math.cos(absA) + ar       * Math.sin(absA),   // x constraint
+    Math.cos(absA) + Math.sin(absA) / ar           // y constraint
+  ) + 0.002;
 
   ctx.translate(size.width  / 2, size.height / 2);
   ctx.rotate(angle);
