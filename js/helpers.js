@@ -141,45 +141,71 @@ export function getExportDimensions(width, height, maxEdge) {
   };
 }
 
-// ── Gaussian noise (Box-Muller) ──────────────────────────────────
-function gaussianNoise(sigma) {
-  const u1 = Math.max(Math.random(), 1e-10);
-  const u2 = Math.random();
-  return sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+// ── Gaussian noise (Box-Muller with caching) ─────────────────────
+let _gaussSpare = null;
+function gaussRand() {
+  if (_gaussSpare !== null) { const v = _gaussSpare; _gaussSpare = null; return v; }
+  let u, v, s;
+  do { u = Math.random() * 2 - 1; v = Math.random() * 2 - 1; s = u * u + v * v; }
+  while (s >= 1 || s === 0);
+  const mul = Math.sqrt(-2 * Math.log(s) / s);
+  _gaussSpare = v * mul;
+  return u * mul;
 }
 
 /**
- * Add ISO-matched, camera-type-aware Gaussian noise to every pixel.
+ * Add ISO-matched Poisson-Gaussian (heteroscedastic) noise.
  *
- * Phones: colour noise — channels partially independent with a chroma
- * component, simulating small-sensor CMOS colour noise.
- * DSLRs: luminance-dominant — R/G/B tightly correlated, simulating
- * large-sensor shot noise.
+ * Camera sensor noise model: σ²(x) = a·x + b
+ *   a = shot noise coefficient  (signal-dependent, scales linearly with ISO)
+ *   b = read noise variance     (constant per sensor, scales with ISO²)
  *
- * Sigma is derived from the fake camera's ISO so images "from different
- * cameras" have genuinely different noise floors.
+ * Uniform Gaussian (previous model) is detectable by Noiseprint++, TruFor,
+ * and heteroscedastic noise forensic analysis — those tools explicitly verify
+ * that brighter pixels have higher variance. The Poisson-Gaussian model
+ * matches what real sensors produce.
  */
 export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
-  let sigma;
-  if (iso <= 200)       sigma = 0.8  + Math.random() * 0.4;   // 0.8–1.2
-  else if (iso <= 1600) sigma = 1.5  + Math.random() * 1.0;   // 1.5–2.5
-  else                  sigma = 3.0  + Math.random() * 2.5;   // 3.0–5.5
+  const isoNorm = iso / 100;
+
+  // Per-type base coefficients from published sensor characterisation data.
+  let aBase, bBase;
+  if (cameraType === 'dslr') {
+    aBase = 0.0006 + Math.random() * 0.0004;  // 0.0006–0.001 (larger sensor, lower shot noise)
+    bBase = 0.8    + Math.random() * 0.8;      // 0.8–1.6
+  } else {
+    aBase = 0.001  + Math.random() * 0.001;   // 0.001–0.002 (small phone sensor)
+    bBase = 2.0    + Math.random() * 2.0;      // 2.0–4.0
+  }
+
+  // Shot noise scales linearly with ISO; read noise scales quadratically.
+  const a = aBase * isoNorm;
+  const b = bBase * isoNorm * isoNorm;
 
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
 
   for (let i = 0; i < d.length; i += 4) {
+    const r0 = d[i], g0 = d[i + 1], b0 = d[i + 2];
+
     if (cameraType === 'phone') {
-      const chroma = gaussianNoise(sigma * 0.5);
-      d[i]     = clamp(d[i]     + Math.round(gaussianNoise(sigma)       + chroma), 0, 255);
-      d[i + 1] = clamp(d[i + 1] + Math.round(gaussianNoise(sigma * 0.7)),          0, 255);
-      d[i + 2] = clamp(d[i + 2] + Math.round(gaussianNoise(sigma)       - chroma), 0, 255);
+      // Bayer CFA: 2 green, 1 red, 1 blue per 2×2 block.
+      // R/B have ~20% more shot noise than G (fewer photosites per unit area).
+      const sigmaR = Math.sqrt(a * 1.2 * r0 + b);
+      const sigmaG = Math.sqrt(a * 0.8 * g0 + b * 0.7);
+      const sigmaB = Math.sqrt(a * 1.2 * b0 + b);
+      d[i]     = clamp(Math.round(r0 + gaussRand() * sigmaR), 0, 255);
+      d[i + 1] = clamp(Math.round(g0 + gaussRand() * sigmaG), 0, 255);
+      d[i + 2] = clamp(Math.round(b0 + gaussRand() * sigmaB), 0, 255);
     } else {
-      const luma   = gaussianNoise(sigma);
-      const chroma = gaussianNoise(sigma * 0.25);
-      d[i]     = clamp(d[i]     + Math.round(luma + chroma), 0, 255);
-      d[i + 1] = clamp(d[i + 1] + Math.round(luma),          0, 255);
-      d[i + 2] = clamp(d[i + 2] + Math.round(luma - chroma), 0, 255);
+      // DSLR: luminance-dominant noise with small chroma component.
+      const luma  = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0;
+      const sigma = Math.sqrt(a * luma + b);
+      const lN    = gaussRand() * sigma;
+      const cN    = gaussRand() * sigma * 0.2;
+      d[i]     = clamp(Math.round(r0 + lN + cN), 0, 255);
+      d[i + 1] = clamp(Math.round(g0 + lN),       0, 255);
+      d[i + 2] = clamp(Math.round(b0 + lN - cN), 0, 255);
     }
   }
 
@@ -244,6 +270,162 @@ export function applyCameraColorProfile(ctx, w, h, make) {
 }
 
 /**
+ * Simulate camera ISP pipeline statistical traces.
+ *
+ * Real cameras run demosaicing → denoising → sharpening → tone mapping before
+ * JPEG encoding. Each stage leaves characteristic statistical traces that ML
+ * forensic tools (TruFor, CAT-Net, ManTraNet) are trained to detect.
+ * Their absence from a browser-processed image is a strong forensic signal.
+ *
+ * Simulates:
+ *   1. Demosaicing residuals — Laplacian traces from Bayer CFA interpolation
+ *   2. S-curve tone mapping  — histogram shape camera firmware curves produce
+ *   3. Unsharp mask          — in-camera sharpening halo/ringing around edges
+ */
+export function applyISPSimulation(ctx, w, h) {
+  const id = ctx.getImageData(0, 0, w, h);
+  const d  = id.data;
+
+  // ── 1. Demosaicing residuals ──────────────────────────────────
+  // Real Bayer demosaicing leaves a Laplacian-shaped residual in the green
+  // channel (dominant colour in the Bayer CFA). ML detectors analyse the
+  // frequency-domain power spectrum of this residual. Amplitude is kept at
+  // 0.8–1.4% of the signal — visually transparent but forensically present.
+  const demosaicStr = 0.008 + Math.random() * 0.006;
+  const gChan = new Uint8Array(w * h);
+  for (let i = 0; i < d.length; i += 4) gChan[i >> 2] = d[i + 1];
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const p   = (y * w + x) * 4;
+      const idx = y * w + x;
+      const lap = gChan[(y - 1) * w + x] + gChan[(y + 1) * w + x] +
+                  gChan[y * w + (x - 1)] + gChan[y * w + (x + 1)] - 4 * gChan[idx];
+      const res = Math.round(lap * demosaicStr);
+      d[p]     = clamp(d[p]     + res, 0, 255);
+      d[p + 1] = clamp(d[p + 1] + res, 0, 255);
+      d[p + 2] = clamp(d[p + 2] + res, 0, 255);
+    }
+  }
+
+  // ── 2. S-curve tone mapping (LUT) ────────────────────────────
+  // Camera firmware applies a characteristic S-shaped tone curve for contrast.
+  // The resulting histogram shape is a camera-authenticity marker. We use a
+  // properly anchored S-curve: lut[0]=0, lut[128]=128, lut[255]=255.
+  const cs = 0.3 + Math.random() * 0.4;           // curve strength 0.3–0.7
+  const hs = Math.sin(0.5 * Math.PI * cs) || 1;   // normaliser
+  const lut = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) {
+    const curved = Math.sin((i / 255 - 0.5) * Math.PI * cs) / (2 * hs) + 0.5;
+    lut[i] = clamp(Math.round(curved * 255), 0, 255);
+  }
+  for (let i = 0; i < d.length; i += 4) {
+    d[i]     = lut[d[i]];
+    d[i + 1] = lut[d[i + 1]];
+    d[i + 2] = lut[d[i + 2]];
+  }
+
+  // ── 3. Unsharp mask sharpening ───────────────────────────────
+  // In-camera sharpening (USM) creates characteristic halo/ringing around
+  // edges — a statistical trace that forensic models are trained to see.
+  const sharpStr = 0.15 + Math.random() * 0.20;   // 0.15–0.35
+  const orig     = new Uint8ClampedArray(d);
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const p = (y * w + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const blur = (
+          orig[((y - 1) * w + (x - 1)) * 4 + c] + orig[((y - 1) * w + x) * 4 + c] + orig[((y - 1) * w + (x + 1)) * 4 + c] +
+          orig[(y * w + (x - 1)) * 4 + c]        + orig[(y * w + x) * 4 + c]        + orig[(y * w + (x + 1)) * 4 + c] +
+          orig[((y + 1) * w + (x - 1)) * 4 + c] + orig[((y + 1) * w + x) * 4 + c] + orig[((y + 1) * w + (x + 1)) * 4 + c]
+        ) / 9;
+        d[p + c] = clamp(Math.round(orig[p + c] + sharpStr * (orig[p + c] - blur)), 0, 255);
+      }
+    }
+  }
+
+  ctx.putImageData(id, 0, 0);
+}
+
+/**
+ * Simulate lens optical artifacts: vignetting + chromatic aberration.
+ *
+ * Every real camera lens produces both. Their absence is detectable by
+ * forensic lens-profile databases and ML models.
+ *
+ * Vignetting: cos⁴ light falloff toward corners (polynomial approximation).
+ * Chromatic aberration: wavelength-dependent refraction causes radial colour
+ * fringing — red shifts outward from centre, blue shifts inward. Both effects
+ * scale with distance from the optical axis, so there's zero CA at centre.
+ */
+export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
+  const cameraType = cam.type || 'phone';
+
+  // Phones have smaller, weaker optics → stronger vignetting and more CA.
+  const vBase = cameraType === 'dslr'
+    ? 0.12 + Math.random() * 0.10   // 0.12–0.22
+    : 0.18 + Math.random() * 0.14;  // 0.18–0.32
+
+  const diagonal = Math.sqrt(w * w + h * h);
+  const caMax    = cameraType === 'dslr'
+    ? (0.0002 + Math.random() * 0.0003) * diagonal   // subtle (~0.04–0.1% of diagonal)
+    : (0.0004 + Math.random() * 0.0004) * diagonal;  // more visible (~0.04–0.12%)
+
+  const cx   = w / 2;
+  const cy   = h / 2;
+  const maxR = Math.sqrt(cx * cx + cy * cy);
+
+  const id = ctx.getImageData(0, 0, w, h);
+  const d  = id.data;
+
+  // Extract channels for clean random-access reads during CA remapping.
+  const rBuf = new Uint8Array(w * h);
+  const gBuf = new Uint8Array(w * h);
+  const bBuf = new Uint8Array(w * h);
+  for (let p = 0, i = 0; i < d.length; i += 4, p++) {
+    rBuf[p] = d[i]; gBuf[p] = d[i + 1]; bBuf[p] = d[i + 2];
+  }
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p    = y * w + x;
+      const i    = p * 4;
+      const dx   = x - cx;
+      const dy   = y - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const r    = dist / maxR;  // 0 at centre → 1 at corner
+
+      // Vignetting: polynomial approximation of cos⁴ radial falloff.
+      const vign = Math.max(0, 1 - vBase * r * r - vBase * 0.4 * r * r * r * r);
+
+      if (dist > 0.5) {
+        // CA shift amount scales with r (zero at centre, caMax at corners).
+        const shift  = caMax * r;
+        const normDX = dx / dist;
+        const normDY = dy / dist;
+
+        // Red shifts outward; blue shifts inward toward centre.
+        const rX = clamp(Math.round(x + normDX * shift), 0, w - 1);
+        const rY = clamp(Math.round(y + normDY * shift), 0, h - 1);
+        const bX = clamp(Math.round(x - normDX * shift), 0, w - 1);
+        const bY = clamp(Math.round(y - normDY * shift), 0, h - 1);
+
+        d[i]     = clamp(Math.round(rBuf[rY * w + rX] * vign), 0, 255);
+        d[i + 1] = clamp(Math.round(gBuf[p]           * vign), 0, 255);
+        d[i + 2] = clamp(Math.round(bBuf[bY * w + bX] * vign), 0, 255);
+      } else {
+        d[i]     = clamp(Math.round(rBuf[p] * vign), 0, 255);
+        d[i + 1] = clamp(Math.round(gBuf[p] * vign), 0, 255);
+        d[i + 2] = clamp(Math.round(bBuf[p] * vign), 0, 255);
+      }
+    }
+  }
+
+  ctx.putImageData(id, 0, 0);
+}
+
+/**
  * Strip the JFIF APP0 marker from a JPEG data URL.
  *
  * canvas.toDataURL() always emits APP0 (FF E0) right after SOI.
@@ -281,15 +463,21 @@ export function stripApp0(dataUrl) {
 /**
  * Core anti-forensic canvas pipeline.
  *
- * Seven layers defeat device-correlation forensics:
+ * Ten layers defeat both device-correlation forensics and ML manipulation
+ * detection (TruFor, ManTraNet, CAT-Net, Noiseprint++):
+ *
  *   1. Proportional crop (≤1.2% per edge) — shifts PRNU grid alignment
- *   2. Bimodal rotation (±0.5°–2.0°) — forces sub-pixel interpolation on every
- *      pixel; sufficient to drop PRNU correlation to noise levels
+ *   2. Bimodal rotation (±0.5°–2.0°) — sub-pixel interpolation destroys PRNU
  *   3. Random resize — prevents dimension-based clustering
  *   4. Camera colour science — brand-specific tone/saturation/contrast
- *   5. ISO-matched Gaussian noise — noise floor matches the fake camera's ISO
- *   6. Strip APP0 — removes JFIF browser-version signature
- *   7. Bimodal JPEG quality — wider range = more quantization table diversity
+ *   5. ISP pipeline simulation — demosaicing residuals + S-curve + unsharp mask
+ *      (embeds statistical traces ML detectors expect from real cameras)
+ *   6. Lens optical effects — vignetting (cos⁴) + chromatic aberration
+ *      (every real lens produces both; their absence is a forensic red flag)
+ *   7. Poisson-Gaussian noise — σ²(x)=a·x+b, heteroscedastic per real sensors
+ *      (ML tools verify signal-dependent variance; uniform Gaussian is detectable)
+ *   8. Strip APP0 — removes JFIF browser-version signature bytes
+ *   9. Bimodal JPEG quality — wider range = more quantization table diversity
  */
 function antiForensicRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
@@ -314,6 +502,10 @@ function antiForensicRender(img, cam = {}) {
     c.height  = img.naturalHeight;
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0);
+    applyCameraColorProfile(ctx, c.width, c.height, cameraMake);
+    applyISPSimulation(ctx, c.width, c.height);
+    applyLensOpticalEffects(ctx, c.width, c.height, cam);
+    addPixelNoise(ctx, c.width, c.height, iso, cameraType);
     let dataUrl = c.toDataURL('image/jpeg', randomJpegQuality(cameraType));
     dataUrl = stripApp0(dataUrl);
     return { dataUrl, width: c.width, height: c.height };
@@ -338,12 +530,6 @@ function antiForensicRender(img, cam = {}) {
   const angle = angleDeg * (Math.PI / 180);
 
   // Aspect-ratio-aware scale so rotated image covers all four canvas corners.
-  // For portrait images the binding constraint is the x-axis:
-  //   s ≥ cos(θ) + (H/W)·sin(θ)
-  // For landscape images it's the y-axis:
-  //   s ≥ cos(θ) + sin(θ)/(H/W)
-  // Using just 1/cos(θ) only works for squares and badly underestimates for
-  // portrait/landscape content, leaving visible black bars on the edges.
   const ar    = size.height / size.width;
   const absA  = Math.abs(angle);
   const scale = Math.max(
@@ -361,10 +547,16 @@ function antiForensicRender(img, cam = {}) {
   // 4. Camera colour science
   applyCameraColorProfile(ctx, size.width, size.height, cameraMake);
 
-  // 5. ISO-matched Gaussian noise
+  // 5. ISP pipeline simulation (demosaicing residuals + S-curve + unsharp mask)
+  applyISPSimulation(ctx, size.width, size.height);
+
+  // 6. Lens optical effects (vignetting + chromatic aberration)
+  applyLensOpticalEffects(ctx, size.width, size.height, cam);
+
+  // 7. Poisson-Gaussian noise (signal-dependent, ISO-matched)
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
-  // 6+7. Encode, strip APP0
+  // 8+9. Encode, strip APP0
   let dataUrl = c.toDataURL('image/jpeg', randomJpegQuality(cameraType));
   dataUrl = stripApp0(dataUrl);
 
