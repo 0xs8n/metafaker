@@ -166,21 +166,22 @@ function gaussRand() {
  * matches what real sensors produce.
  */
 export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
-  const isoNorm = iso / 100;
+  // Explicit sigma ranges matched to real camera output in 8-bit JPEG space.
+  // Previous model used b = bBase * isoNorm² — at ISO 3200 that gave sigma ≈ 45,
+  // which is a ±135 pixel range and reduces images to pure noise.
+  let baseSigma;
+  if      (iso <= 200)  baseSigma = 0.7 + Math.random() * 0.5;  // 0.7–1.2
+  else if (iso <= 800)  baseSigma = 1.3 + Math.random() * 0.9;  // 1.3–2.2
+  else if (iso <= 3200) baseSigma = 2.0 + Math.random() * 1.5;  // 2.0–3.5
+  else                  baseSigma = 3.0 + Math.random() * 2.0;  // 3.0–5.0
 
-  // Per-type base coefficients from published sensor characterisation data.
-  let aBase, bBase;
-  if (cameraType === 'dslr') {
-    aBase = 0.0006 + Math.random() * 0.0004;  // 0.0006–0.001 (larger sensor, lower shot noise)
-    bBase = 0.8    + Math.random() * 0.8;      // 0.8–1.6
-  } else {
-    aBase = 0.001  + Math.random() * 0.001;   // 0.001–0.002 (small phone sensor)
-    bBase = 2.0    + Math.random() * 2.0;      // 2.0–4.0
-  }
-
-  // Shot noise scales linearly with ISO; read noise scales quadratically.
-  const a = aBase * isoNorm;
-  const b = bBase * isoNorm * isoNorm;
+  // Decompose into Poisson-Gaussian model: σ²(x) = a·x + b
+  // The signal-dependent component gives the heteroscedastic structure that
+  // ML forensic tools (Noiseprint++, TruFor) verify, while keeping total
+  // noise within the calibrated sigma range above.
+  const sig2 = baseSigma * baseSigma;
+  const a    = 0.05 * sig2 / 128;   // ~5% signal-dependent (shot noise)
+  const b    = 0.95 * sig2;          // ~95% constant (read noise)
 
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
@@ -362,10 +363,11 @@ export function applyISPSimulation(ctx, w, h) {
 export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
   const cameraType = cam.type || 'phone';
 
-  // Phones have smaller, weaker optics → stronger vignetting and more CA.
+  // Real lens vignetting: ~10–20% light falloff at corners for phones,
+  // ~5–12% for DSLRs (better optics + usually partially corrected in-camera).
   const vBase = cameraType === 'dslr'
-    ? 0.12 + Math.random() * 0.10   // 0.12–0.22
-    : 0.18 + Math.random() * 0.14;  // 0.18–0.32
+    ? 0.04 + Math.random() * 0.06   // 0.04–0.10 → ~6–14% corner darkening
+    : 0.06 + Math.random() * 0.08;  // 0.06–0.14 → ~9–20% corner darkening
 
   const diagonal = Math.sqrt(w * w + h * h);
   const caMax    = cameraType === 'dslr'
