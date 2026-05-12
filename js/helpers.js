@@ -489,6 +489,12 @@ export function stripApp0(dataUrl) {
  *   8. Custom JPEG encoder — camera-brand Q-tables with per-image ±2 jitter
  *      (browser canvas always emits identical Q-tables at a given quality level;
  *      forensic tools cluster images by Q-table pattern, this breaks that)
+ *
+ * NOTE: applyISPSimulation (demosaicing Laplacian + S-curve + USM) is intentionally
+ * omitted. The Laplacian produces a visible "emboss" artifact on high-contrast
+ * document images (receipts, screenshots, text) because the residual amplitude
+ * needed to stay invisible is below the threshold that ML tools detect anyway.
+ * The remaining 7 layers provide robust forensic coverage without spatial filters.
  */
 function antiForensicRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
@@ -514,7 +520,6 @@ function antiForensicRender(img, cam = {}) {
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0);
     applyCameraColorProfile(ctx, c.width, c.height, cameraMake);
-    applyISPSimulation(ctx, c.width, c.height);
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
     const dataUrl = canvasToJpegDataUrl(ctx, c.width, c.height, cameraMake, randomJpegQuality(cameraType));
@@ -557,16 +562,13 @@ function antiForensicRender(img, cam = {}) {
   // 4. Camera colour science
   applyCameraColorProfile(ctx, size.width, size.height, cameraMake);
 
-  // 5. ISP pipeline simulation (demosaicing residuals + S-curve + unsharp mask)
-  applyISPSimulation(ctx, size.width, size.height);
-
-  // 6. Lens optical effects (vignetting + chromatic aberration)
+  // 5. Lens optical effects (vignetting + chromatic aberration)
   applyLensOpticalEffects(ctx, size.width, size.height, cam);
 
-  // 7. Poisson-Gaussian noise (signal-dependent, ISO-matched)
+  // 6. Poisson-Gaussian noise (signal-dependent, ISO-matched)
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
-  // 8. Encode with camera-specific Q-tables (no APP0 written)
+  // 7. Encode with camera-specific Q-tables (no APP0 written)
   const dataUrl = canvasToJpegDataUrl(ctx, size.width, size.height, cameraMake, randomJpegQuality(cameraType));
 
   return { dataUrl, width: size.width, height: size.height };
