@@ -127,60 +127,44 @@ function buildHuffTable(bits, vals) {
   return { codes, sizes };
 }
 
-// ── AAN integer 8-point DCT ───────────────────────────────────────────────────
-// From Arai, Agui, Nakajima (1988) — scaled integer approximation.
+// ── Separable 2D DCT-II (8×8) ────────────────────────────────────────────────
+// Two-pass separable implementation: first 1D DCT along rows, then along columns.
+// 4× faster than direct computation (1024 multiply-adds vs 4096) — critical for
+// real-photo performance where blocks number in the tens of thousands.
 
-const W1 = 2841, W2 = 2676, W3 = 2408, W5 = 1609, W6 = 1108, W7 = 565;
+// Pre-compute cosine matrix once at module load.
+// _COS[k*8+n] = cos((2n+1)*k*π/16)
+const _COS = (() => {
+  const c = new Float64Array(64);
+  for (let k = 0; k < 8; k++)
+    for (let n = 0; n < 8; n++)
+      c[k * 8 + n] = Math.cos((2 * n + 1) * k * Math.PI / 16);
+  return c;
+})();
+const _C4 = 1 / Math.SQRT2;  // cos(π/4), C(0) normalisation factor
 
-function dctRow(blk, off) {
-  const x0=blk[off],x1=blk[off+1],x2=blk[off+2],x3=blk[off+3];
-  const x4=blk[off+4],x5=blk[off+5],x6=blk[off+6],x7=blk[off+7];
-  if (!((x1|x2|x3|x4|x5|x6|x7)===0)) {
-    let tmp0=x0+x7, tmp7=x0-x7;
-    let tmp1=x1+x6, tmp6=x1-x6;
-    let tmp2=x2+x5, tmp5=x2-x5;
-    let tmp3=x3+x4, tmp4=x3-x4;
-    let tmp10=tmp0+tmp3, tmp13=tmp0-tmp3;
-    let tmp11=tmp1+tmp2, tmp12=tmp1-tmp2;
-    blk[off  ]=(tmp10+tmp11)>>1;
-    blk[off+4]=(tmp10-tmp11)>>1;
-    let z1=(tmp12+tmp13)*4433;
-    blk[off+2]=(z1+tmp13*6270)>>13;
-    blk[off+6]=(z1-tmp12*15137)>>13;
-    let z5=((tmp4+tmp7)*9633)>>11;
-    blk[off+1]=(((tmp7*5765-z5)*2+tmp4*2446)>>13);
-    blk[off+3]=(((tmp4*7373-z5)*2-tmp5*3547)>>13);
-    blk[off+5]=(((tmp5*3547-z5)*2+tmp4*7373)>>13);
-    blk[off+7]=(((tmp6*2446-z5)*2-tmp7*5765)>>13);
-    // fallback: use a simpler row DCT if above has issues
-    // Actually let me use the standard direct computation instead
-  } else {
-    blk[off]=x0>>1; blk[off+1]=blk[off+2]=blk[off+3]=blk[off+4]=blk[off+5]=blk[off+6]=blk[off+7]=0;
-    blk[off]=x0; blk[off+1]=blk[off+2]=blk[off+3]=blk[off+4]=blk[off+5]=blk[off+6]=blk[off+7]=0;
-  }
-}
+// Reusable temp buffer — avoid per-block allocations in the hot loop.
+const _tmp = new Float64Array(64);
 
-// Use a clean direct DCT-II implementation for correctness
 function fdct8x8(block) {
-  const COS = new Float64Array(64);
-  if (!fdct8x8._init) {
-    for (let k=0;k<8;k++) for (let n=0;n<8;n++) {
-      COS[k*8+n] = Math.cos((2*n+1)*k*Math.PI/16);
+  // Pass 1: 1D DCT along each row (horizontal frequencies)
+  for (let y = 0; y < 8; y++) {
+    const yo = y * 8;
+    for (let u = 0; u < 8; u++) {
+      let s = 0;
+      for (let x = 0; x < 8; x++) s += block[yo + x] * _COS[u * 8 + x];
+      _tmp[yo + u] = s;
     }
-    fdct8x8._cos = COS;
-    fdct8x8._init = true;
   }
-  const cos = fdct8x8._cos;
+
+  // Pass 2: 1D DCT along each column (vertical frequencies) + C(u)*C(v)*0.25 scale
   const out = new Float64Array(64);
-  for (let u=0;u<8;u++) {
-    for (let v=0;v<8;v++) {
-      let s=0;
-      for (let x=0;x<8;x++) for (let y=0;y<8;y++) {
-        s += block[y*8+x] * cos[u*8+x] * cos[v*8+y];
-      }
-      const cu = u===0 ? 1/Math.SQRT2 : 1;
-      const cv = v===0 ? 1/Math.SQRT2 : 1;
-      out[v*8+u] = 0.25 * cu * cv * s;
+  for (let u = 0; u < 8; u++) {
+    const cu = (u === 0 ? _C4 : 1) * 0.25;
+    for (let v = 0; v < 8; v++) {
+      let s = 0;
+      for (let y = 0; y < 8; y++) s += _tmp[y * 8 + u] * _COS[v * 8 + y];
+      out[v * 8 + u] = s * cu * (v === 0 ? _C4 : 1);
     }
   }
   return out;
@@ -276,9 +260,10 @@ function dqtSegment(id, qtable) {
 }
 
 function dhtSegment(id, isAC, bits, vals) {
-  const total = bits.reduce((a,b)=>a+b, 0);
+  const total = bits.reduce((a, b) => a + b, 0);
+  // JPEG segment length = 2 (length field itself) + 1 (table class/ID) + 16 (BITS) + total (VALS)
   const len = 2 + 1 + 16 + total;
-  const seg = [...marker(0xC4), ...word(len + 2), (isAC ? 0x10 : 0x00) | (id & 0x0F)];
+  const seg = [...marker(0xC4), ...word(len), (isAC ? 0x10 : 0x00) | (id & 0x0F)];
   for (let b of bits) seg.push(b);
   for (let v of vals) seg.push(v);
   return seg;
