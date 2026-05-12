@@ -511,7 +511,7 @@ function antiForensicRender(img, cam = {}) {
     applyISPSimulation(ctx, c.width, c.height);
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
-    const dataUrl = canvasToJpegDataUrl(ctx, c.width, c.height, cameraMake);
+    const dataUrl = canvasToJpegDataUrl(ctx, c.width, c.height, cameraMake, randomJpegQuality(cameraType));
     return { dataUrl, width: c.width, height: c.height };
   }
 
@@ -561,7 +561,7 @@ function antiForensicRender(img, cam = {}) {
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
   // 8. Encode with camera-specific Q-tables (no APP0 written)
-  const dataUrl = canvasToJpegDataUrl(ctx, size.width, size.height, cameraMake);
+  const dataUrl = canvasToJpegDataUrl(ctx, size.width, size.height, cameraMake, randomJpegQuality(cameraType));
 
   return { dataUrl, width: size.width, height: size.height };
 }
