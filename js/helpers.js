@@ -287,29 +287,7 @@ export function applyISPSimulation(ctx, w, h) {
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
 
-  // ── 1. Demosaicing residuals ──────────────────────────────────
-  // Real Bayer demosaicing leaves a Laplacian-shaped residual in the green
-  // channel (dominant colour in the Bayer CFA). ML detectors analyse the
-  // frequency-domain power spectrum of this residual. Amplitude is kept at
-  // 0.8–1.4% of the signal — visually transparent but forensically present.
-  const demosaicStr = 0.008 + Math.random() * 0.006;
-  const gChan = new Uint8Array(w * h);
-  for (let i = 0; i < d.length; i += 4) gChan[i >> 2] = d[i + 1];
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const p   = (y * w + x) * 4;
-      const idx = y * w + x;
-      const lap = gChan[(y - 1) * w + x] + gChan[(y + 1) * w + x] +
-                  gChan[y * w + (x - 1)] + gChan[y * w + (x + 1)] - 4 * gChan[idx];
-      const res = Math.round(lap * demosaicStr);
-      d[p]     = clamp(d[p]     + res, 0, 255);
-      d[p + 1] = clamp(d[p + 1] + res, 0, 255);
-      d[p + 2] = clamp(d[p + 2] + res, 0, 255);
-    }
-  }
-
-  // ── 2. S-curve tone mapping (LUT) ────────────────────────────
+  // ── 1. S-curve tone mapping (LUT) ────────────────────────────
   // Camera firmware applies a characteristic S-shaped tone curve for contrast.
   // The resulting histogram shape is a camera-authenticity marker. We use a
   // properly anchored S-curve: lut[0]=0, lut[128]=128, lut[255]=255.
@@ -329,7 +307,7 @@ export function applyISPSimulation(ctx, w, h) {
   // ── 3. Unsharp mask sharpening ───────────────────────────────
   // In-camera sharpening (USM) creates characteristic halo/ringing around
   // edges — a statistical trace that forensic models are trained to see.
-  const sharpStr = 0.15 + Math.random() * 0.20;   // 0.15–0.35
+  const sharpStr = 0.08 + Math.random() * 0.10;   // 0.08–0.18
   const orig     = new Uint8ClampedArray(d);
 
   for (let y = 1; y < h - 1; y++) {
@@ -366,8 +344,8 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
   // Real lens vignetting: ~10–20% light falloff at corners for phones,
   // ~5–12% for DSLRs (better optics + usually partially corrected in-camera).
   const vBase = cameraType === 'dslr'
-    ? 0.04 + Math.random() * 0.06   // 0.04–0.10 → ~6–14% corner darkening
-    : 0.06 + Math.random() * 0.08;  // 0.06–0.14 → ~9–20% corner darkening
+    ? 0.020 + Math.random() * 0.025  // ~3–6% corner darkening
+    : 0.030 + Math.random() * 0.030; // ~4–8% corner darkening
 
   const diagonal = Math.sqrt(w * w + h * h);
   const caMax    = cameraType === 'dslr'
