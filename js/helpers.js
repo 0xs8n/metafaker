@@ -2,8 +2,6 @@
  * helpers.js — Pure utility functions used across the app.
  */
 
-import { canvasToJpegDataUrl } from './jpeg-encoder.js';
-
 // ── Random & Math ────────────────────────────────────────────────
 
 export const pick = a => a[Math.floor(Math.random() * a.length)];
@@ -480,9 +478,8 @@ export function stripApp0(dataUrl) {
  *      (every real lens produces both; their absence is a forensic red flag)
  *   7. Poisson-Gaussian noise — σ²(x)=a·x+b, heteroscedastic per real sensors
  *      (ML tools verify signal-dependent variance; uniform Gaussian is detectable)
- *   8. Custom JPEG encoder — camera-brand Q-tables with per-image ±2 jitter
- *      (browser canvas always emits identical Q-tables at a given quality level;
- *      forensic tools cluster images by Q-table pattern, this breaks that)
+ *   8. Strip APP0 — removes JFIF browser-version signature bytes
+ *   9. Bimodal JPEG quality — wider range = more quantization table diversity
  */
 function antiForensicRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
@@ -511,7 +508,8 @@ function antiForensicRender(img, cam = {}) {
     applyISPSimulation(ctx, c.width, c.height);
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
-    const dataUrl = canvasToJpegDataUrl(ctx, c.width, c.height, cameraMake, randomJpegQuality(cameraType));
+    let dataUrl = c.toDataURL('image/jpeg', randomJpegQuality(cameraType));
+    dataUrl = stripApp0(dataUrl);
     return { dataUrl, width: c.width, height: c.height };
   }
 
@@ -560,8 +558,9 @@ function antiForensicRender(img, cam = {}) {
   // 7. Poisson-Gaussian noise (signal-dependent, ISO-matched)
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
-  // 8. Encode with camera-specific Q-tables (no APP0 written)
-  const dataUrl = canvasToJpegDataUrl(ctx, size.width, size.height, cameraMake, randomJpegQuality(cameraType));
+  // 8+9. Encode, strip APP0
+  let dataUrl = c.toDataURL('image/jpeg', randomJpegQuality(cameraType));
+  dataUrl = stripApp0(dataUrl);
 
   return { dataUrl, width: size.width, height: size.height };
 }
