@@ -262,7 +262,12 @@ export function generateFake(options = {}) {
   p["Exif"][px.ExifIFD.ApertureValue]     = [Math.round(2 * Math.log2(aperture) * 100), 100];
   p["Exif"][px.ExifIFD.MaxApertureValue]  = [Math.round(2 * Math.log2(Math.min(...cam.apertures)) * 100), 100];
 
-  p["Exif"][px.ExifIFD.ExifVersion]             = "0232";
+  // ExifVersion varies by camera firmware era — "0232" is very recent (2023+),
+  // "0231" is common for 2018–2022 devices, "0230" for older hardware.
+  const exifVersion = cam.type === 'phone'
+    ? pick(["0231", "0231", "0232"])   // phones tend to be newer firmware
+    : pick(["0230", "0231", "0231"]);  // DSLRs often trail
+  p["Exif"][px.ExifIFD.ExifVersion]             = exifVersion;
   p["Exif"][px.ExifIFD.FlashpixVersion]         = flashpixVersion;
   p["Exif"][px.ExifIFD.ComponentsConfiguration] = "\x01\x02\x03\x00";
   p["Exif"][px.ExifIFD.FileSource]              = "\x03";
