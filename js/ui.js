@@ -72,14 +72,14 @@ function splitFileName(name) {
  * Uses today's actual date with random time for date-based formats.
  */
 function getOutputName(item) {
-  const now = new Date();
+  const d  = (item?.fakeDate instanceof Date && !isNaN(item.fakeDate)) ? item.fakeDate : new Date();
   const p = n => String(n).padStart(2, '0');
-  const YYYY = now.getFullYear();
-  const MM = p(now.getMonth() + 1);
-  const DD = p(now.getDate());
-  const hh = p(Math.floor(Math.random() * 24));
-  const mm = p(Math.floor(Math.random() * 60));
-  const ss = p(Math.floor(Math.random() * 60));
+  const YYYY = d.getFullYear();
+  const MM = p(d.getMonth() + 1);
+  const DD = p(d.getDate());
+  const hh = p(d.getHours());
+  const mm = p(d.getMinutes());
+  const ss = p(d.getSeconds());
   const ms = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
   const seq = cryptoRandInt(1000, 9999);
 
@@ -360,6 +360,7 @@ async function processRandomizeItem(item, options = {}) {
     };
     item.fakePiexif = fake.piexif;
     item.fakeCamera = fake.cam;
+    item.fakeDate   = fake.display.DateTimeOriginal;
     item.fakeLocation = { ...fake.loc };
 
     const locTxt = item.fakeLocation?.city ? ` | ${item.fakeLocation.city}` : '';
