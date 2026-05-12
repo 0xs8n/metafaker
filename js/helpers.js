@@ -218,15 +218,15 @@ export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
 // ── Camera colour science ────────────────────────────────────────
 
 const CAMERA_COLOR_PROFILES = {
-  'Apple':    { warmth:  3, satScale: 1.02, contrast: 1.01 },
-  'Samsung':  { warmth:  1, satScale: 1.05, contrast: 1.03 },
-  'Google':   { warmth: -2, satScale: 1.03, contrast: 1.02 },
-  'OnePlus':  { warmth:  1, satScale: 1.04, contrast: 1.02 },
-  'Xiaomi':   { warmth:  2, satScale: 1.04, contrast: 1.02 },
-  'Canon':    { warmth:  4, satScale: 1.03, contrast: 1.01 },
+  'Apple':    { warmth:  8, satScale: 1.05, contrast: 1.02 },
+  'Samsung':  { warmth:  3, satScale: 1.18, contrast: 1.08 },
+  'Google':   { warmth: -6, satScale: 1.08, contrast: 1.04 },
+  'OnePlus':  { warmth:  2, satScale: 1.12, contrast: 1.05 },
+  'Xiaomi':   { warmth:  4, satScale: 1.15, contrast: 1.06 },
+  'Canon':    { warmth: 12, satScale: 1.10, contrast: 1.03 },
   'Nikon':    { warmth:  0, satScale: 1.00, contrast: 1.00 },
-  'Sony':     { warmth: -3, satScale: 0.99, contrast: 1.01 },
-  'FUJIFILM': { warmth:  2, satScale: 1.02, contrast: 1.04 },
+  'Sony':     { warmth: -8, satScale: 0.97, contrast: 1.01 },
+  'FUJIFILM': { warmth:  5, satScale: 1.06, contrast: 1.12 },
 };
 
 /**
@@ -241,8 +241,8 @@ export function applyCameraColorProfile(ctx, w, h, make) {
   const base = CAMERA_COLOR_PROFILES[make];
   if (!base) return;
 
-  const warmth   = base.warmth   + (Math.random() - 0.5) * 2;
-  const satScale = base.satScale + (Math.random() - 0.5) * 0.03;
+  const warmth   = base.warmth   + (Math.random() - 0.5) * 4;
+  const satScale = base.satScale + (Math.random() - 0.5) * 0.06;
   const contrast = base.contrast;
 
   const id = ctx.getImageData(0, 0, w, h);
@@ -292,9 +292,9 @@ export function applyISPSimulation(ctx, w, h) {
   // ── 1. Demosaicing residuals ──────────────────────────────────
   // Real Bayer demosaicing leaves a Laplacian-shaped residual in the green
   // channel (dominant colour in the Bayer CFA). ML detectors analyse the
-  // frequency-domain power spectrum of this residual. Amplitude at 0.3–0.6%
-  // is forensically detectable but completely invisible to humans.
-  const demosaicStr = 0.003 + Math.random() * 0.003;
+  // frequency-domain power spectrum of this residual. Amplitude is kept at
+  // 0.8–1.4% of the signal — visually transparent but forensically present.
+  const demosaicStr = 0.008 + Math.random() * 0.006;
   const gChan = new Uint8Array(w * h);
   for (let i = 0; i < d.length; i += 4) gChan[i >> 2] = d[i + 1];
 
@@ -315,9 +315,7 @@ export function applyISPSimulation(ctx, w, h) {
   // Camera firmware applies a characteristic S-shaped tone curve for contrast.
   // The resulting histogram shape is a camera-authenticity marker. We use a
   // properly anchored S-curve: lut[0]=0, lut[128]=128, lut[255]=255.
-  // Kept very weak (0.06–0.14) so histogram shape changes are ML-detectable
-  // but not visible to a human observer.
-  const cs = 0.06 + Math.random() * 0.08;         // curve strength 0.06–0.14
+  const cs = 0.3 + Math.random() * 0.4;           // curve strength 0.3–0.7
   const hs = Math.sin(0.5 * Math.PI * cs) || 1;   // normaliser
   const lut = new Uint8Array(256);
   for (let i = 0; i < 256; i++) {
@@ -333,9 +331,7 @@ export function applyISPSimulation(ctx, w, h) {
   // ── 3. Unsharp mask sharpening ───────────────────────────────
   // In-camera sharpening (USM) creates characteristic halo/ringing around
   // edges — a statistical trace that forensic models are trained to see.
-  // Kept very subtle (0.04–0.08) so edge ringing is statistically present
-  // but halos are invisible at normal viewing distances.
-  const sharpStr = 0.04 + Math.random() * 0.04;   // 0.04–0.08
+  const sharpStr = 0.15 + Math.random() * 0.20;   // 0.15–0.35
   const orig     = new Uint8ClampedArray(d);
 
   for (let y = 1; y < h - 1; y++) {
@@ -369,18 +365,16 @@ export function applyISPSimulation(ctx, w, h) {
 export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
   const cameraType = cam.type || 'phone';
 
-  // Real lens vignetting: subtle cos⁴ light falloff toward corners.
-  // Values kept low so the darkening is statistically present in the noise
-  // profile but not visible as a gradient to the naked eye (~2–5% at corners).
+  // Real lens vignetting: ~10–20% light falloff at corners for phones,
+  // ~5–12% for DSLRs (better optics + usually partially corrected in-camera).
   const vBase = cameraType === 'dslr'
-    ? 0.012 + Math.random() * 0.018  // ~1.7–4% corner darkening
-    : 0.018 + Math.random() * 0.022; // ~2.5–5.5% corner darkening
+    ? 0.04 + Math.random() * 0.06   // 0.04–0.10 → ~6–14% corner darkening
+    : 0.06 + Math.random() * 0.08;  // 0.06–0.14 → ~9–20% corner darkening
 
   const diagonal = Math.sqrt(w * w + h * h);
-  // CA kept under 1px at the extreme corners — imperceptible fringing.
   const caMax    = cameraType === 'dslr'
-    ? (0.00005 + Math.random() * 0.00010) * diagonal  // ~0.16–0.48px at corner
-    : (0.00010 + Math.random() * 0.00015) * diagonal; // ~0.32–0.80px at corner
+    ? (0.0002 + Math.random() * 0.0003) * diagonal   // subtle (~0.04–0.1% of diagonal)
+    : (0.0004 + Math.random() * 0.0004) * diagonal;  // more visible (~0.04–0.12%)
 
   const cx   = w / 2;
   const cy   = h / 2;
@@ -489,12 +483,6 @@ export function stripApp0(dataUrl) {
  *   8. Custom JPEG encoder — camera-brand Q-tables with per-image ±2 jitter
  *      (browser canvas always emits identical Q-tables at a given quality level;
  *      forensic tools cluster images by Q-table pattern, this breaks that)
- *
- * NOTE: applyISPSimulation (demosaicing Laplacian + S-curve + USM) is intentionally
- * omitted. The Laplacian produces a visible "emboss" artifact on high-contrast
- * document images (receipts, screenshots, text) because the residual amplitude
- * needed to stay invisible is below the threshold that ML tools detect anyway.
- * The remaining 7 layers provide robust forensic coverage without spatial filters.
  */
 function antiForensicRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
@@ -520,6 +508,7 @@ function antiForensicRender(img, cam = {}) {
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0);
     applyCameraColorProfile(ctx, c.width, c.height, cameraMake);
+    applyISPSimulation(ctx, c.width, c.height);
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
     const dataUrl = canvasToJpegDataUrl(ctx, c.width, c.height, cameraMake, randomJpegQuality(cameraType));
@@ -562,13 +551,16 @@ function antiForensicRender(img, cam = {}) {
   // 4. Camera colour science
   applyCameraColorProfile(ctx, size.width, size.height, cameraMake);
 
-  // 5. Lens optical effects (vignetting + chromatic aberration)
+  // 5. ISP pipeline simulation (demosaicing residuals + S-curve + unsharp mask)
+  applyISPSimulation(ctx, size.width, size.height);
+
+  // 6. Lens optical effects (vignetting + chromatic aberration)
   applyLensOpticalEffects(ctx, size.width, size.height, cam);
 
-  // 6. Poisson-Gaussian noise (signal-dependent, ISO-matched)
+  // 7. Poisson-Gaussian noise (signal-dependent, ISO-matched)
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
-  // 7. Encode with camera-specific Q-tables (no APP0 written)
+  // 8. Encode with camera-specific Q-tables (no APP0 written)
   const dataUrl = canvasToJpegDataUrl(ctx, size.width, size.height, cameraMake, randomJpegQuality(cameraType));
 
   return { dataUrl, width: size.width, height: size.height };
