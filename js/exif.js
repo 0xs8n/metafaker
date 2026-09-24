@@ -15,7 +15,7 @@ import {
   pick, randInt, clamp, cryptoRandInt,
   jitterLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate,
   decToDMS, dmsToDec, dataUrlToBlob,
-  fmtBytes, fromRat, cleanExifStr, escapeHtml,
+  fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
 import { CAMERAS, LOCATIONS, getLensInfo } from './data.js';
 
@@ -302,19 +302,29 @@ export function generateFake(options = {}) {
 
 // ── Metadata Display ─────────────────────────────────────────────
 
-/** Which EXIF fields to show in each UI section. */
+/**
+ * Which EXIF fields to show in each UI section.
+ *
+ * Two parsers feed this: exifr (normal path) and piexifToDisplay (fallback).
+ * They name several tags differently, so both spellings are listed — a given
+ * object only ever carries one of each pair, so no row is duplicated.
+ *   0x0132 DateTime        -> exifr: ModifyDate
+ *   0xA002 PixelXDimension -> exifr: ExifImageWidth
+ *   0xA003 PixelYDimension -> exifr: ExifImageHeight
+ */
 export const SECTIONS = [
   { key: 'device',  title: 'Device',          fields: ['Make','Model','Software','LensMake','LensModel'] },
-  { key: 'capture', title: 'Capture Settings', fields: ['DateTimeOriginal','DateTime','SubSecTimeOriginal','ExposureTime','FNumber','ISO','FocalLength','FocalLengthIn35mmFormat','Flash','MeteringMode','ExposureProgram','ExposureMode','WhiteBalance','SceneCaptureType','SensingMethod'] },
+  { key: 'capture', title: 'Capture Settings', fields: ['DateTimeOriginal','DateTime','ModifyDate','SubSecTimeOriginal','ExposureTime','FNumber','ISO','FocalLength','FocalLengthIn35mmFormat','Flash','MeteringMode','ExposureProgram','ExposureMode','WhiteBalance','SceneCaptureType','SensingMethod'] },
   { key: 'gps',     title: 'Location (GPS)',   fields: ['GPSLatitude','GPSLongitude','GPSAltitude'] },
-  { key: 'image',   title: 'Image',            fields: ['PixelXDimension','PixelYDimension','ImageWidth','ImageHeight','Orientation','ColorSpace','XResolution','YResolution'] },
+  { key: 'image',   title: 'Image',            fields: ['PixelXDimension','PixelYDimension','ExifImageWidth','ExifImageHeight','ImageWidth','ImageHeight','Orientation','ColorSpace','XResolution','YResolution'] },
 ];
 
 /** Human-readable labels for EXIF field keys. */
 export const LABELS = {
   Make:'Camera Make', Model:'Camera Model', Software:'Software',
   LensMake:'Lens Make', LensModel:'Lens Model',
-  DateTimeOriginal:'Date Taken', DateTime:'Date Modified', SubSecTimeOriginal:'Sub-Second',
+  DateTimeOriginal:'Date Taken', DateTime:'Date Modified', ModifyDate:'Date Modified',
+  SubSecTimeOriginal:'Sub-Second',
   ExposureTime:'Shutter Speed', FNumber:'Aperture', ISO:'ISO',
   FocalLength:'Focal Length', FocalLengthIn35mmFormat:'35mm Equiv.',
   Flash:'Flash', MeteringMode:'Metering', ExposureProgram:'Program',
@@ -322,6 +332,7 @@ export const LABELS = {
   SceneCaptureType:'Scene Capture', SensingMethod:'Sensor',
   GPSLatitude:'Latitude', GPSLongitude:'Longitude', GPSAltitude:'Altitude',
   PixelXDimension:'Pixel Width', PixelYDimension:'Pixel Height',
+  ExifImageWidth:'Pixel Width', ExifImageHeight:'Pixel Height',
   ImageWidth:'Width', ImageHeight:'Height', Orientation:'Orientation',
   ColorSpace:'Color Space', XResolution:'X Resolution', YResolution:'Y Resolution',
 };
@@ -354,7 +365,7 @@ export function fmtVal(key, v) {
       if (typeof v === 'number') return `${v.toFixed(6)} deg`;
       if (Array.isArray(v) && v.length >= 3) return `${v[0]} deg ${v[1]}'${v[2]}"`;
       return String(v);
-    case 'DateTimeOriginal': case 'DateTime':
+    case 'DateTimeOriginal': case 'DateTime': case 'ModifyDate':
       if (v instanceof Date) return v.toLocaleString();
       return String(v);
     case 'Flash':            return FLASH_MAP[v]   ?? `Code ${v}`;
@@ -368,6 +379,7 @@ export function fmtVal(key, v) {
     case 'SensingMethod':    return SENSING_MAP[v] ?? `${v}`;
     case 'SubSecTimeOriginal': return String(v);
     case 'PixelXDimension': case 'PixelYDimension':
+    case 'ExifImageWidth': case 'ExifImageHeight':
       return typeof v === 'number' ? `${v} px` : String(v);
     case 'XResolution': case 'YResolution':
       return typeof v === 'number' ? `${v} DPI` : String(v);
@@ -403,18 +415,27 @@ export function renderMeta(exifObj, isFake = false) {
         const lat = exifObj.GPSLatitude, lon = exifObj.GPSLongitude;
         const latRef = exifObj.GPSLatitudeRef || exifObj.latitudeRef;
         const lonRef = exifObj.GPSLongitudeRef || exifObj.longitudeRef;
-        let latDec = typeof lat === 'number' ? lat : (Array.isArray(lat) && lat.length >= 3 ? lat[0] + lat[1]/60 + lat[2]/3600 : null);
-        let lonDec = typeof lon === 'number' ? lon : (Array.isArray(lon) && lon.length >= 3 ? lon[0] + lon[1]/60 + lon[2]/3600 : null);
-        if (latRef === 'S') latDec = -Math.abs(latDec);
-        if (lonRef === 'W' || (!lonRef && lonDec > 0)) lonDec = -Math.abs(lonDec);
+        const toDec = v => {
+          if (typeof v === 'number' && Number.isFinite(v)) return v;
+          if (Array.isArray(v) && v.length >= 3) return v[0] + v[1] / 60 + v[2] / 3600;
+          return null;
+        };
+        let latDec = toDec(lat);
+        let lonDec = toDec(lon);
+        // Only a ref flips the sign. Without one, the value is already signed
+        // (both exifr and piexifToDisplay return signed decimals) — assuming a
+        // hemisphere here would send eastern coordinates to the wrong side.
+        if (latDec != null && latRef === 'S') latDec = -Math.abs(latDec);
+        if (lonDec != null && lonRef === 'W') lonDec = -Math.abs(lonDec);
         if (latDec != null && lonDec != null) {
           extra = `<a class="gps-link" href="https://maps.google.com/?q=${latDec},${lonDec}" target="_blank" rel="noopener">Map</a>`;
         }
       }
 
+      // disp comes from EXIF in an untrusted image and lands in innerHTML.
       rows.push(`<div class="meta-row">
-        <span class="meta-key">${LABELS[field] || field}</span>
-        <span class="meta-val${isFake ? ' is-new' : ''}">${disp}${extra}</span>
+        <span class="meta-key">${escapeHtml(LABELS[field] || field)}</span>
+        <span class="meta-val${isFake ? ' is-new' : ''}">${escapeHtml(disp)}${extra}</span>
       </div>`);
     }
 

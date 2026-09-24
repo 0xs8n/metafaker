@@ -59,17 +59,10 @@ function hasProcessedOutput(item) {
   return !!(item?.modBlob || item?.modDataUrl);
 }
 
-function splitFileName(name) {
-  const safeName = String(name || 'image.jpg').trim() || 'image.jpg';
-  const match = safeName.match(/^(.*?)(\.[^.]+)?$/);
-  const base = (match?.[1] || safeName).trim() || 'image';
-  const ext = (match?.[2] || '').trim();
-  return { base, ext };
-}
-
 /**
  * Camera-appropriate filename matching the faked camera model.
- * Uses today's actual date with random time for date-based formats.
+ * Date-based formats use the faked capture date so the filename and the
+ * EXIF DateTimeOriginal agree; falls back to now if no fake date is set.
  */
 function getOutputName(item) {
   const d  = (item?.fakeDate instanceof Date && !isNaN(item.fakeDate)) ? item.fakeDate : new Date();
