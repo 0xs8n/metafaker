@@ -348,6 +348,19 @@ const EXPMODE_MAP = { 0:'Auto', 1:'Manual', 2:'Auto bracket' };
 const SCENE_MAP   = { 0:'Standard', 1:'Landscape', 2:'Portrait', 3:'Night' };
 const SENSING_MAP = { 1:'Not defined', 2:'One-chip color area', 3:'Two-chip color area', 4:'Three-chip color area', 5:'Color sequential area', 7:'Trilinear', 8:'Color sequential linear' };
 
+/**
+ * Look up a numeric EXIF code in one of the maps above.
+ *
+ * exifr parsed with { all: true } already translates many of these tags to
+ * readable strings ("Pattern", "Flash did not fire, auto mode"). Feeding those
+ * to a numeric map misses, and the miss fallback used to prepend its prefix —
+ * which is where "Mode Pattern" and "Code Flash did not fire, auto mode" came
+ * from. Anything already a string is passed straight through.
+ */
+function mapCode(map, v, prefix = '') {
+  return typeof v === 'number' ? (map[v] ?? `${prefix}${v}`) : String(v);
+}
+
 /** Format a raw EXIF value for display based on its field key. */
 export function fmtVal(key, v) {
   if (v == null) return null;
@@ -368,15 +381,15 @@ export function fmtVal(key, v) {
     case 'DateTimeOriginal': case 'DateTime': case 'ModifyDate':
       if (v instanceof Date) return v.toLocaleString();
       return String(v);
-    case 'Flash':            return FLASH_MAP[v]   ?? `Code ${v}`;
-    case 'MeteringMode':     return METER_MAP[v]   ?? `Mode ${v}`;
-    case 'ExposureProgram':  return PROG_MAP[v]    ?? `${v}`;
-    case 'Orientation':      return ORIENT_MAP[v]  ?? `${v}`;
-    case 'WhiteBalance':     return WB_MAP[v]      ?? `${v}`;
-    case 'ColorSpace':       return CS_MAP[v]      ?? `${v}`;
-    case 'ExposureMode':     return EXPMODE_MAP[v] ?? `${v}`;
-    case 'SceneCaptureType': return SCENE_MAP[v]   ?? `${v}`;
-    case 'SensingMethod':    return SENSING_MAP[v] ?? `${v}`;
+    case 'Flash':            return mapCode(FLASH_MAP,   v, 'Code ');
+    case 'MeteringMode':     return mapCode(METER_MAP,   v, 'Mode ');
+    case 'ExposureProgram':  return mapCode(PROG_MAP,    v);
+    case 'Orientation':      return mapCode(ORIENT_MAP,  v);
+    case 'WhiteBalance':     return mapCode(WB_MAP,      v);
+    case 'ColorSpace':       return mapCode(CS_MAP,      v);
+    case 'ExposureMode':     return mapCode(EXPMODE_MAP, v);
+    case 'SceneCaptureType': return mapCode(SCENE_MAP,   v);
+    case 'SensingMethod':    return mapCode(SENSING_MAP, v);
     case 'SubSecTimeOriginal': return String(v);
     case 'PixelXDimension': case 'PixelYDimension':
     case 'ExifImageWidth': case 'ExifImageHeight':
