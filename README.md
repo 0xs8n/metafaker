@@ -55,7 +55,7 @@ The canvas export is not a plain re-encode. Each image passes through these stag
 5. ISP simulation: an anchored S-curve tone mapping plus a light unsharp mask.
 6. Lens optics: radial vignetting and sub-pixel chromatic aberration.
 7. Poisson-Gaussian sensor noise scaled to the generated ISO value.
-8. JPEG encode at a randomised quality, then removal of the JFIF `APP0` marker that `canvas.toDataURL()` always emits.
+8. JPEG encode at a randomised quality, then removal of the two segments that identify the browser's encoder: the JFIF `APP0` marker, and the `APP2` ICC profile, which is byte-identical on every image Chrome encodes and names the browser vendor in its copyright string. A non-ICC `APP2` such as MPF is left alone.
 
 ## Metadata generation
 
