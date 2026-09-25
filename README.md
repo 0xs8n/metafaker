@@ -70,6 +70,20 @@ Examples of fields that are generated together:
 - capture timestamps including sub-second precision
 - GPS latitude, longitude, altitude, date stamp, and time stamp
 
+### Provenance
+
+The output is written as a photo exported from Adobe Camera Raw, not as a camera original, and that is deliberate.
+
+A camera original has to carry a MakerNote. Real ones are large and specific — a Sony body writes 103 tags, a Pixel writes 22 plus a 72 KB binary blob and a container declaring embedded depth and gain maps that have to actually exist. None of that can be synthesised convincingly, and a partial one is worse than none, because it is affirmative evidence of tampering rather than the ordinary absence that any editor produces.
+
+An export is a story the file can tell completely. Every Canon EOS R5 image sampled on Wikimedia Commons was one: camera `Make` and `Model` intact, `Software` naming the editor, zero MakerNote tags, and 6021x3783 against a native 8192x5464. Photographers shoot raw and export, so this is among the most common files that exist — and it is structurally what our output already was.
+
+Measured from a real Camera Raw export and applied: its quantization tables, the 3144-byte HP sRGB profile it embeds, its `APP14` marker placed immediately before `SOF`, an XMP packet with matching `CreatorTool`, dates and `xmpMM` identifiers, and single `DQT` and `DHT` segments rather than split ones. Encoding is at quality 1.0 because that is the only setting at which the browser emits 4:4:4 chroma, which is what an export uses.
+
+Camera make, model, exposure, optics, GPS and timestamps are unchanged — an export preserves all of them.
+
+Not reproduced: the `APP13` Photoshop block, which carries the original photographer's own embedded thumbnail and IPTC, and the restart interval.
+
 ### Consistency rules
 
 - **Manufacturer spellings.** Each profile stores the string the device actually writes, which is often not the marketing name: Samsung writes `samsung` in lowercase, Nikon writes `NIKON CORPORATION` and `NIKON Z 9` with a space, Sony writes `SONY`. Apple writes a bare version in `Software` (`17.4.1`), while Android phones write a build fingerprint or an HDR+ pipeline version.
