@@ -18,7 +18,7 @@ import {
   decToDMS, dmsToDec, dataUrlToBlob,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
-import { CAMERAS, LOCATIONS, getLensInfo } from './data.js';
+import { CAMERAS, LOCATIONS, pickOptics } from './data.js';
 
 // ── GPS Enforcement ──────────────────────────────────────────────
 
@@ -288,19 +288,9 @@ export function generateFake(options = {}) {
   const cam = pick(CAMERAS);
   const loc = jitterLocation(pick(LOCATIONS));
 
-  // ── Optics: a phone's focal length and aperture belong to one fixed lens,
-  // and the physical focal length is not the 35mm-equivalent one.
-  let focalPhys, focalEquiv, aperture;
-  if (cam.type === 'phone') {
-    const lensUnit = pick(cam.lenses);
-    focalPhys  = lensUnit.phys;
-    focalEquiv = lensUnit.equiv;
-    aperture   = lensUnit.f;
-  } else {
-    focalPhys  = pick(cam.focals);
-    focalEquiv = Math.round(focalPhys * (cam.crop || 1));
-    aperture   = pick(cam.apertures);
-  }
+  // Focal length, aperture and lens are chosen together so they describe a
+  // camera that can be assembled and a lens that can take the shot.
+  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
 
   let date;
   if (options.originalDate instanceof Date && !isNaN(options.originalDate)) {
@@ -326,7 +316,6 @@ export function generateFake(options = {}) {
   const meteringMode    = cam.type === 'phone' ? 5 : pick([2, 3, 5]);
   const exposureProgram = cam.type === 'phone' ? 2 : pick([1, 2, 3, 4]);
   const whiteBalance    = pick([0, 0, 0, 1]);
-  const lens            = getLensInfo(cam, focalPhys, aperture);
   const orientation     = 1;
   const exposureMode    = exposureProgram === 1 ? 1 : 0;
   const sceneCapture    = scene.name === 'night' ? 3 : 0;
@@ -429,8 +418,8 @@ export function generateFake(options = {}) {
   p["Exif"][px.ExifIFD.Contrast]                = contrast;
   p["Exif"][px.ExifIFD.Saturation]              = saturation;
   p["Exif"][px.ExifIFD.Sharpness]               = sharpness;
-  p["Exif"][px.ExifIFD.LensMake]                = lens.make;
-  p["Exif"][px.ExifIFD.LensModel]               = lens.model;
+  if (lens.make)  p["Exif"][px.ExifIFD.LensMake]  = lens.make;
+  if (lens.model) p["Exif"][px.ExifIFD.LensModel] = lens.model;
   // PixelXDimension / PixelYDimension set later after canvas render
 
   // The UTC offset the capture time was recorded at. Every current phone writes
