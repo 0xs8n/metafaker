@@ -7,7 +7,7 @@
 
 import {
   fmtBytes, escapeHtml, makeId, cryptoRandInt,
-  dataUrlToBlob, stripViaCanvas,
+  dataUrlToBlob, stripViaCanvas, makeThumbnail,
 } from './helpers.js';
 import {
   generateFake, enforceValidGps, readBackExifStrict,
@@ -76,21 +76,23 @@ function getOutputName(item) {
   const ms = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
   const seq = cryptoRandInt(1000, 9999);
 
+  // Matches the EXIF Make, which is the manufacturer's own spelling —
+  // "samsung" lowercase, "NIKON CORPORATION", "SONY".
   const make = item?.fakeCamera?.make || '';
 
   switch (make) {
     // Phones: modern OS exports always produce lowercase .jpg
-    case 'Apple':    return `IMG_${seq}.jpg`;
-    case 'Samsung':  return `${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
-    case 'Google':   return `PXL_${YYYY}${MM}${DD}_${hh}${mm}${ss}${ms}.jpg`;
-    case 'OnePlus':  return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
-    case 'Xiaomi':   return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+    case 'Apple':             return `IMG_${seq}.jpg`;
+    case 'samsung':           return `${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+    case 'Google':            return `PXL_${YYYY}${MM}${DD}_${hh}${mm}${ss}${ms}.jpg`;
+    case 'OnePlus':           return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+    case 'Xiaomi':            return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
     // Dedicated cameras: uppercase .JPG is the genuine on-camera format
-    case 'Canon':    return `IMG_${seq}.JPG`;
-    case 'Nikon':    return `DSC_${seq}.JPG`;
-    case 'Sony':     return `DSC0${seq}.JPG`;
-    case 'FUJIFILM': return `DSCF${seq}.JPG`;
-    default:         return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
+    case 'Canon':             return `IMG_${seq}.JPG`;
+    case 'NIKON CORPORATION': return `DSC_${seq}.JPG`;
+    case 'SONY':              return `DSC0${seq}.JPG`;
+    case 'FUJIFILM':          return `DSCF${seq}.JPG`;
+    default:                  return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
   }
 }
 
@@ -330,6 +332,17 @@ async function processRandomizeItem(item, options = {}) {
     fake.piexif.Exif[px.ExifIFD.PixelYDimension] = canvasResult.height;
     fake.display.PixelXDimension = canvasResult.width;
     fake.display.PixelYDimension = canvasResult.height;
+
+    // IFD1 thumbnail, rendered from the image we are actually shipping.
+    const thumb = await makeThumbnail(cleanJpeg);
+    if (thumb) {
+      fake.piexif.thumbnail = thumb.binary;
+      fake.piexif['1st'][px.ImageIFD.Compression]    = 6;   // JPEG-compressed
+      fake.piexif['1st'][px.ImageIFD.XResolution]    = [72, 1];
+      fake.piexif['1st'][px.ImageIFD.YResolution]    = [72, 1];
+      fake.piexif['1st'][px.ImageIFD.ResolutionUnit] = 2;
+      fake.piexif['1st'][px.ImageIFD.Orientation]    = 1;
+    }
 
     const bytes = px.dump(fake.piexif);
     let modDataUrl = px.insert(bytes, cleanJpeg);

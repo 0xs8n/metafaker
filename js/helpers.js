@@ -28,15 +28,72 @@ export function cryptoRandInt(lo, hi) {
 /**
  * Jitter a location by ±0.3° in each direction.
  * Works for any global coordinate — no US-specific clamping.
+ *
+ * Altitude is jittered by ±20 m around the city's ground elevation rather than
+ * randomised, so it stays consistent with the terrain at the coordinates. The
+ * timezone is carried through because GPSTimeStamp has to be derived from the
+ * photographed city's clock, not the machine's.
  */
 export function jitterLocation(base) {
   const lat = base.lat + (Math.random() - 0.5) * 0.6;
   const lon = base.lon + (Math.random() - 0.5) * 0.6;
   return {
     city: base.city,
+    tz: base.tz,
     lat: Number(clamp(lat, -89.99, 89.99).toFixed(6)),
     lon: Number(clamp(lon, -179.99, 179.99).toFixed(6)),
+    alt: Math.max(0, Math.round((base.alt ?? 0) + (Math.random() - 0.5) * 40)),
   };
+}
+
+// ── Timezone ─────────────────────────────────────────────────────
+
+/** Offset in ms that `tz` was running at the given UTC instant, DST included. */
+function tzOffsetMs(utcMs, tz) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date(utcMs));
+  const p = {};
+  for (const { type, value } of parts) p[type] = value;
+  const asIfUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
+  return asIfUtc - utcMs;
+}
+
+/**
+ * Read a wall-clock reading as a time in `tz` and return the real UTC instant.
+ *
+ * The capture time is a wall clock in the city the photo claims to come from,
+ * so the UTC instant behind it depends on that city's offset — which itself
+ * depends on the instant, hence the second pass. Without this, GPSTimeStamp was
+ * computed with the offset of whoever ran the tool: a photo "taken in Tokyo"
+ * carried the operator's own timezone.
+ */
+export function wallClockToUtc(d, tz) {
+  if (!tz) return d;
+  try {
+    const naive = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(),
+                           d.getHours(), d.getMinutes(), d.getSeconds());
+    const first = naive - tzOffsetMs(naive, tz);
+    // Re-resolve: near a DST boundary the offset at `first` can differ.
+    return new Date(naive - tzOffsetMs(first, tz));
+  } catch {
+    return d;                      // unknown zone — fall back to the naive time
+  }
+}
+
+/** The zone's offset at that instant as an EXIF OffsetTime string, "+09:00". */
+export function tzOffsetString(utcDate, tz) {
+  if (!tz) return null;
+  try {
+    const mins = Math.round(tzOffsetMs(utcDate.getTime(), tz) / 60000);
+    const sign = mins < 0 ? '-' : '+';
+    const a = Math.abs(mins);
+    return `${sign}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;
+  } catch {
+    return null;
+  }
 }
 
 // ── Date Formatting ──────────────────────────────────────────────
@@ -215,16 +272,20 @@ export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
 
 // ── Camera colour science ────────────────────────────────────────
 
+// Keyed by the EXIF Make string exactly as the manufacturer writes it, so these
+// stay in step with data.js — "samsung" is lowercase, Nikon is the full
+// corporate name and Sony is capitalised. A key that does not match means the
+// image silently ships with no colour science at all.
 const CAMERA_COLOR_PROFILES = {
-  'Apple':    { warmth:  8, satScale: 1.05, contrast: 1.02 },
-  'Samsung':  { warmth:  3, satScale: 1.18, contrast: 1.08 },
-  'Google':   { warmth: -6, satScale: 1.08, contrast: 1.04 },
-  'OnePlus':  { warmth:  2, satScale: 1.12, contrast: 1.05 },
-  'Xiaomi':   { warmth:  4, satScale: 1.15, contrast: 1.06 },
-  'Canon':    { warmth: 12, satScale: 1.10, contrast: 1.03 },
-  'Nikon':    { warmth:  0, satScale: 1.00, contrast: 1.00 },
-  'Sony':     { warmth: -8, satScale: 0.97, contrast: 1.01 },
-  'FUJIFILM': { warmth:  5, satScale: 1.06, contrast: 1.12 },
+  'Apple':             { warmth:  8, satScale: 1.05, contrast: 1.02 },
+  'samsung':           { warmth:  3, satScale: 1.18, contrast: 1.08 },
+  'Google':            { warmth: -6, satScale: 1.08, contrast: 1.04 },
+  'OnePlus':           { warmth:  2, satScale: 1.12, contrast: 1.05 },
+  'Xiaomi':            { warmth:  4, satScale: 1.15, contrast: 1.06 },
+  'Canon':             { warmth: 12, satScale: 1.10, contrast: 1.03 },
+  'NIKON CORPORATION': { warmth:  0, satScale: 1.00, contrast: 1.00 },
+  'SONY':              { warmth: -8, satScale: 0.97, contrast: 1.01 },
+  'FUJIFILM':          { warmth:  5, satScale: 1.06, contrast: 1.12 },
 };
 
 /**
@@ -569,6 +630,44 @@ function antiForensicRender(img, cam = {}) {
   dataUrl = stripSignatureSegments(dataUrl);
 
   return { dataUrl, width: size.width, height: size.height };
+}
+
+/**
+ * Render an EXIF IFD1 thumbnail from the finished image.
+ *
+ * Almost every camera JPEG carries one, so having none is conspicuous. It is
+ * generated from the processed output rather than the original upload on
+ * purpose: a thumbnail that disagrees with the full-size image is a louder
+ * signal than a missing one, and is exactly what reveals edited photos.
+ *
+ * Returns a binary string, or null if anything fails or it exceeds the 64kB
+ * that piexifjs (and the EXIF structure) allows.
+ */
+export function makeThumbnail(dataUrl, longEdge = 160) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onerror = () => resolve(null);
+    img.onload = () => {
+      try {
+        const scale = longEdge / Math.max(img.naturalWidth, img.naturalHeight, 1);
+        const w = Math.max(1, Math.round(img.naturalWidth  * scale));
+        const h = Math.max(1, Math.round(img.naturalHeight * scale));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        const b64 = c.toDataURL('image/jpeg', 0.7).split(',')[1];
+        if (!b64) return resolve(null);
+        const bin = atob(b64);
+        resolve(bin.length <= 63000 ? { binary: bin, width: w, height: h } : null);
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.src = dataUrl;
+  });
 }
 
 export function toJpeg(dataUrl, cam) {
