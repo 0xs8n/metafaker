@@ -3,6 +3,26 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!--
+    Defence in depth behind the output escaping in exif.js: EXIF from an
+    untrusted image reaches the metadata panel, so if anything ever slips
+    through unescaped, script-src stops it executing. The page carries no
+    inline script (every handler is bound in main.js), and neither piexifjs
+    nor exifr uses eval or the Function constructor, so no 'unsafe-inline'
+    or 'unsafe-eval' is needed for script.
+    'unsafe-inline' remains on style-src only, for the style="" attributes
+    in the markup below. frame-ancestors is omitted because a <meta> CSP
+    cannot carry it.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    script-src 'self' https://cdn.jsdelivr.net;
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src https://fonts.gstatic.com;
+    img-src 'self' blob: data:;
+    connect-src 'self';
+    base-uri 'none';
+    form-action 'none'">
   <title>MetaFaker - Image Metadata Faker</title>
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232563eb'/><circle cx='16' cy='16' r='7.5' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='2.5' fill='white'/></svg>">
