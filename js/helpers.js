@@ -505,7 +505,7 @@ function antiForensicRender(img, cam = {}) {
     const c   = document.createElement('canvas');
     c.width   = img.naturalWidth;
     c.height  = img.naturalHeight;
-    const ctx = c.getContext('2d');
+    const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(img, 0, 0);
     applyCameraColorProfile(ctx, c.width, c.height, cameraMake);
     applyISPSimulation(ctx, c.width, c.height);
@@ -523,7 +523,10 @@ function antiForensicRender(img, cam = {}) {
   const c   = document.createElement('canvas');
   c.width   = size.width;
   c.height  = size.height;
-  const ctx = c.getContext('2d');
+  // willReadFrequently keeps the canvas CPU-backed. The pipeline calls
+  // getImageData once per stage, and without this each call pays a
+  // GPU-to-CPU readback; Chrome warns about it in the console.
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
