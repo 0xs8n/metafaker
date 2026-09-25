@@ -29,8 +29,13 @@ export function cryptoRandInt(lo, hi) {
 // ── GPS Utilities ────────────────────────────────────────────────
 
 /**
- * Jitter a location by ±0.3° in each direction.
- * Works for any global coordinate — no US-specific clamping.
+ * Jitter a location within its own metro area.
+ *
+ * ±0.05° is roughly ±5 km. The previous ±0.3° moved a point up to 33 km, which
+ * for a coastal city dropped it in open water — Miami came out 30 km into the
+ * Atlantic, Boston into Massachusetts Bay. A photo whose GPS lands at sea is a
+ * far louder signal than one that repeats a city, and a few km of spread is
+ * what a real set of photos taken around a city looks like anyway.
  *
  * Altitude is jittered by ±20 m around the city's ground elevation rather than
  * randomised, so it stays consistent with the terrain at the coordinates. The
@@ -38,8 +43,8 @@ export function cryptoRandInt(lo, hi) {
  * photographed city's clock, not the machine's.
  */
 export function jitterLocation(base) {
-  const lat = base.lat + (Math.random() - 0.5) * 0.6;
-  const lon = base.lon + (Math.random() - 0.5) * 0.6;
+  const lat = base.lat + (Math.random() - 0.5) * 0.1;
+  const lon = base.lon + (Math.random() - 0.5) * 0.1;
   return {
     city: base.city,
     tz: base.tz,

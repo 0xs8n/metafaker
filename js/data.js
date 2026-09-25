@@ -182,7 +182,12 @@ export const CAMERAS = [
 
 // ── Location Database ────────────────────────────────────────────
 //
-// lon: negative = West, positive = East.
+// United States only, by design: every generated photo must geolocate inside
+// the US. International cities were removed rather than filtered at pick time,
+// so there is no code path that can select one. They are in git history if
+// they are ever wanted back.
+//
+// lon is always negative here (western hemisphere).
 // alt: ground elevation in metres. A GPS altitude unrelated to the terrain at
 //      the coordinates is a cheap consistency check to fail — a Denver photo
 //      tagged 143 m rather than ~1600 m does not survive one.
@@ -255,40 +260,6 @@ export const LOCATIONS = [
   { city:"Boise, ID",              lat: 43.6150, lon:-116.2023, alt: 824, tz:"America/Boise" },
   { city:"Anchorage, AK",          lat: 61.2181, lon:-149.9003, alt:  31, tz:"America/Anchorage" },
   { city:"Honolulu, HI",           lat: 21.3069, lon:-157.8583, alt:   6, tz:"Pacific/Honolulu" },
-  // Western Europe
-  { city:"London, UK",             lat: 51.5074, lon:  -0.1278, alt:  11, tz:"Europe/London" },
-  { city:"Paris, France",          lat: 48.8566, lon:   2.3522, alt:  35, tz:"Europe/Paris" },
-  { city:"Berlin, Germany",        lat: 52.5200, lon:  13.4050, alt:  34, tz:"Europe/Berlin" },
-  { city:"Amsterdam, Netherlands", lat: 52.3676, lon:   4.9041, alt:   2, tz:"Europe/Amsterdam" },
-  { city:"Madrid, Spain",          lat: 40.4168, lon:  -3.7038, alt: 667, tz:"Europe/Madrid" },
-  { city:"Barcelona, Spain",       lat: 41.3851, lon:   2.1734, alt:  12, tz:"Europe/Madrid" },
-  { city:"Rome, Italy",            lat: 41.9028, lon:  12.4964, alt:  21, tz:"Europe/Rome" },
-  { city:"Lisbon, Portugal",       lat: 38.7169, lon:  -9.1395, alt:  10, tz:"Europe/Lisbon" },
-  { city:"Vienna, Austria",        lat: 48.2082, lon:  16.3738, alt: 171, tz:"Europe/Vienna" },
-  { city:"Zürich, Switzerland",    lat: 47.3769, lon:   8.5417, alt: 408, tz:"Europe/Zurich" },
-  { city:"Stockholm, Sweden",      lat: 59.3293, lon:  18.0686, alt:  28, tz:"Europe/Stockholm" },
-  { city:"Manchester, UK",         lat: 53.4808, lon:  -2.2426, alt:  38, tz:"Europe/London" },
-  // Canada
-  { city:"Toronto, ON",            lat: 43.6532, lon: -79.3832, alt:  76, tz:"America/Toronto" },
-  { city:"Vancouver, BC",          lat: 49.2827, lon:-123.1207, alt:   2, tz:"America/Vancouver" },
-  { city:"Montreal, QC",           lat: 45.5017, lon: -73.5673, alt:  36, tz:"America/Toronto" },
-  { city:"Calgary, AB",            lat: 51.0447, lon:-114.0719, alt:1045, tz:"America/Edmonton" },
-  // Australia
-  { city:"Sydney, NSW",            lat:-33.8688, lon: 151.2093, alt:  19, tz:"Australia/Sydney" },
-  { city:"Melbourne, VIC",         lat:-37.8136, lon: 144.9631, alt:  31, tz:"Australia/Melbourne" },
-  { city:"Brisbane, QLD",          lat:-27.4698, lon: 153.0251, alt:  27, tz:"Australia/Brisbane" },
-  // Asia-Pacific
-  { city:"Tokyo, Japan",           lat: 35.6762, lon: 139.6503, alt:  40, tz:"Asia/Tokyo" },
-  { city:"Osaka, Japan",           lat: 34.6937, lon: 135.5023, alt:  16, tz:"Asia/Tokyo" },
-  { city:"Seoul, South Korea",     lat: 37.5665, lon: 126.9780, alt:  38, tz:"Asia/Seoul" },
-  { city:"Singapore",              lat:  1.3521, lon: 103.8198, alt:  15, tz:"Asia/Singapore" },
-  // Latin America
-  { city:"São Paulo, Brazil",      lat:-23.5505, lon: -46.6333, alt: 760, tz:"America/Sao_Paulo" },
-  { city:"Mexico City, Mexico",    lat: 19.4326, lon: -99.1332, alt:2240, tz:"America/Mexico_City" },
-  { city:"Buenos Aires, Argentina",lat:-34.6037, lon: -58.3816, alt:  25, tz:"America/Argentina/Buenos_Aires" },
-  // Middle East / Other
-  { city:"Dubai, UAE",             lat: 25.2048, lon:  55.2708, alt:   5, tz:"Asia/Dubai" },
-  { city:"Istanbul, Turkey",       lat: 41.0082, lon:  28.9784, alt:  39, tz:"Europe/Istanbul" },
 ];
 
 // ── Lens Database ────────────────────────────────────────────────
