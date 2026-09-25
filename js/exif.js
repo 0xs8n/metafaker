@@ -19,6 +19,7 @@ import {
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
 import { CAMERAS, LOCATIONS, pickOptics } from './data.js';
+import { buildMakerNote } from './makernote.js';
 
 // ── GPS Enforcement ──────────────────────────────────────────────
 
@@ -250,6 +251,44 @@ function cameraEvRange(cam, aperture) {
   ];
 }
 
+/**
+ * Pad ASCII values to an even byte count before writing.
+ *
+ * TIFF wants every value to start on a word boundary. piexifjs concatenates
+ * value data without padding, so one odd-length string — "17.4.1" and its
+ * terminator come to 7 bytes — pushes everything after it onto odd offsets, and
+ * `exiftool -validate` then reports a string of "Odd offset for ..." warnings on
+ * every file the tool produces. That is a deterministic signature of the writer,
+ * which is exactly what this project exists to avoid.
+ *
+ * piexifjs appends the NUL terminator itself, so a value is even overall when
+ * the string length is odd. Real encoders pad the same way, and every reader
+ * strips trailing NULs, so nothing downstream sees a difference.
+ *
+ * Only Ascii-typed tags are touched: Undefined tags such as ExifVersion are
+ * fixed-width and must not grow. So are a handful of Ascii ones — GPSDateStamp
+ * is specified as exactly 11 bytes, and padding it to 12 trades one validation
+ * warning for another.
+ */
+const FIXED_LENGTH_ASCII = new Set([
+  `GPS:${0x001d}`,   // GPSDateStamp, "YYYY:MM:DD\0"
+]);
+
+function alignAsciiValues(p, px) {
+  for (const [ifdKey, fallback] of [['0th', 'Image'], ['Exif', 'Exif'], ['GPS', 'GPS'],
+                                    ['Interop', 'Interop'], ['1st', 'Image']]) {
+    const ifd = p[ifdKey];
+    if (!ifd) continue;
+    const table = px.TAGS[ifdKey] || px.TAGS[fallback] || {};
+    for (const tag of Object.keys(ifd)) {
+      if (table[tag]?.type !== 'Ascii') continue;
+      if (FIXED_LENGTH_ASCII.has(`${ifdKey}:${tag}`)) continue;
+      const v = ifd[tag];
+      if (typeof v === 'string' && v.length % 2 === 0) ifd[tag] = v + '\0';
+    }
+  }
+}
+
 /** APEX brightness: Bv = Av + Tv - Sv. Wrong here would be its own tell. */
 function apexBrightness(aperture, exposureSec, iso) {
   const av = 2 * Math.log2(aperture);
@@ -368,6 +407,9 @@ export function generateFake(options = {}) {
   p["0th"][px.ImageIFD.YResolution]    = [dpi, 1];
   p["0th"][px.ImageIFD.ResolutionUnit] = 2;
   p["0th"][px.ImageIFD.Orientation]    = orientation;
+  // Required for JPEG by the Exif spec; `exiftool -validate` reports its
+  // absence, and a camera file that fails validation is its own signal.
+  p["0th"][px.ImageIFD.YCbCrPositioning] = 1;   // centered
 
   p["Exif"][px.ExifIFD.ExposureTime]          = shutter;
   p["Exif"][px.ExifIFD.FNumber]               = [Math.round(aperture * 100), 100];
@@ -422,6 +464,15 @@ export function generateFake(options = {}) {
   if (lens.model) p["Exif"][px.ExifIFD.LensModel] = lens.model;
   // PixelXDimension / PixelYDimension set later after canvas render
 
+  // A camera JPEG almost always carries a MakerNote; only Apple's is
+  // synthesised, because only its offsets survive being relocated. See
+  // makernote.js for what this does and does not buy.
+  const makerNote = buildMakerNote(cam.make, {
+    iso, focalEquiv, scene: scene.name,
+    iosMajor: parseInt(String(cam.sw).split('.')[0], 10) || 17,
+  });
+  if (makerNote) p["Exif"][px.ExifIFD.MakerNote] = makerNote;
+
   // The UTC offset the capture time was recorded at. Every current phone writes
   // this, and a GPS timestamp with no offset tag beside it stands out.
   if (offsetString && registerOffsetTimeTags(px)) {
@@ -440,6 +491,8 @@ export function generateFake(options = {}) {
   p["GPS"][px.GPSIFD.GPSDateStamp]    = fmtGpsDate(utc);
   p["GPS"][px.GPSIFD.GPSTimeStamp]    = gpsTimeStamp(utc);
   p["GPS"][px.GPSIFD.GPSMapDatum]     = "WGS-84";
+
+  alignAsciiValues(p, px);
 
   return { display, piexif: p, cam, loc, iso, scene: scene.name, ev: Number(ev.toFixed(2)) };
 }
