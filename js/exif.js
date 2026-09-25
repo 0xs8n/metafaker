@@ -20,6 +20,7 @@ import {
 } from './helpers.js';
 import { CAMERAS, LOCATIONS, pickOptics } from './data.js';
 import { buildMakerNote } from './makernote.js';
+import { dumpExifSafe } from './exif-writer.js';
 
 // ── GPS Enforcement ──────────────────────────────────────────────
 
@@ -48,7 +49,7 @@ export function enforceValidGps(dataUrl, loc, altitude = 0) {
   exifObj["GPS"][px.GPSIFD.GPSAltitudeRef]  = 0;
   exifObj["GPS"][px.GPSIFD.GPSAltitude]     = [safeAlt, 1];
 
-  return px.insert(px.dump(exifObj), dataUrl);
+  return px.insert(dumpExifSafe(exifObj, px), dataUrl);
 }
 
 // ── EXIF Parsing ─────────────────────────────────────────────────
