@@ -2,6 +2,9 @@
  * helpers.js — Pure utility functions used across the app.
  */
 
+import { requantize } from './jpeg-requantize.js';
+import { qtableFor } from './qtables.js';
+
 // ── Random & Math ────────────────────────────────────────────────
 
 export const pick = a => a[Math.floor(Math.random() * a.length)];
@@ -484,6 +487,43 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
  * what a viewer assumes when no profile is present, and plenty of real camera
  * JPEGs carry none at all.
  */
+/**
+ * Re-quantise a freshly encoded JPEG onto the camera's own table.
+ *
+ * The quantization table is one of the strongest camera fingerprints a JPEG
+ * carries, and the browser's says "browser". Overwriting the DQT bytes alone
+ * would change the picture — the coefficients were quantised against the old
+ * table — so the coefficients are rescaled onto the new one instead.
+ *
+ * Returns the input untouched when there is no table for that make, when the
+ * file is not plain baseline JPEG, or on any error. A camera-matched table is
+ * not worth a corrupted image.
+ */
+function applyCameraQuantization(dataUrl, make) {
+  const table = qtableFor(make);
+  if (!table) return dataUrl;
+
+  const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!m) return dataUrl;
+  try {
+    const bin = atob(m[2]);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+    const out = requantize(bytes, table);
+    if (!out) return dataUrl;
+
+    // Chunked, because String.fromCharCode blows the stack on a whole image.
+    let s = '';
+    for (let i = 0; i < out.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+    }
+    return `data:${m[1]};base64,${btoa(s)}`;
+  } catch (e) {
+    return dataUrl;
+  }
+}
+
 export function stripSignatureSegments(dataUrl) {
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (!m) return dataUrl;
@@ -572,7 +612,9 @@ function antiForensicRender(img, cam = {}) {
     applyISPSimulation(ctx, c.width, c.height);
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
-    let dataUrl = c.toDataURL('image/jpeg', randomJpegQuality(cameraType));
+    const qt = qtableFor(cameraMake);
+    let dataUrl = c.toDataURL('image/jpeg', qt ? 1.0 : randomJpegQuality(cameraType));
+    if (qt) dataUrl = applyCameraQuantization(dataUrl, cameraMake);
     dataUrl = stripSignatureSegments(dataUrl);
     return { dataUrl, width: c.width, height: c.height };
   }
@@ -625,8 +667,14 @@ function antiForensicRender(img, cam = {}) {
   // 7. Poisson-Gaussian noise (signal-dependent, ISO-matched)
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
-  // 8+9. Encode, strip APP0
-  let dataUrl = c.toDataURL('image/jpeg', randomJpegQuality(cameraType));
+  // 8+9. Encode, re-quantise onto the camera's table, strip the browser's markers.
+  // When a camera table is available the source is encoded at maximum quality
+  // first: its own quantisation is then near-lossless, so rescaling onto the
+  // camera table is close to having quantised with that table in the first
+  // place, rather than stacking two lossy passes.
+  const qtable = qtableFor(cameraMake);
+  let dataUrl = c.toDataURL('image/jpeg', qtable ? 1.0 : randomJpegQuality(cameraType));
+  if (qtable) dataUrl = applyCameraQuantization(dataUrl, cameraMake);
   dataUrl = stripSignatureSegments(dataUrl);
 
   return { dataUrl, width: size.width, height: size.height };
