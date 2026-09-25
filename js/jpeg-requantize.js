@@ -297,12 +297,16 @@ export function requantize(data, target) {
   push(0xFF, 0xD8);
   for (const seg of preSegments) out.push(...seg);
 
-  // DQT: both tables, 8-bit
+  // DQT: both tables in one segment, which is how the exporter packs them.
   const tqs = [...new Set(frame.comps.map(c => c.tq))].sort();
-  for (const tq of tqs) {
-    push(0xFF, 0xDB, 0x00, 0x43, tq & 15);
-    const t = dstQ[tq];
-    for (let k = 0; k < 64; k++) push(Math.max(1, Math.min(255, t[k])));
+  {
+    const len = 2 + tqs.length * 65;
+    push(0xFF, 0xDB, (len >> 8) & 0xFF, len & 0xFF);
+    for (const tq of tqs) {
+      push(tq & 15);
+      const t = dstQ[tq];
+      for (let k = 0; k < 64; k++) push(Math.max(1, Math.min(255, t[k])));
+    }
   }
   // SOF0
   const nc = frame.comps.length;
@@ -310,15 +314,18 @@ export function requantize(data, target) {
   push(0xFF, 0xC0, (sofLen >> 8) & 0xFF, sofLen & 0xFF, 8,
        (frame.h >> 8) & 0xFF, frame.h & 0xFF, (frame.w >> 8) & 0xFF, frame.w & 0xFF, nc);
   for (const c of frame.comps) push(c.id, (c.h << 4) | c.v, c.tq);
-  // DHT: the four standard tables
-  const dht = (tc, th, bits, vals) => {
-    const len = 3 + 16 + vals.length;
-    push(0xFF, 0xC4, (len >> 8) & 0xFF, len & 0xFF, (tc << 4) | th, ...bits, ...vals);
-  };
-  dht(0, 0, STD_DC_LUMA_BITS, STD_DC_LUMA_VALS);
-  dht(0, 1, STD_DC_CHROMA_BITS, STD_DC_CHROMA_VALS);
-  dht(1, 0, STD_AC_LUMA_BITS, STD_AC_LUMA_VALS);
-  dht(1, 1, STD_AC_CHROMA_BITS, STD_AC_CHROMA_VALS);
+  // DHT: all four tables in one segment, again matching the exporter.
+  {
+    const tables = [
+      [0, 0, STD_DC_LUMA_BITS, STD_DC_LUMA_VALS],
+      [0, 1, STD_DC_CHROMA_BITS, STD_DC_CHROMA_VALS],
+      [1, 0, STD_AC_LUMA_BITS, STD_AC_LUMA_VALS],
+      [1, 1, STD_AC_CHROMA_BITS, STD_AC_CHROMA_VALS],
+    ];
+    const len = 2 + tables.reduce((n, [, , bits, vals]) => n + 1 + 16 + vals.length, 0);
+    push(0xFF, 0xC4, (len >> 8) & 0xFF, len & 0xFF);
+    for (const [tc, th, bits, vals] of tables) push((tc << 4) | th, ...bits, ...vals);
+  }
   // SOS
   const sosLen = 6 + 2 * nc;
   push(0xFF, 0xDA, (sosLen >> 8) & 0xFF, sosLen & 0xFF, nc);
