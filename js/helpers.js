@@ -4,6 +4,7 @@
 
 import { requantize } from './jpeg-requantize.js';
 import { qtableFor } from './qtables.js';
+import { cameraAppProfile } from './icc-profiles.js';
 
 // ── Random & Math ────────────────────────────────────────────────
 
@@ -529,7 +530,31 @@ function applyCameraQuantization(dataUrl, make) {
   }
 }
 
-export function stripSignatureSegments(dataUrl) {
+/**
+ * Every Pixel original measured writes JFIF version 1.02; Chrome writes 1.01.
+ * Densities 1x1, no thumbnail, matching those files byte for byte.
+ */
+const JFIF_APP0 = Uint8Array.from(
+  [0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x02, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+
+/** Wrap an ICC profile into APP2 segments (chunked if it exceeds one segment). */
+function iccSegments(icc) {
+  const TAG = [0x49, 0x43, 0x43, 0x5F, 0x50, 0x52, 0x4F, 0x46, 0x49, 0x4C, 0x45, 0x00]; // "ICC_PROFILE\0"
+  const MAX = 65519;                       // 65535 minus the 16-byte segment overhead
+  const total = Math.max(1, Math.ceil(icc.length / MAX));
+  const segs = [];
+  for (let n = 0; n < total; n++) {
+    const part = icc.subarray(n * MAX, (n + 1) * MAX);
+    const len = 16 + part.length;
+    const seg = new Uint8Array(2 + len);
+    seg.set([0xFF, 0xE2, (len >> 8) & 0xFF, len & 0xFF, ...TAG, n + 1, total], 0);
+    seg.set(part, 18);
+    segs.push(seg);
+  }
+  return segs;
+}
+
+export function normaliseAppSegments(dataUrl, make) {
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (!m) return dataUrl;
 
@@ -544,7 +569,7 @@ export function stripSignatureSegments(dataUrl) {
     String.fromCharCode(...bytes.subarray(at, at + 11)) === 'ICC_PROFILE';
 
   // Walk the marker chain and collect the byte ranges worth keeping.
-  const keep = [[0, 2]];   // SOI
+  const keep = [];
   let i = 2;
   while (i + 3 < bytes.length && bytes[i] === 0xFF) {
     const marker = bytes[i + 1];
@@ -559,15 +584,24 @@ export function stripSignatureSegments(dataUrl) {
   }
   keep.push([i, bytes.length]);   // SOS onward
 
-  const size = keep.reduce((n, [a, b]) => n + (b - a), 0);
-  if (size === bytes.length) return dataUrl;    // nothing to remove
+  // Put back what this make actually writes, in place of the browser's.
+  const { icc, jfifApp0 } = cameraAppProfile(make);
+  const inserts = [];
+  if (jfifApp0) inserts.push(JFIF_APP0);
+  if (icc) inserts.push(...iccSegments(icc));
 
-  const out = new Uint8Array(size);
+  const insertLen = inserts.reduce((n, s) => n + s.length, 0);
+  const keepLen = keep.reduce((n, [a, b]) => n + (b - a), 0);
+  const out = new Uint8Array(2 + insertLen + keepLen);
   let o = 0;
+  out.set([0xFF, 0xD8], o); o += 2;
+  for (const s of inserts) { out.set(s, o); o += s.length; }
   for (const [a, b] of keep) { out.set(bytes.subarray(a, b), o); o += b - a; }
 
   let outBin = '';
-  for (let k = 0; k < out.length; k++) outBin += String.fromCharCode(out[k]);
+  for (let k = 0; k < out.length; k += 0x8000) {
+    outBin += String.fromCharCode.apply(null, out.subarray(k, k + 0x8000));
+  }
   return `data:${mime};base64,${btoa(outBin)}`;
 }
 
@@ -587,9 +621,59 @@ export function stripSignatureSegments(dataUrl) {
  *      (every real lens produces both; their absence is a forensic red flag)
  *   7. Poisson-Gaussian noise — σ²(x)=a·x+b, heteroscedastic per real sensors
  *      (ML tools verify signal-dependent variance; uniform Gaussian is detectable)
- *   8. Strip APP0 + ICC APP2 — removes the browser's encoder signature bytes
+ *   8. Swap the browser's APP0/ICC for the ones that make actually writes
  *   9. Bimodal JPEG quality — wider range = more quantization table diversity
  */
+/**
+ * Reshape the source rectangle to a frame the camera could actually produce.
+ *
+ * This is the loudest tell in the output. A file claiming to be a Pixel 6a at
+ * 533x1598 describes a frame no Pixel has ever produced — the aspect ratio
+ * alone rules it out before anyone looks at the resolution. The dimensions come
+ * from whatever image was loaded, not from the camera being claimed.
+ *
+ * Where the source is already close to one of the camera's frame shapes, it is
+ * centre-cropped onto it, and if the camera's measured native resolution is
+ * reachable without upscaling, the output lands on it exactly.
+ *
+ * Where it is not close — a receipt at 0.34, a panorama at 3.75 — nothing is
+ * done. Forcing those onto 9:16 would discard 40% and 65% of the picture
+ * respectively, and destroying the image to tidy its metadata is the wrong
+ * trade. Those outputs keep the mismatch.
+ */
+const MAX_CROP_TO_FIT = 0.15;
+
+function snapToCameraFrame(x, y, w, h, cam) {
+  const aspects = cam.aspects;
+  if (!aspects || !aspects.length) return { x, y, w, h, out: null };
+
+  const a = w / h;
+  let best = null;
+  for (const t of aspects) {
+    const loss = 1 - Math.min(a, t) / Math.max(a, t);
+    if (!best || loss < best.loss) best = { t, loss };
+  }
+  if (best.loss > MAX_CROP_TO_FIT) return { x, y, w, h, out: null };
+
+  let nw = w, nh = h;
+  if (a > best.t) nw = Math.round(h * best.t);
+  else            nh = Math.round(w / best.t);
+  const nx = x + Math.round((w - nw) / 2);
+  const ny = y + Math.round((h - nh) / 2);
+
+  // Land on a real capture resolution when the source is big enough to get
+  // there by downscaling. Upscaling to reach it would be its own giveaway.
+  let out = null;
+  for (const [mw0, mh0] of cam.modes || []) {
+    for (const [mw, mh] of [[mw0, mh0], [mh0, mw0]]) {
+      if (Math.abs(mw / mh - best.t) > 0.01) continue;
+      if (nw >= mw * 0.98 && nh >= mh * 0.98) { out = { width: mw, height: mh }; break; }
+    }
+    if (out) break;
+  }
+  return { x: nx, y: ny, w: nw, h: nh, out };
+}
+
 function antiForensicRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
   const cameraMake = cam.make || '';
@@ -620,13 +704,15 @@ function antiForensicRender(img, cam = {}) {
     const qt = qtableFor(cameraMake);
     let dataUrl = c.toDataURL('image/jpeg', qt ? 0.98 : randomJpegQuality(cameraType));
     if (qt) dataUrl = applyCameraQuantization(dataUrl, cameraMake);
-    dataUrl = stripSignatureSegments(dataUrl);
+    dataUrl = normaliseAppSegments(dataUrl, cameraMake);
     return { dataUrl, width: c.width, height: c.height };
   }
 
-  // 3. Random resize
-  const maxEdge = randomMaxEdge();
-  const size    = getExportDimensions(srcW, srcH, maxEdge);
+  // 3. Reshape to a frame the camera can produce, then size the output.
+  // A native capture resolution is used when reachable; otherwise the usual
+  // random long edge, which keeps dimensions from clustering.
+  const frame = snapToCameraFrame(srcX, srcY, srcW, srcH, cam);
+  const size  = frame.out || getExportDimensions(frame.w, frame.h, randomMaxEdge());
 
   const c   = document.createElement('canvas');
   c.width   = size.width;
@@ -658,7 +744,7 @@ function antiForensicRender(img, cam = {}) {
   ctx.scale(scale, scale);
   ctx.translate(-size.width / 2, -size.height / 2);
 
-  ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, size.width, size.height);
+  ctx.drawImage(img, frame.x, frame.y, frame.w, frame.h, 0, 0, size.width, size.height);
 
   // 4. Camera colour science
   applyCameraColorProfile(ctx, size.width, size.height, cameraMake);
@@ -681,7 +767,7 @@ function antiForensicRender(img, cam = {}) {
   const qtable = qtableFor(cameraMake);
   let dataUrl = c.toDataURL('image/jpeg', qtable ? 0.98 : randomJpegQuality(cameraType));
   if (qtable) dataUrl = applyCameraQuantization(dataUrl, cameraMake);
-  dataUrl = stripSignatureSegments(dataUrl);
+  dataUrl = normaliseAppSegments(dataUrl, cameraMake);
 
   return { dataUrl, width: size.width, height: size.height };
 }
