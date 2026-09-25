@@ -85,7 +85,9 @@ Examples of fields that are generated together:
 
 Output is checked with `exiftool -validate`, which reports `OK` for all nine camera makes.
 
-The location dataset in `js/data.js` covers cities across North America, Europe, Asia-Pacific, Australia, Latin America, and the Middle East. A chosen city is jittered by up to 0.3 degrees in each direction, and `js/exif.js` clamps the result to valid global ranges and derives the matching N/S and E/W references.
+The location dataset in `js/data.js` is 58 United States cities, covering the lower 48 plus Alaska and Hawaii. Every generated photo geolocates inside the US by construction: international cities were removed from the dataset rather than filtered when picking, so no code path can select one.
+
+A chosen city is jittered by up to 0.05 degrees, roughly 5 km, which keeps the coordinate inside that city's metro area. The earlier 0.3 degrees moved a point as much as 33 km and put coastal cities out at sea — Miami landed 30 km into the Atlantic — and a photo whose GPS falls in open water is a louder signal than one that repeats a city.
 
 ## Export format
 
