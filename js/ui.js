@@ -9,6 +9,7 @@ import {
   fmtBytes, escapeHtml, makeId, cryptoRandInt,
   dataUrlToBlob, stripViaCanvas, makeThumbnail,
 } from './helpers.js';
+import { dumpExifSafe } from './exif-writer.js';
 import {
   generateFake, enforceValidGps, readBackExifStrict,
   parseFileExif, renderMeta,
@@ -344,7 +345,7 @@ async function processRandomizeItem(item, options = {}) {
       fake.piexif['1st'][px.ImageIFD.Orientation]    = 1;
     }
 
-    const bytes = px.dump(fake.piexif);
+    const bytes = dumpExifSafe(fake.piexif, px);
     let modDataUrl = px.insert(bytes, cleanJpeg);
     modDataUrl = enforceValidGps(modDataUrl, fake.loc, fake.display.GPSAltitude);
 
