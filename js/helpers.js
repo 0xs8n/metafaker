@@ -641,7 +641,9 @@ export function normaliseAppSegments(dataUrl, make) {
  * respectively, and destroying the image to tidy its metadata is the wrong
  * trade. Those outputs keep the mismatch.
  */
-const MAX_CROP_TO_FIT = 0.15;
+const MAX_CROP_TO_FIT = 0.20;   // 16:9 onto a 3:2 body costs 15.6%, which is a
+                                // normal crop; a receipt costs 40% and a
+                                // panorama 65%, which are not.
 
 function snapToCameraFrame(x, y, w, h, cam) {
   const aspects = cam.aspects;
