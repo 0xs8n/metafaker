@@ -163,6 +163,24 @@ export async function readBackExifStrict(dataUrl) {
 // ── Fake EXIF Generation ─────────────────────────────────────────
 
 /**
+ * Pick an ISO, biased toward the low end of the camera's range.
+ *
+ * The ISO lists run from base to the sensor ceiling, so a uniform pick put
+ * roughly 40% of images at ISO 1600 or above. That is implausible — real photo
+ * libraries cluster near base ISO — and it is expensive, because the noise
+ * stage scales with ISO: at ISO 1600 a 900K-pixel frame encoded to 43KB, at
+ * ISO 25600 the same frame came out 323KB, almost all of it grain.
+ *
+ * Squaring a uniform random pulls the index toward the start of the list
+ * (mean index lands at 1/3 of the range) while still reaching the ceiling
+ * occasionally, so per-image diversity survives.
+ */
+function pickIso(isos) {
+  const r = Math.random();
+  return isos[Math.min(Math.floor(r * r * isos.length), isos.length - 1)];
+}
+
+/**
  * Generate a complete set of realistic fake EXIF metadata.
  *
  * Picks a random camera, settings, date, and US location, then builds
@@ -176,7 +194,7 @@ export function generateFake(options = {}) {
   const cam      = pick(CAMERAS);
   const shutter  = pick(cam.shutters);
   const aperture = pick(cam.apertures);
-  const iso      = pick(cam.isos);
+  const iso      = pickIso(cam.isos);
   const focal    = pick(cam.focals);
 
   let date;

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MetaFaker - Image Metadata Faker</title>
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232563eb'/><circle cx='16' cy='16' r='7.5' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='2.5' fill='white'/></svg>">
   <link rel="stylesheet" href="css/style.css">
   <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.js"
           integrity="sha384-yk/k1j9hKtYh4LJRX0d6o3pO9c8h4lp2IMnWdamQhThRA2Z9B0YNDeGKyDmPXnnJ"
@@ -17,7 +18,7 @@
   <p>Strip, spoof &amp; protect your image metadata</p>
   <span class="header-spacer"></span>
   <span class="header-badge">100% Client-Side</span>
-  <button class="theme-toggle" onclick="App.toggleTheme()" title="Toggle dark mode">
+  <button class="theme-toggle" id="btnTheme" title="Toggle dark mode">
     <span class="material-icons" id="themeIcon">dark_mode</span>
   </button>
 </header>
@@ -64,12 +65,12 @@
           <input type="checkbox" id="chkKeepDate">
           <span>Keep original date</span>
         </label>
-        <button class="btn btn-primary" id="btnRandom" onclick="App.randomize()">Randomize Current</button>
-        <button class="btn btn-secondary" id="btnRandomAll" onclick="App.randomizeAll()">Randomize Entire Batch</button>
-        <button class="btn btn-danger" id="btnClear" onclick="App.clear()">Strip Current Metadata</button>
-        <button class="btn btn-success" id="btnDownload" disabled onclick="App.download()">Download Current</button>
-        <button class="btn btn-success" id="btnDownloadAll" disabled onclick="App.downloadAll()">Download Entire Batch</button>
-        <button class="btn btn-secondary" onclick="App.reset()">Clear Queue</button>
+        <button class="btn btn-primary" id="btnRandom">Randomize Current</button>
+        <button class="btn btn-secondary" id="btnRandomAll">Randomize Entire Batch</button>
+        <button class="btn btn-danger" id="btnClear">Strip Current Metadata</button>
+        <button class="btn btn-success" id="btnDownload" disabled>Download Current</button>
+        <button class="btn btn-success" id="btnDownloadAll" disabled>Download Entire Batch</button>
+        <button class="btn btn-secondary" id="btnReset">Clear Queue</button>
       </div>
     </div>
 
@@ -80,7 +81,7 @@
         <span class="badge badge-none" id="metaBadge">-</span>
       </div>
       <div class="meta-tabs">
-        <div class="tab active" id="tabOrig" onclick="App.setTab('orig')">
+        <div class="tab active" id="tabOrig">
           Current <span class="tab-count" id="countOrig">0</span>
         </div>
       </div>

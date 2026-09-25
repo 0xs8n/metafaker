@@ -406,13 +406,24 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
 }
 
 /**
- * Strip the JFIF APP0 marker from a JPEG data URL.
+ * Strip the browser's signature APP segments from a JPEG data URL.
  *
- * canvas.toDataURL() always emits APP0 (FF E0) right after SOI.
- * Real cameras never write JFIF APP0 — they write APP1 (EXIF) only.
- * Removing it eliminates the consistent browser-version byte signature.
+ * canvas.toDataURL() emits two segments that no camera would pair with the
+ * EXIF we write:
+ *
+ *   APP0 (FF E0) — the JFIF header. Real cameras write APP1 (Exif) instead.
+ *   APP2 (FF E2) — the encoder's ICC profile. Chrome's is 470 bytes, is
+ *                  byte-identical on every image the browser encodes, and its
+ *                  copyright string names the browser vendor. That makes it
+ *                  both a browser fingerprint and a perfect key for correlating
+ *                  any two images this tool produced, which is exactly what the
+ *                  per-image identity work was meant to prevent.
+ *
+ * Dropping the ICC profile changes no pixel: the data is already sRGB, which is
+ * what a viewer assumes when no profile is present, and plenty of real camera
+ * JPEGs carry none at all.
  */
-export function stripApp0(dataUrl) {
+export function stripSignatureSegments(dataUrl) {
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (!m) return dataUrl;
 
@@ -421,19 +432,33 @@ export function stripApp0(dataUrl) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
-  // Must be SOI (FF D8) + APP0 (FF E0)
-  if (bytes[0] !== 0xFF || bytes[1] !== 0xD8 ||
-      bytes[2] !== 0xFF || bytes[3] !== 0xE0) {
-    return dataUrl;
+  if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return dataUrl;   // not a JPEG
+
+  const isIccProfile = at =>
+    String.fromCharCode(...bytes.subarray(at, at + 11)) === 'ICC_PROFILE';
+
+  // Walk the marker chain and collect the byte ranges worth keeping.
+  const keep = [[0, 2]];   // SOI
+  let i = 2;
+  while (i + 3 < bytes.length && bytes[i] === 0xFF) {
+    const marker = bytes[i + 1];
+    if (marker === 0xDA) break;                 // SOS: entropy data follows
+    const len = (bytes[i + 2] << 8) | bytes[i + 3];
+    const end = i + 2 + len;
+    if (len < 2 || end > bytes.length) return dataUrl;   // malformed, leave alone
+    if (!(marker === 0xE0 || (marker === 0xE2 && isIccProfile(i + 4)))) {
+      keep.push([i, end]);
+    }
+    i = end;
   }
+  keep.push([i, bytes.length]);   // SOS onward
 
-  const app0Len = (bytes[4] << 8) | bytes[5]; // includes the 2 length bytes
-  const app0End = 2 + 2 + app0Len;            // SOI(2) + marker(2) + length body
+  const size = keep.reduce((n, [a, b]) => n + (b - a), 0);
+  if (size === bytes.length) return dataUrl;    // nothing to remove
 
-  const out = new Uint8Array(bytes.length - 2 - app0Len);
-  out[0] = 0xFF;
-  out[1] = 0xD8;
-  out.set(bytes.subarray(app0End), 2);
+  const out = new Uint8Array(size);
+  let o = 0;
+  for (const [a, b] of keep) { out.set(bytes.subarray(a, b), o); o += b - a; }
 
   let outBin = '';
   for (let k = 0; k < out.length; k++) outBin += String.fromCharCode(out[k]);
@@ -456,7 +481,7 @@ export function stripApp0(dataUrl) {
  *      (every real lens produces both; their absence is a forensic red flag)
  *   7. Poisson-Gaussian noise — σ²(x)=a·x+b, heteroscedastic per real sensors
  *      (ML tools verify signal-dependent variance; uniform Gaussian is detectable)
- *   8. Strip APP0 — removes JFIF browser-version signature bytes
+ *   8. Strip APP0 + ICC APP2 — removes the browser's encoder signature bytes
  *   9. Bimodal JPEG quality — wider range = more quantization table diversity
  */
 function antiForensicRender(img, cam = {}) {
@@ -487,7 +512,7 @@ function antiForensicRender(img, cam = {}) {
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
     let dataUrl = c.toDataURL('image/jpeg', randomJpegQuality(cameraType));
-    dataUrl = stripApp0(dataUrl);
+    dataUrl = stripSignatureSegments(dataUrl);
     return { dataUrl, width: c.width, height: c.height };
   }
 
@@ -538,7 +563,7 @@ function antiForensicRender(img, cam = {}) {
 
   // 8+9. Encode, strip APP0
   let dataUrl = c.toDataURL('image/jpeg', randomJpegQuality(cameraType));
-  dataUrl = stripApp0(dataUrl);
+  dataUrl = stripSignatureSegments(dataUrl);
 
   return { dataUrl, width: size.width, height: size.height };
 }

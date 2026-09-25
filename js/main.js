@@ -7,7 +7,9 @@
 
 import { App, S } from './ui.js';
 
-// Expose on window so HTML onclick handlers (e.g. App.randomize()) work
+// Exposed for console debugging only. Nothing in the page calls through
+// window any more — every handler is bound below, so the Content-Security
+// -Policy in index.html can forbid inline script outright.
 window.App = App;
 window.S = S;
 
@@ -42,3 +44,31 @@ zone.addEventListener('drop', e => {
 input.addEventListener('change', e => {
   App.loadFiles(e.target.files);
 });
+
+// ── Control Wiring ───────────────────────────────────────────────
+// Bound here rather than as onclick="" attributes so the page needs no inline
+// script, which is what lets the CSP block script injection outright.
+
+const bind = (id, fn) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', fn);
+};
+
+bind('btnTheme',       () => App.toggleTheme());
+bind('btnRandom',      () => App.randomize());
+bind('btnRandomAll',   () => App.randomizeAll());
+bind('btnClear',       () => App.clear());
+bind('btnDownload',    () => App.download());
+bind('btnDownloadAll', () => App.downloadAll());
+bind('btnReset',       () => App.reset());
+bind('tabOrig',        () => App.setTab('orig'));
+
+// The batch strip is re-rendered on every state change, so delegate from the
+// container instead of rebinding each thumbnail.
+const strip = document.getElementById('batchStrip');
+if (strip) {
+  strip.addEventListener('click', e => {
+    const item = e.target.closest('.batch-item');
+    if (item?.dataset.id) App.select(item.dataset.id);
+  });
+}

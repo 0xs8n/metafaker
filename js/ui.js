@@ -176,7 +176,7 @@ function renderBatchStrip() {
       : `<div class="batch-thumb-empty"><span class="material-icons">image</span></div>`;
 
     return `
-      <div class="batch-item${item.id === S.activeId ? ' active' : ''}" onclick="App.select('${item.id}')">
+      <div class="batch-item${item.id === S.activeId ? ' active' : ''}" data-id="${escapeHtml(item.id)}">
         ${thumb}
         <div class="batch-item-body">
           <div class="batch-item-name">${escapeHtml(item.file.name)}</div>
