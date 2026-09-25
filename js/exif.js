@@ -14,6 +14,7 @@ import exifr from 'https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.esm.js';
 import {
   pick, randInt, clamp, cryptoRandInt,
   jitterLocation, fmtDate, fmtGpsDate, gpsTimeStamp, randomDate,
+  wallClockToUtc, tzOffsetString,
   decToDMS, dmsToDec, dataUrlToBlob,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
@@ -163,21 +164,114 @@ export async function readBackExifStrict(dataUrl) {
 // ── Fake EXIF Generation ─────────────────────────────────────────
 
 /**
- * Pick an ISO, biased toward the low end of the camera's range.
- *
- * The ISO lists run from base to the sensor ceiling, so a uniform pick put
- * roughly 40% of images at ISO 1600 or above. That is implausible — real photo
- * libraries cluster near base ISO — and it is expensive, because the noise
- * stage scales with ISO: at ISO 1600 a 900K-pixel frame encoded to 43KB, at
- * ISO 25600 the same frame came out 323KB, almost all of it grain.
- *
- * Squaring a uniform random pulls the index toward the start of the list
- * (mean index lands at 1/3 of the range) while still reaching the ceiling
- * occasionally, so per-image diversity survives.
+ * Scene brightness in EV at ISO 100, weighted the way a real camera roll is:
+ * mostly daylight, a good share of interiors, a little night.
  */
-function pickIso(isos) {
-  const r = Math.random();
-  return isos[Math.min(Math.floor(r * r * isos.length), isos.length - 1)];
+const SCENES = [
+  { name: 'daylight', evMin: 13, evMax: 16, weight: 36, dark: false },
+  { name: 'overcast', evMin: 10, evMax: 13, weight: 24, dark: false },
+  { name: 'indoor',   evMin:  6, evMax:  9, weight: 25, dark: false },
+  { name: 'dim',      evMin:  3, evMax:  6, weight: 10, dark: true  },
+  { name: 'night',    evMin:  0, evMax:  3, weight:  5, dark: true  },
+];
+
+function pickScene() {
+  let r = Math.random() * SCENES.reduce((n, s) => n + s.weight, 0);
+  for (const s of SCENES) { r -= s.weight; if (r <= 0) return s; }
+  return SCENES[0];
+}
+
+/**
+ * Solve a physically consistent shutter/ISO pair for a scene and aperture.
+ *
+ * Exposure is not three free variables. They are tied together by
+ *
+ *     N² / t  =  (ISO / 100) · 2^EV
+ *
+ * so picking shutter, aperture and ISO independently produced frames no scene
+ * could have produced — ISO 51200 at 1/4000s and f/1.4 describes somewhere
+ * darker than a sealed room, and anyone who computes EV back out of the EXIF
+ * sees it at a glance.
+ *
+ * Real cameras resolve it the way this does: hold the aperture, raise ISO only
+ * as far as the shutter requires, then land on a speed from the fixed ladder.
+ * The rounding left over from that snap is kept, because a real camera's EXIF
+ * does not come out algebraically perfect either.
+ *
+ * Checked against a published OnePlus 5 frame — ISO 500, f/1.7, 1/100, which
+ * is EV 5.85. Fed that scene and aperture, this returns ISO 400 at 1/125.
+ */
+function solveExposure(cam, aperture, ev, focalEquiv) {
+  const isos = [...cam.isos].sort((a, b) => a - b);
+  const seconds = s => s[0] / s[1];
+
+  // Slowest shutter still expected to come out sharp. Phones stabilise hard and
+  // target around 1/60; bodies follow roughly the 1/focal reciprocal rule.
+  const slowest = cam.type === 'phone'
+    ? 1 / 60
+    : clamp(1 / Math.max(focalEquiv, 1), 1 / 250, 1 / 30);
+
+  const required = iso => 100 * aperture * aperture / (iso * Math.pow(2, ev));
+
+  // Lowest ISO that keeps the shutter short enough; if none does, the sensor is
+  // maxed out and the exposure simply runs long, as it would at night.
+  let iso = isos[isos.length - 1];
+  for (const candidate of isos) {
+    if (required(candidate) <= slowest) { iso = candidate; break; }
+  }
+
+  // Snap to the nearest rung in stops, not in seconds.
+  const want = required(iso);
+  let shutter = cam.shutters[0];
+  let bestErr = Infinity;
+  for (const s of cam.shutters) {
+    const err = Math.abs(Math.log2(seconds(s)) - Math.log2(want));
+    if (err < bestErr) { bestErr = err; shutter = s; }
+  }
+  return { shutter, iso };
+}
+
+/**
+ * The brightest and darkest scenes this body can actually meter at a given
+ * aperture — base ISO with its fastest shutter at one end, maximum ISO with its
+ * slowest at the other.
+ *
+ * Scenes are clamped into this range before solving. Without it, an f/1.42
+ * phone handed full midday sun needed 1/16000s, its shutter stopped at 1/4000,
+ * and the written triplet came out two stops away from the scene it claimed.
+ * Real hardware cannot record what it cannot expose, so neither should this.
+ */
+function cameraEvRange(cam, aperture) {
+  const secs   = cam.shutters.map(s => s[0] / s[1]);
+  const evAt   = (t, iso) => Math.log2(aperture * aperture / t) - Math.log2(iso / 100);
+  return [
+    evAt(Math.max(...secs), Math.max(...cam.isos)),
+    evAt(Math.min(...secs), Math.min(...cam.isos)),
+  ];
+}
+
+/** APEX brightness: Bv = Av + Tv - Sv. Wrong here would be its own tell. */
+function apexBrightness(aperture, exposureSec, iso) {
+  const av = 2 * Math.log2(aperture);
+  const tv = -Math.log2(exposureSec);
+  const sv = Math.log2(iso / 3.125);
+  return av + tv - sv;
+}
+
+// piexifjs 1.0.6 predates the OffsetTime tags, so its writer rejects them
+// unless they are registered. Every current phone writes OffsetTimeOriginal,
+// and its absence next to a GPS timestamp is conspicuous.
+const TAG_OFFSET_TIME            = 0x9010;
+const TAG_OFFSET_TIME_ORIGINAL   = 0x9011;
+const TAG_OFFSET_TIME_DIGITIZED  = 0x9012;
+
+function registerOffsetTimeTags(px) {
+  const tags = px?.TAGS?.Exif;
+  if (!tags) return false;
+  if (!tags[TAG_OFFSET_TIME])           tags[TAG_OFFSET_TIME]           = { name: 'OffsetTime',          type: 'Ascii' };
+  if (!tags[TAG_OFFSET_TIME_ORIGINAL])  tags[TAG_OFFSET_TIME_ORIGINAL]  = { name: 'OffsetTimeOriginal',  type: 'Ascii' };
+  if (!tags[TAG_OFFSET_TIME_DIGITIZED]) tags[TAG_OFFSET_TIME_DIGITIZED] = { name: 'OffsetTimeDigitized', type: 'Ascii' };
+  return true;
 }
 
 /**
@@ -191,11 +285,22 @@ function pickIso(isos) {
  * Returns { display, piexif, cam, loc }.
  */
 export function generateFake(options = {}) {
-  const cam      = pick(CAMERAS);
-  const shutter  = pick(cam.shutters);
-  const aperture = pick(cam.apertures);
-  const iso      = pickIso(cam.isos);
-  const focal    = pick(cam.focals);
+  const cam = pick(CAMERAS);
+  const loc = jitterLocation(pick(LOCATIONS));
+
+  // ── Optics: a phone's focal length and aperture belong to one fixed lens,
+  // and the physical focal length is not the 35mm-equivalent one.
+  let focalPhys, focalEquiv, aperture;
+  if (cam.type === 'phone') {
+    const lensUnit = pick(cam.lenses);
+    focalPhys  = lensUnit.phys;
+    focalEquiv = lensUnit.equiv;
+    aperture   = lensUnit.f;
+  } else {
+    focalPhys  = pick(cam.focals);
+    focalEquiv = Math.round(focalPhys * (cam.crop || 1));
+    aperture   = pick(cam.apertures);
+  }
 
   let date;
   if (options.originalDate instanceof Date && !isNaN(options.originalDate)) {
@@ -205,14 +310,30 @@ export function generateFake(options = {}) {
     date = randomDate();
   }
 
-  const flash           = pick([0, 16, 24]);
+  // ── Exposure: one scene drives shutter, ISO and flash together.
+  const scene = pickScene();
+  const flashFired = scene.dark && Math.random() < (cam.type === 'phone' ? 0.35 : 0.25);
+  // A fired flash lights the subject, so the frame is metered several stops
+  // brighter than the ambient scene.
+  const rawEv = scene.evMin + Math.random() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
+  const [evLo, evHi] = cameraEvRange(cam, aperture);
+  const ev = clamp(rawEv, evLo, evHi);
+
+  const { shutter, iso } = solveExposure(cam, aperture, ev, focalEquiv);
+  const exposureSec = shutter[0] / shutter[1];
+
+  const flash = flashFired ? 25 : (scene.dark ? pick([24, 16]) : pick([24, 16, 0]));
   const meteringMode    = cam.type === 'phone' ? 5 : pick([2, 3, 5]);
   const exposureProgram = cam.type === 'phone' ? 2 : pick([1, 2, 3, 4]);
   const whiteBalance    = pick([0, 0, 0, 1]);
-  const loc             = jitterLocation(pick(LOCATIONS));
-  const lens            = getLensInfo(cam, focal, aperture);
+  const lens            = getLensInfo(cam, focalPhys, aperture);
   const orientation     = 1;
   const exposureMode    = exposureProgram === 1 ? 1 : 0;
+  const sceneCapture    = scene.name === 'night' ? 3 : 0;
+
+  // GPS timestamps are UTC, resolved through the photographed city's zone.
+  const utc          = wallClockToUtc(date, loc.tz);
+  const offsetString = tzOffsetString(utc, loc.tz);
 
   // Per-image randomised fields — formerly all fixed constants (forensic red flags)
   const dpi             = cam.type === 'phone' ? pick([72, 72, 72, 96]) : pick([240, 240, 300, 350, 360]);
@@ -235,14 +356,14 @@ export function generateFake(options = {}) {
     Make: cam.make, Model: cam.model, Software: cam.sw,
     LensMake: lens.make, LensModel: lens.model,
     DateTimeOriginal: date, DateTime: date, SubSecTimeOriginal: subSec,
-    ExposureTime: shutter[0] / shutter[1], FNumber: aperture, ISO: iso,
-    FocalLength: focal, FocalLengthIn35mmFormat: focal,
+    ExposureTime: exposureSec, FNumber: aperture, ISO: iso,
+    FocalLength: focalPhys, FocalLengthIn35mmFormat: focalEquiv,
     Flash: flash, MeteringMode: meteringMode,
     ExposureProgram: exposureProgram, ExposureMode: exposureMode,
-    WhiteBalance: whiteBalance, SceneCaptureType: 0, SensingMethod: sensingMethod,
+    WhiteBalance: whiteBalance, SceneCaptureType: sceneCapture, SensingMethod: sensingMethod,
     Orientation: orientation, ColorSpace: colorSpace,
     XResolution: dpi, YResolution: dpi,
-    GPSLatitude: loc.lat, GPSLongitude: loc.lon, GPSAltitude: randInt(0, 400),
+    GPSLatitude: loc.lat, GPSLongitude: loc.lon, GPSAltitude: loc.alt,
   };
 
   // ── Piexif write object
@@ -264,8 +385,11 @@ export function generateFake(options = {}) {
   p["Exif"][px.ExifIFD.ISOSpeedRatings]       = iso;
   p["Exif"][px.ExifIFD.DateTimeOriginal]      = dateStr;
   p["Exif"][px.ExifIFD.DateTimeDigitized]     = dateStr;
-  p["Exif"][px.ExifIFD.FocalLength]           = [focal * 10, 10];
-  p["Exif"][px.ExifIFD.FocalLengthIn35mmFilm] = focal;
+  // FocalLength is the real lens, FocalLengthIn35mmFilm the equivalent. On a
+  // phone these differ by the sensor crop; writing the equivalent into both
+  // claimed a 26mm lens inside a handset.
+  p["Exif"][px.ExifIFD.FocalLength]           = [Math.round(focalPhys * 100), 100];
+  p["Exif"][px.ExifIFD.FocalLengthIn35mmFilm] = focalEquiv;
   p["Exif"][px.ExifIFD.Flash]                 = flash;
   p["Exif"][px.ExifIFD.MeteringMode]          = meteringMode;
   p["Exif"][px.ExifIFD.ExposureProgram]       = exposureProgram;
@@ -275,10 +399,14 @@ export function generateFake(options = {}) {
   const biasChoices = [[0,1],[0,1],[0,1],[1,3],[-1,3],[2,3],[-2,3],[1,1],[-1,1]];
   p["Exif"][px.ExifIFD.ExposureBiasValue] = pick(biasChoices);
 
-  const et = shutter[0] / shutter[1];
-  p["Exif"][px.ExifIFD.ShutterSpeedValue] = [Math.round(-Math.log2(et) * 100), 100];
+  // APEX values, derived from the solved exposure so they agree with it.
+  const widestAperture = cam.type === 'phone'
+    ? Math.min(...cam.lenses.map(l => l.f))
+    : Math.min(...cam.apertures);
+  p["Exif"][px.ExifIFD.ShutterSpeedValue] = [Math.round(-Math.log2(exposureSec) * 100), 100];
   p["Exif"][px.ExifIFD.ApertureValue]     = [Math.round(2 * Math.log2(aperture) * 100), 100];
-  p["Exif"][px.ExifIFD.MaxApertureValue]  = [Math.round(2 * Math.log2(Math.min(...cam.apertures)) * 100), 100];
+  p["Exif"][px.ExifIFD.MaxApertureValue]  = [Math.round(2 * Math.log2(widestAperture) * 100), 100];
+  p["Exif"][px.ExifIFD.BrightnessValue]   = [Math.round(apexBrightness(aperture, exposureSec, iso) * 100), 100];
 
   // ExifVersion varies by camera firmware era — "0232" is very recent (2023+),
   // "0231" is common for 2018–2022 devices, "0230" for older hardware.
@@ -292,7 +420,7 @@ export function generateFake(options = {}) {
   p["Exif"][px.ExifIFD.SceneType]               = "\x01";
   p["Exif"][px.ExifIFD.CustomRendered]          = customRendered;
   p["Exif"][px.ExifIFD.ExposureMode]            = exposureMode;
-  p["Exif"][px.ExifIFD.SceneCaptureType]        = 0;
+  p["Exif"][px.ExifIFD.SceneCaptureType]        = sceneCapture;
   p["Exif"][px.ExifIFD.SensingMethod]           = sensingMethod;
   p["Exif"][px.ExifIFD.SubSecTime]              = subSec;
   p["Exif"][px.ExifIFD.SubSecTimeOriginal]      = subSec;
@@ -305,17 +433,26 @@ export function generateFake(options = {}) {
   p["Exif"][px.ExifIFD.LensModel]               = lens.model;
   // PixelXDimension / PixelYDimension set later after canvas render
 
+  // The UTC offset the capture time was recorded at. Every current phone writes
+  // this, and a GPS timestamp with no offset tag beside it stands out.
+  if (offsetString && registerOffsetTimeTags(px)) {
+    p["Exif"][TAG_OFFSET_TIME]           = offsetString;
+    p["Exif"][TAG_OFFSET_TIME_ORIGINAL]  = offsetString;
+    p["Exif"][TAG_OFFSET_TIME_DIGITIZED] = offsetString;
+  }
+
   p["GPS"][px.GPSIFD.GPSLatitudeRef]  = latRef;
   p["GPS"][px.GPSIFD.GPSLatitude]     = decToDMS(Math.abs(loc.lat));
   p["GPS"][px.GPSIFD.GPSLongitudeRef] = lonRef;
   p["GPS"][px.GPSIFD.GPSLongitude]    = decToDMS(Math.abs(loc.lon));
   p["GPS"][px.GPSIFD.GPSAltitudeRef]  = 0;
   p["GPS"][px.GPSIFD.GPSAltitude]     = [display.GPSAltitude, 1];
-  p["GPS"][px.GPSIFD.GPSDateStamp]    = fmtGpsDate(date);
-  p["GPS"][px.GPSIFD.GPSTimeStamp]    = gpsTimeStamp(date);
+  // UTC, converted from the capture time through the city's own zone.
+  p["GPS"][px.GPSIFD.GPSDateStamp]    = fmtGpsDate(utc);
+  p["GPS"][px.GPSIFD.GPSTimeStamp]    = gpsTimeStamp(utc);
   p["GPS"][px.GPSIFD.GPSMapDatum]     = "WGS-84";
 
-  return { display, piexif: p, cam, loc, iso };
+  return { display, piexif: p, cam, loc, iso, scene: scene.name, ev: Number(ev.toFixed(2)) };
 }
 
 // ── Metadata Display ─────────────────────────────────────────────
@@ -332,7 +469,7 @@ export function generateFake(options = {}) {
  */
 export const SECTIONS = [
   { key: 'device',  title: 'Device',          fields: ['Make','Model','Software','LensMake','LensModel'] },
-  { key: 'capture', title: 'Capture Settings', fields: ['DateTimeOriginal','DateTime','ModifyDate','SubSecTimeOriginal','ExposureTime','FNumber','ISO','FocalLength','FocalLengthIn35mmFormat','Flash','MeteringMode','ExposureProgram','ExposureMode','WhiteBalance','SceneCaptureType','SensingMethod'] },
+  { key: 'capture', title: 'Capture Settings', fields: ['DateTimeOriginal','DateTime','ModifyDate','OffsetTimeOriginal','SubSecTimeOriginal','ExposureTime','FNumber','ISO','FocalLength','FocalLengthIn35mmFormat','Flash','MeteringMode','ExposureProgram','ExposureMode','WhiteBalance','SceneCaptureType','SensingMethod'] },
   { key: 'gps',     title: 'Location (GPS)',   fields: ['GPSLatitude','GPSLongitude','GPSAltitude'] },
   { key: 'image',   title: 'Image',            fields: ['PixelXDimension','PixelYDimension','ExifImageWidth','ExifImageHeight','ImageWidth','ImageHeight','Orientation','ColorSpace','XResolution','YResolution'] },
 ];
@@ -342,7 +479,7 @@ export const LABELS = {
   Make:'Camera Make', Model:'Camera Model', Software:'Software',
   LensMake:'Lens Make', LensModel:'Lens Model',
   DateTimeOriginal:'Date Taken', DateTime:'Date Modified', ModifyDate:'Date Modified',
-  SubSecTimeOriginal:'Sub-Second',
+  OffsetTimeOriginal:'UTC Offset', SubSecTimeOriginal:'Sub-Second',
   ExposureTime:'Shutter Speed', FNumber:'Aperture', ISO:'ISO',
   FocalLength:'Focal Length', FocalLengthIn35mmFormat:'35mm Equiv.',
   Flash:'Flash', MeteringMode:'Metering', ExposureProgram:'Program',

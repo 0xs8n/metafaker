@@ -59,7 +59,7 @@ The canvas export is not a plain re-encode. Each image passes through these stag
 
 ## Metadata generation
 
-The generated EXIF data is built from static profiles rather than arbitrary free-form values. The intent is internal consistency between related fields.
+The generated EXIF data is built from static profiles rather than arbitrary free-form values. The intent is internal consistency between related fields, because the cheapest way to detect fabricated metadata is not to find a wrong value but to find two values that contradict each other.
 
 Examples of fields that are generated together:
 
@@ -69,6 +69,14 @@ Examples of fields that are generated together:
 - white balance, flash, metering mode, exposure program, and exposure mode
 - capture timestamps including sub-second precision
 - GPS latitude, longitude, altitude, date stamp, and time stamp
+
+### Consistency rules
+
+- **Manufacturer spellings.** Each profile stores the string the device actually writes, which is often not the marketing name: Samsung writes `samsung` in lowercase, Nikon writes `NIKON CORPORATION` and `NIKON Z 9` with a space, Sony writes `SONY`. Apple writes a bare version in `Software` (`17.4.1`), while Android phones write a build fingerprint or an HDR+ pipeline version.
+- **Exposure is solved, not sampled.** A scene brightness in EV is drawn first, weighted toward daylight, then shutter and ISO are solved against the chosen aperture through `N² / t = (ISO / 100) · 2^EV`. Independent picks produced triplets no scene can produce. The scene is clamped to what that body can actually meter, and the leftover rounding from snapping to the shutter ladder is kept, since real EXIF is not algebraically exact either.
+- **Phone optics are per lens.** A phone's focal length and aperture belong to one fixed lens, so they are chosen as a unit. `FocalLength` carries the real focal length in mm and `FocalLengthIn35mmFormat` the equivalent — a phone reporting 26 mm in both was claiming a lens that does not fit in a handset. Bodies derive the equivalent from their sensor crop, so an APS-C camera reports 23 mm actual and 35 mm equivalent.
+- **GPS agrees with the place.** Altitude is jittered around the city's real ground elevation rather than randomised, and `GPSTimeStamp` is UTC derived from the capture time through that city's own timezone, DST included, alongside a matching `OffsetTimeOriginal`. Deriving it from the machine clock previously leaked the real timezone of whoever ran the tool.
+- **An IFD1 thumbnail is embedded**, rendered from the processed output so it matches the full-size image. Most camera JPEGs carry one, and a thumbnail that disagrees with the image it is inside is what exposes edited photos.
 
 The location dataset in `js/data.js` covers cities across North America, Europe, Asia-Pacific, Australia, Latin America, and the Middle East. A chosen city is jittered by up to 0.3 degrees in each direction, and `js/exif.js` clamps the result to valid global ranges and derives the matching N/S and E/W references.
 
