@@ -40,140 +40,147 @@ import { pick } from './helpers.js';
 // is derived: an APS-C body must report 23mm actual and 35mm equivalent, never
 // the same number twice.
 
+// Frame shapes each body can actually produce. A generated photo whose aspect
+// ratio matches no mode the camera offers is the loudest tell in the file: no
+// Pixel has ever produced a 0.34 aspect frame. Phones offer 4:3, 16:9 and 1:1
+// in both orientations; the bodies here are all 3:2.
+const ASPECTS_PHONE = [4/3, 3/4, 16/9, 9/16, 1];
+const ASPECTS_DSLR  = [3/2, 2/3];
+
 export const CAMERAS = [
   // ── Apple ──
-  { make:"Apple", model:"iPhone 15 Pro", sw:"17.4.1", type:"phone", lensWord:"triple",
+  { make:"Apple", model:"iPhone 15 Pro", sw:"17.4.1", type:"phone", aspects:ASPECTS_PHONE, lensWord:"triple",
     lenses:[{equiv:13,phys:2.22,f:2.2},{equiv:24,phys:6.86,f:1.78},{equiv:48,phys:6.86,f:1.78},{equiv:77,phys:9.0,f:2.8}],
     isos:[25,32,40,50,64,80,100,125,160,200,250,400,640,800,1000,1600,2500,3200],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4]] },
 
-  { make:"Apple", model:"iPhone 14 Pro Max", sw:"16.7.8", type:"phone", lensWord:"triple",
+  { make:"Apple", model:"iPhone 14 Pro Max", sw:"16.7.8", type:"phone", aspects:ASPECTS_PHONE, lensWord:"triple",
     lenses:[{equiv:13,phys:2.22,f:2.2},{equiv:24,phys:6.86,f:1.78},{equiv:48,phys:6.86,f:1.78},{equiv:77,phys:9.0,f:2.8}],
     isos:[25,32,50,64,100,125,200,400,640,1600,2500],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
 
-  { make:"Apple", model:"iPhone 13 Pro", sw:"15.8.3", type:"phone", lensWord:"triple",
+  { make:"Apple", model:"iPhone 13 Pro", sw:"15.8.3", type:"phone", aspects:ASPECTS_PHONE, lensWord:"triple",
     lenses:[{equiv:13,phys:1.57,f:1.8},{equiv:26,phys:5.7,f:1.5},{equiv:77,phys:9.0,f:2.8}],
     isos:[25,50,100,200,400,800,1600,2000],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
 
-  { make:"Apple", model:"iPhone 12", sw:"14.8.1", type:"phone", lensWord:"dual",
+  { make:"Apple", model:"iPhone 12", sw:"14.8.1", type:"phone", aspects:ASPECTS_PHONE, lensWord:"dual",
     lenses:[{equiv:13,phys:1.55,f:2.4},{equiv:26,phys:4.2,f:1.6}],
     isos:[25,50,100,200,400,800,1600],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
 
-  { make:"Apple", model:"iPhone 11", sw:"14.8.1", type:"phone", lensWord:"dual",
+  { make:"Apple", model:"iPhone 11", sw:"14.8.1", type:"phone", aspects:ASPECTS_PHONE, lensWord:"dual",
     lenses:[{equiv:13,phys:1.54,f:2.4},{equiv:26,phys:4.25,f:1.8}],
     isos:[25,50,100,200,400,800,1600],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
 
   // ── Samsung — Make is lowercase, Software is the firmware build ──
-  { make:"samsung", model:"SM-S928B", sw:"S928BXXU1AWIM", type:"phone",
+  { make:"samsung", model:"SM-S928B", sw:"S928BXXU1AWIM", type:"phone", aspects:ASPECTS_PHONE,
     lenses:[{equiv:13,phys:2.2,f:2.2},{equiv:24,phys:6.3,f:1.7},{equiv:67,phys:7.9,f:2.4},{equiv:111,phys:13.0,f:3.4}],
     isos:[50,100,200,400,800,1600,3200],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
 
-  { make:"samsung", model:"SM-S916B", sw:"S916BXXU7EXA1", type:"phone",
+  { make:"samsung", model:"SM-S916B", sw:"S916BXXU7EXA1", type:"phone", aspects:ASPECTS_PHONE,
     lenses:[{equiv:13,phys:2.2,f:2.2},{equiv:24,phys:6.4,f:1.8},{equiv:70,phys:8.2,f:2.4}],
     isos:[50,100,200,400,800,1600,3200],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
 
-  { make:"samsung", model:"SM-A546B", sw:"A546BXXS4EXD2", type:"phone",
+  { make:"samsung", model:"SM-A546B", sw:"A546BXXS4EXD2", type:"phone", aspects:ASPECTS_PHONE,
     lenses:[{equiv:13,phys:1.9,f:2.2},{equiv:26,phys:4.7,f:1.8}],
     isos:[50,100,200,400,800,1600],
     shutters:[[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
 
-  { make:"samsung", model:"SM-G991B", sw:"G991BXXU8FXD1", type:"phone",
+  { make:"samsung", model:"SM-G991B", sw:"G991BXXU8FXD1", type:"phone", aspects:ASPECTS_PHONE,
     lenses:[{equiv:13,phys:1.8,f:2.2},{equiv:26,phys:5.4,f:1.8},{equiv:70,phys:7.6,f:2.0}],
     isos:[50,100,200,400,800,1600,3200],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
 
   // ── Google — Software is the HDR+ pipeline build, not the Android version ──
-  { make:"Google", model:"Pixel 8 Pro", sw:"HDR+ 1.0.540104767zd", type:"phone",
+  { make:"Google", model:"Pixel 8 Pro", sw:"HDR+ 1.0.540104767zd", type:"phone", aspects:ASPECTS_PHONE, modes:[[4080,3072]],
     lenses:[{equiv:13,phys:1.9,f:1.95},{equiv:25,phys:6.9,f:1.68},{equiv:113,phys:12.5,f:2.8}],
     isos:[50,100,200,400,800,1600,3200],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
 
-  { make:"Google", model:"Pixel 7a", sw:"HDR+ 1.0.485286103zd", type:"phone",
+  { make:"Google", model:"Pixel 7a", sw:"HDR+ 1.0.485286103zd", type:"phone", aspects:ASPECTS_PHONE, modes:[[4624,3472]],
     lenses:[{equiv:13,phys:1.8,f:2.2},{equiv:25,phys:5.9,f:1.89}],
     isos:[50,100,200,400,800,1600,3200],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]] },
 
-  { make:"Google", model:"Pixel 6a", sw:"HDR+ 1.0.420988201zd", type:"phone",
+  { make:"Google", model:"Pixel 6a", sw:"HDR+ 1.0.420988201zd", type:"phone", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
     lenses:[{equiv:13,phys:1.8,f:2.2},{equiv:24,phys:4.4,f:1.85}],
     isos:[50,100,200,400,800,1600,3200],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]] },
 
   // ── OnePlus / Xiaomi — Android build fingerprints ──
-  { make:"OnePlus", model:"CPH2583", sw:"CPH2583-user 14 UKQ1.230924.001 release-keys", type:"phone",
+  { make:"OnePlus", model:"CPH2583", sw:"CPH2583-user 14 UKQ1.230924.001 release-keys", type:"phone", aspects:ASPECTS_PHONE,
     lenses:[{equiv:14,phys:2.2,f:2.2},{equiv:23,phys:6.1,f:1.6},{equiv:73,phys:8.6,f:2.6}],
     isos:[64,100,200,400,800,1600,3200,6400],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
 
-  { make:"Xiaomi", model:"2312GS7BD", sw:"2312GS7BD-user 14 UKQ1.230804.001 release-keys", type:"phone",
+  { make:"Xiaomi", model:"2312GS7BD", sw:"2312GS7BD-user 14 UKQ1.230804.001 release-keys", type:"phone", aspects:ASPECTS_PHONE,
     lenses:[{equiv:14,phys:2.2,f:2.2},{equiv:24,phys:8.7,f:1.42},{equiv:75,phys:8.8,f:2.0}],
     isos:[50,100,200,400,800,1600,3200,6400],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
 
   // ── Canon — Make "Canon", Software "Firmware Version x.y.z" ──
-  { make:"Canon", model:"Canon EOS R5", sw:"Firmware Version 1.8.2", type:"dslr", crop:1.0, mounts:['RF','EF'],
+  { make:"Canon", model:"Canon EOS R5", sw:"Firmware Version 1.8.2", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
     apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[100,125,160,200,250,320,400,640,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4],[1,2],[1,1],[2,1],[4,1]],
     focals:[24,35,50,85,100,135,200] },
 
-  { make:"Canon", model:"Canon EOS 5D Mark IV", sw:"Firmware Version 1.3.3", type:"dslr", crop:1.0, mounts:['EF'],
+  { make:"Canon", model:"Canon EOS 5D Mark IV", sw:"Firmware Version 1.3.3", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['EF'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[100,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"Canon", model:"Canon EOS 90D", sw:"Firmware Version 1.1.1", type:"dslr", crop:1.6, mounts:['EF','EF-S'],
+  { make:"Canon", model:"Canon EOS 90D", sw:"Firmware Version 1.1.1", type:"dslr", aspects:ASPECTS_DSLR, crop:1.6, mounts:['EF','EF-S'],
     apertures:[1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
     focals:[18,24,35,50,85,100] },
 
   // ── Nikon — Make "NIKON CORPORATION", Model has a space, Software "Ver.NN.NN" ──
-  { make:"NIKON CORPORATION", model:"NIKON Z 9", sw:"Ver.04.00", type:"dslr", crop:1.0, mounts:['Z','F'],
+  { make:"NIKON CORPORATION", model:"NIKON Z 9", sw:"Ver.04.00", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[64,100,200,400,800,1600,3200,6400,12800,25600,51200,102400],
     shutters:[[1,32000],[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]],
     focals:[24,35,50,85,105,200,400] },
 
-  { make:"NIKON CORPORATION", model:"NIKON D850", sw:"Ver.01.10", type:"dslr", crop:1.0, mounts:['F'],
+  { make:"NIKON CORPORATION", model:"NIKON D850", sw:"Ver.01.10", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['F'],
     apertures:[1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[64,100,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"NIKON CORPORATION", model:"NIKON Z 6II", sw:"Ver.01.40", type:"dslr", crop:1.0, mounts:['Z','F'],
+  { make:"NIKON CORPORATION", model:"NIKON Z 6II", sw:"Ver.01.40", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[24,35,50,85,105] },
 
   // ── Sony — Make "SONY", Software "<model> v<firmware>" ──
-  { make:"SONY", model:"ILCE-7M4", sw:"ILCE-7M4 v2.01", type:"dslr", crop:1.0, mounts:['E'],
+  { make:"SONY", model:"ILCE-7M4", sw:"ILCE-7M4 v2.01", type:"dslr", aspects:ASPECTS_DSLR, modes:[[4608,3072]], crop:1.0, mounts:['E'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[50,100,200,400,800,1600,3200,6400,12800,25600,51200,102400,204800],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"SONY", model:"ILCE-7RM5", sw:"ILCE-7RM5 v1.00", type:"dslr", crop:1.0, mounts:['E'],
+  { make:"SONY", model:"ILCE-7RM5", sw:"ILCE-7RM5 v1.00", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['E'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
     focals:[24,35,50,85,135] },
 
   // ── Fujifilm — APS-C, Software "Digital Camera <model> Ver<n.nn>" ──
-  { make:"FUJIFILM", model:"X-T5", sw:"Digital Camera X-T5 Ver4.10", type:"dslr", crop:1.5, mounts:['X'],
+  { make:"FUJIFILM", model:"X-T5", sw:"Digital Camera X-T5 Ver4.10", type:"dslr", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[125,160,200,400,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[18,23,35,56,90] },
 
-  { make:"FUJIFILM", model:"X100VI", sw:"Digital Camera X100VI Ver1.10", type:"dslr", crop:1.5, mounts:[], fixedLens:true,
+  { make:"FUJIFILM", model:"X100VI", sw:"Digital Camera X100VI Ver1.10", type:"dslr", aspects:ASPECTS_DSLR, crop:1.5, mounts:[], fixedLens:true,
     apertures:[2.0,2.8,4.0,5.6,8.0,11],
     isos:[125,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
