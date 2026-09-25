@@ -613,7 +613,7 @@ function antiForensicRender(img, cam = {}) {
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
     const qt = qtableFor(cameraMake);
-    let dataUrl = c.toDataURL('image/jpeg', qt ? 1.0 : randomJpegQuality(cameraType));
+    let dataUrl = c.toDataURL('image/jpeg', qt ? 0.98 : randomJpegQuality(cameraType));
     if (qt) dataUrl = applyCameraQuantization(dataUrl, cameraMake);
     dataUrl = stripSignatureSegments(dataUrl);
     return { dataUrl, width: c.width, height: c.height };
@@ -668,12 +668,13 @@ function antiForensicRender(img, cam = {}) {
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
   // 8+9. Encode, re-quantise onto the camera's table, strip the browser's markers.
-  // When a camera table is available the source is encoded at maximum quality
-  // first: its own quantisation is then near-lossless, so rescaling onto the
-  // camera table is close to having quantised with that table in the first
-  // place, rather than stacking two lossy passes.
+  // When a camera table is available the frame is encoded near-losslessly
+  // first, so rescaling onto the camera table approximates having quantised
+  // with that table directly rather than stacking two lossy passes. 0.98
+  // rather than 1.0: quality 1.0 on a noise-added frame produces a much larger
+  // intermediate and roughly doubles the transcode, for no visible gain.
   const qtable = qtableFor(cameraMake);
-  let dataUrl = c.toDataURL('image/jpeg', qtable ? 1.0 : randomJpegQuality(cameraType));
+  let dataUrl = c.toDataURL('image/jpeg', qtable ? 0.98 : randomJpegQuality(cameraType));
   if (qtable) dataUrl = applyCameraQuantization(dataUrl, cameraMake);
   dataUrl = stripSignatureSegments(dataUrl);
 
