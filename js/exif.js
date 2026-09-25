@@ -19,8 +19,8 @@ import {
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
 import { CAMERAS, LOCATIONS, pickOptics } from './data.js';
-import { buildMakerNote } from './makernote.js';
 import { dumpExifSafe } from './exif-writer.js';
+import { EDITOR_SOFTWARE } from './provenance.js';
 
 // ── GPS Enforcement ──────────────────────────────────────────────
 
@@ -382,7 +382,7 @@ export function generateFake(options = {}) {
 
   // ── Display object
   const display = {
-    Make: cam.make, Model: cam.model, Software: cam.sw,
+    Make: cam.make, Model: cam.model, Software: EDITOR_SOFTWARE,
     LensMake: lens.make, LensModel: lens.model,
     DateTimeOriginal: date, DateTime: date, SubSecTimeOriginal: subSec,
     ExposureTime: exposureSec, FNumber: aperture, ISO: iso,
@@ -402,7 +402,7 @@ export function generateFake(options = {}) {
 
   p["0th"][px.ImageIFD.Make]           = cam.make;
   p["0th"][px.ImageIFD.Model]          = cam.model;
-  p["0th"][px.ImageIFD.Software]       = cam.sw;
+  p["0th"][px.ImageIFD.Software]       = EDITOR_SOFTWARE;  // the exporter, not the camera
   p["0th"][px.ImageIFD.DateTime]       = dateStr;
   p["0th"][px.ImageIFD.XResolution]    = [dpi, 1];
   p["0th"][px.ImageIFD.YResolution]    = [dpi, 1];
@@ -465,14 +465,9 @@ export function generateFake(options = {}) {
   if (lens.model) p["Exif"][px.ExifIFD.LensModel] = lens.model;
   // PixelXDimension / PixelYDimension set later after canvas render
 
-  // A camera JPEG almost always carries a MakerNote; only Apple's is
-  // synthesised, because only its offsets survive being relocated. See
-  // makernote.js for what this does and does not buy.
-  const makerNote = buildMakerNote(cam.make, {
-    iso, focalEquiv, scene: scene.name,
-    iosMajor: parseInt(String(cam.sw).split('.')[0], 10) || 17,
-  });
-  if (makerNote) p["Exif"][px.ExifIFD.MakerNote] = makerNote;
+  // No MakerNote. An editor export does not carry one — every Camera Raw
+  // export sampled had zero MakerNote tags — so writing one would contradict
+  // the Software field rather than add realism.
 
   // The UTC offset the capture time was recorded at. Every current phone writes
   // this, and a GPS timestamp with no offset tag beside it stands out.
@@ -495,7 +490,8 @@ export function generateFake(options = {}) {
 
   alignAsciiValues(p, px);
 
-  return { display, piexif: p, cam, loc, iso, scene: scene.name, ev: Number(ev.toFixed(2)) };
+  return { display, piexif: p, cam, loc, iso, lens,
+           offset: offsetString, scene: scene.name, ev: Number(ev.toFixed(2)) };
 }
 
 // ── Metadata Display ─────────────────────────────────────────────
