@@ -1,3 +1,11 @@
+/*
+ * NOT CURRENTLY WIRED IN. This holds measured data for the camera-original
+ * provenance — a file presenting as straight off the camera. The pipeline
+ * writes an editor export instead (see provenance.js), because a convincing
+ * camera original needs a MakerNote we cannot synthesise. Kept because the
+ * measurements were expensive to obtain and are exactly what a camera-original
+ * mode would need.
+ */
 /**
  * qtables.js — Real camera JPEG quantization tables, in zigzag order.
  *

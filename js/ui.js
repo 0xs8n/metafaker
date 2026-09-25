@@ -10,6 +10,7 @@ import {
   dataUrlToBlob, stripViaCanvas, makeThumbnail,
 } from './helpers.js';
 import { dumpExifSafe } from './exif-writer.js';
+import { buildXmpPacket, xmpSegment } from './provenance.js';
 import {
   generateFake, enforceValidGps, readBackExifStrict,
   parseFileExif, renderMeta,
@@ -324,7 +325,19 @@ async function processRandomizeItem(item, options = {}) {
     }
 
     const fake = generateFake({ originalDate });
-    const camWithIso = { ...fake.cam, iso: fake.display.ISO };
+    // The XMP packet rides along with the render, because the container is
+    // written there and it has to carry the same dates and lens as the EXIF.
+    const camWithIso = {
+      ...fake.cam,
+      iso: fake.display.ISO,
+      xmpSegment: xmpSegment(buildXmpPacket({
+        date: fake.display.DateTimeOriginal,
+        offset: fake.offset,
+        make: fake.cam.make,
+        model: fake.cam.model,
+        lens: fake.display.LensModel,
+      })),
+    };
     const canvasResult = await stripViaCanvas(item.previewUrl, camWithIso);
     const cleanJpeg = canvasResult.dataUrl;
 

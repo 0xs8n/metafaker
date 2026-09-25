@@ -3,8 +3,7 @@
  */
 
 import { requantize } from './jpeg-requantize.js';
-import { qtableFor } from './qtables.js';
-import { cameraAppProfile } from './icc-profiles.js';
+import { EDITOR_QTABLE, ADOBE_APP14, editorIcc, xmpSegment } from './provenance.js';
 
 // ── Random & Math ────────────────────────────────────────────────
 
@@ -494,7 +493,7 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
  * JPEGs carry none at all.
  */
 /**
- * Re-quantise a freshly encoded JPEG onto the camera's own table.
+ * Re-quantise a freshly encoded JPEG onto the exporter's tables.
  *
  * The quantization table is one of the strongest camera fingerprints a JPEG
  * carries, and the browser's says "browser". Overwriting the DQT bytes alone
@@ -505,9 +504,8 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
  * file is not plain baseline JPEG, or on any error. A camera-matched table is
  * not worth a corrupted image.
  */
-function applyCameraQuantization(dataUrl, make) {
-  const table = qtableFor(make);
-  if (!table) return dataUrl;
+function applyEditorQuantization(dataUrl) {
+  const table = EDITOR_QTABLE;
 
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (!m) return dataUrl;
@@ -554,7 +552,7 @@ function iccSegments(icc) {
   return segs;
 }
 
-export function normaliseAppSegments(dataUrl, make) {
+export function normaliseAppSegments(dataUrl, opts = {}) {
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (!m) return dataUrl;
 
@@ -568,8 +566,10 @@ export function normaliseAppSegments(dataUrl, make) {
   const isIccProfile = at =>
     String.fromCharCode(...bytes.subarray(at, at + 11)) === 'ICC_PROFILE';
 
-  // Walk the marker chain and collect the byte ranges worth keeping.
-  const keep = [];
+  // Walk the chain, dropping the browser's own markers and noting where SOF
+  // begins: an exporter writes its APP14 immediately before the frame header.
+  const before = [], after = [];
+  let seenSof = false;
   let i = 2;
   while (i + 3 < bytes.length && bytes[i] === 0xFF) {
     const marker = bytes[i + 1];
@@ -577,26 +577,32 @@ export function normaliseAppSegments(dataUrl, make) {
     const len = (bytes[i + 2] << 8) | bytes[i + 3];
     const end = i + 2 + len;
     if (len < 2 || end > bytes.length) return dataUrl;   // malformed, leave alone
-    if (!(marker === 0xE0 || (marker === 0xE2 && isIccProfile(i + 4)))) {
-      keep.push([i, end]);
-    }
+    const drop = marker === 0xE0 || (marker === 0xE2 && isIccProfile(i + 4));
+    if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8) seenSof = true;
+    if (!drop) (seenSof ? after : before).push([i, end]);
     i = end;
   }
-  keep.push([i, bytes.length]);   // SOS onward
+  after.push([i, bytes.length]);   // SOS onward
 
-  // Put back what this make actually writes, in place of the browser's.
-  const { icc, jfifApp0 } = cameraAppProfile(make);
-  const inserts = [];
-  if (jfifApp0) inserts.push(JFIF_APP0);
-  if (icc) inserts.push(...iccSegments(icc));
+  const { icc, app14, xmp } = opts;
+  const head = [];                       // straight after SOI, ahead of DQT
+  if (icc) head.push(...iccSegments(icc));
+  if (xmp) head.push(xmp);
+  const beforeSof = app14 ? [app14] : [];   // immediately before SOF
 
-  const insertLen = inserts.reduce((n, s) => n + s.length, 0);
-  const keepLen = keep.reduce((n, [a, b]) => n + (b - a), 0);
-  const out = new Uint8Array(2 + insertLen + keepLen);
+  const size = 2
+    + head.reduce((n, s2) => n + s2.length, 0)
+    + before.reduce((n, [a, b]) => n + (b - a), 0)
+    + beforeSof.reduce((n, s2) => n + s2.length, 0)
+    + after.reduce((n, [a, b]) => n + (b - a), 0);
+
+  const out = new Uint8Array(size);
   let o = 0;
   out.set([0xFF, 0xD8], o); o += 2;
-  for (const s of inserts) { out.set(s, o); o += s.length; }
-  for (const [a, b] of keep) { out.set(bytes.subarray(a, b), o); o += b - a; }
+  for (const s2 of head) { out.set(s2, o); o += s2.length; }
+  for (const [a, b] of before) { out.set(bytes.subarray(a, b), o); o += b - a; }
+  for (const s2 of beforeSof) { out.set(s2, o); o += s2.length; }
+  for (const [a, b] of after) { out.set(bytes.subarray(a, b), o); o += b - a; }
 
   let outBin = '';
   for (let k = 0; k < out.length; k += 0x8000) {
@@ -621,7 +627,7 @@ export function normaliseAppSegments(dataUrl, make) {
  *      (every real lens produces both; their absence is a forensic red flag)
  *   7. Poisson-Gaussian noise — σ²(x)=a·x+b, heteroscedastic per real sensors
  *      (ML tools verify signal-dependent variance; uniform Gaussian is detectable)
- *   8. Swap the browser's APP0/ICC for the ones that make actually writes
+ *   8. Rewrite the container as an editor export: its tables, profile and APP14
  *   9. Bimodal JPEG quality — wider range = more quantization table diversity
  */
 /**
@@ -703,10 +709,11 @@ function antiForensicRender(img, cam = {}) {
     applyISPSimulation(ctx, c.width, c.height);
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
-    const qt = qtableFor(cameraMake);
-    let dataUrl = c.toDataURL('image/jpeg', qt ? 0.98 : randomJpegQuality(cameraType));
-    if (qt) dataUrl = applyCameraQuantization(dataUrl, cameraMake);
-    dataUrl = normaliseAppSegments(dataUrl, cameraMake);
+    let dataUrl = c.toDataURL('image/jpeg', 1.0);
+    dataUrl = applyEditorQuantization(dataUrl);
+    dataUrl = normaliseAppSegments(dataUrl, {
+      icc: editorIcc(), app14: ADOBE_APP14, xmp: cam.xmpSegment || null,
+    });
     return { dataUrl, width: c.width, height: c.height };
   }
 
@@ -760,16 +767,16 @@ function antiForensicRender(img, cam = {}) {
   // 7. Poisson-Gaussian noise (signal-dependent, ISO-matched)
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
-  // 8+9. Encode, re-quantise onto the camera's table, strip the browser's markers.
-  // When a camera table is available the frame is encoded near-losslessly
-  // first, so rescaling onto the camera table approximates having quantised
-  // with that table directly rather than stacking two lossy passes. 0.98
-  // rather than 1.0: quality 1.0 on a noise-added frame produces a much larger
-  // intermediate and roughly doubles the transcode, for no visible gain.
-  const qtable = qtableFor(cameraMake);
-  let dataUrl = c.toDataURL('image/jpeg', qtable ? 0.98 : randomJpegQuality(cameraType));
-  if (qtable) dataUrl = applyCameraQuantization(dataUrl, cameraMake);
-  dataUrl = normaliseAppSegments(dataUrl, cameraMake);
+  // 8+9. Encode, re-quantise onto the exporter's tables, write its container.
+  // Quality 1.0 specifically: it is the only setting at which the browser emits
+  // 4:4:4 chroma, which is what an editor export uses. Everything lower is
+  // 4:2:0 and would contradict the story the file tells. It is also the
+  // cleanest source for re-quantisation, being near-lossless.
+  let dataUrl = c.toDataURL('image/jpeg', 1.0);
+  dataUrl = applyEditorQuantization(dataUrl);
+  dataUrl = normaliseAppSegments(dataUrl, {
+    icc: editorIcc(), app14: ADOBE_APP14, xmp: cam.xmpSegment || null,
+  });
 
   return { dataUrl, width: size.width, height: size.height };
 }
