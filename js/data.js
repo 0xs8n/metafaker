@@ -116,64 +116,64 @@ export const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
 
   // ── Canon — Make "Canon", Software "Firmware Version x.y.z" ──
-  { make:"Canon", model:"Canon EOS R5", sw:"Firmware Version 1.8.2", type:"dslr", crop:1.0,
+  { make:"Canon", model:"Canon EOS R5", sw:"Firmware Version 1.8.2", type:"dslr", crop:1.0, mounts:['RF','EF'],
     apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[100,125,160,200,250,320,400,640,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4],[1,2],[1,1],[2,1],[4,1]],
     focals:[24,35,50,85,100,135,200] },
 
-  { make:"Canon", model:"Canon EOS 5D Mark IV", sw:"Firmware Version 1.3.3", type:"dslr", crop:1.0,
+  { make:"Canon", model:"Canon EOS 5D Mark IV", sw:"Firmware Version 1.3.3", type:"dslr", crop:1.0, mounts:['EF'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[100,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"Canon", model:"Canon EOS 90D", sw:"Firmware Version 1.1.1", type:"dslr", crop:1.6,
+  { make:"Canon", model:"Canon EOS 90D", sw:"Firmware Version 1.1.1", type:"dslr", crop:1.6, mounts:['EF','EF-S'],
     apertures:[1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
     focals:[18,24,35,50,85,100] },
 
   // ── Nikon — Make "NIKON CORPORATION", Model has a space, Software "Ver.NN.NN" ──
-  { make:"NIKON CORPORATION", model:"NIKON Z 9", sw:"Ver.04.00", type:"dslr", crop:1.0,
+  { make:"NIKON CORPORATION", model:"NIKON Z 9", sw:"Ver.04.00", type:"dslr", crop:1.0, mounts:['Z','F'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[64,100,200,400,800,1600,3200,6400,12800,25600,51200,102400],
     shutters:[[1,32000],[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]],
     focals:[24,35,50,85,105,200,400] },
 
-  { make:"NIKON CORPORATION", model:"NIKON D850", sw:"Ver.01.10", type:"dslr", crop:1.0,
+  { make:"NIKON CORPORATION", model:"NIKON D850", sw:"Ver.01.10", type:"dslr", crop:1.0, mounts:['F'],
     apertures:[1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[64,100,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"NIKON CORPORATION", model:"NIKON Z 6II", sw:"Ver.01.40", type:"dslr", crop:1.0,
+  { make:"NIKON CORPORATION", model:"NIKON Z 6II", sw:"Ver.01.40", type:"dslr", crop:1.0, mounts:['Z','F'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[24,35,50,85,105] },
 
   // ── Sony — Make "SONY", Software "<model> v<firmware>" ──
-  { make:"SONY", model:"ILCE-7M4", sw:"ILCE-7M4 v2.01", type:"dslr", crop:1.0,
+  { make:"SONY", model:"ILCE-7M4", sw:"ILCE-7M4 v2.01", type:"dslr", crop:1.0, mounts:['E'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[50,100,200,400,800,1600,3200,6400,12800,25600,51200,102400,204800],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"SONY", model:"ILCE-7RM5", sw:"ILCE-7RM5 v1.00", type:"dslr", crop:1.0,
+  { make:"SONY", model:"ILCE-7RM5", sw:"ILCE-7RM5 v1.00", type:"dslr", crop:1.0, mounts:['E'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
     focals:[24,35,50,85,135] },
 
   // ── Fujifilm — APS-C, Software "Digital Camera <model> Ver<n.nn>" ──
-  { make:"FUJIFILM", model:"X-T5", sw:"Digital Camera X-T5 Ver4.10", type:"dslr", crop:1.5,
+  { make:"FUJIFILM", model:"X-T5", sw:"Digital Camera X-T5 Ver4.10", type:"dslr", crop:1.5, mounts:['X'],
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[125,160,200,400,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[18,23,35,56,90] },
 
-  { make:"FUJIFILM", model:"X100VI", sw:"Digital Camera X100VI Ver1.10", type:"dslr", crop:1.5,
+  { make:"FUJIFILM", model:"X100VI", sw:"Digital Camera X100VI Ver1.10", type:"dslr", crop:1.5, mounts:[], fixedLens:true,
     apertures:[2.0,2.8,4.0,5.6,8.0,11],
     isos:[125,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
@@ -296,44 +296,62 @@ export const LOCATIONS = [
 // chosen lens can actually reach the chosen focal length, and the widest
 // aperture it opens to so the chosen f-number is one the lens can produce.
 
+// `mount` matters: an RF lens does not fit an EF body and a Z lens does not fit
+// an F body, so pairing a 5D Mark IV with an RF zoom, or a D850 with a NIKKOR Z,
+// describes a camera that cannot be assembled. Bodies list the mounts they
+// accept — R5 and the Z bodies include the older mount because the first-party
+// adapters are near-universal, and EF-S is APS-C only.
 export const DSLR_LENSES = {
   'Canon': [
-    { model: 'RF24-70mm F2.8 L IS USM',             range: [24, 70],   wide: 2.8 },
-    { model: 'RF50mm F1.8 STM',                     range: [50, 50],   wide: 1.8 },
-    { model: 'RF85mm F1.2 L USM',                   range: [85, 85],   wide: 1.2 },
-    { model: 'EF70-200mm f/2.8L IS III USM',        range: [70, 200],  wide: 2.8 },
-    { model: 'RF24-105mm F4 L IS USM',              range: [24, 105],  wide: 4.0 },
-    { model: 'RF35mm F1.8 MACRO IS STM',            range: [35, 35],   wide: 1.8 },
-    { model: 'EF135mm f/2L USM',                    range: [135, 135], wide: 2.0 },
-    { model: 'RF100-400mm F5.6-8 IS USM',           range: [100, 400], wide: 5.6 },
-    { model: 'EF-S18-135mm f/3.5-5.6 IS USM',       range: [18, 135],  wide: 3.5 },
+    { model: 'RF24-70mm F2.8 L IS USM',             range: [24, 70],   wide: 2.8, mount: 'RF' },
+    { model: 'RF50mm F1.8 STM',                     range: [50, 50],   wide: 1.8, mount: 'RF' },
+    { model: 'RF85mm F1.2 L USM',                   range: [85, 85],   wide: 1.2, mount: 'RF' },
+    { model: 'RF24-105mm F4 L IS USM',              range: [24, 105],  wide: 4.0, mount: 'RF' },
+    { model: 'RF35mm F1.8 MACRO IS STM',            range: [35, 35],   wide: 1.8, mount: 'RF' },
+    { model: 'RF100-400mm F5.6-8 IS USM',           range: [100, 400], wide: 5.6, mount: 'RF' },
+    { model: 'EF24-70mm f/2.8L II USM',             range: [24, 70],   wide: 2.8, mount: 'EF' },
+    { model: 'EF50mm f/1.8 STM',                    range: [50, 50],   wide: 1.8, mount: 'EF' },
+    { model: 'EF85mm f/1.4L IS USM',                range: [85, 85],   wide: 1.4, mount: 'EF' },
+    { model: 'EF70-200mm f/2.8L IS III USM',        range: [70, 200],  wide: 2.8, mount: 'EF' },
+    { model: 'EF35mm f/1.4L II USM',                range: [35, 35],   wide: 1.4, mount: 'EF' },
+    { model: 'EF135mm f/2L USM',                    range: [135, 135], wide: 2.0, mount: 'EF' },
+    { model: 'EF24-105mm f/4L IS II USM',           range: [24, 105],  wide: 4.0, mount: 'EF' },
+    { model: 'EF100mm f/2.8L MACRO IS USM',         range: [100, 100], wide: 2.8, mount: 'EF' },
+    { model: 'EF-S18-135mm f/3.5-5.6 IS USM',       range: [18, 135],  wide: 3.5, mount: 'EF-S' },
+    { model: 'EF-S24mm f/2.8 STM',                  range: [24, 24],   wide: 2.8, mount: 'EF-S' },
   ],
   'NIKON CORPORATION': [
-    { model: 'NIKKOR Z 24-70mm f/2.8 S',            range: [24, 70],   wide: 2.8 },
-    { model: 'NIKKOR Z 50mm f/1.8 S',               range: [50, 50],   wide: 1.8 },
-    { model: 'NIKKOR Z 85mm f/1.8 S',               range: [85, 85],   wide: 1.8 },
-    { model: 'NIKKOR Z 70-200mm f/2.8 VR S',        range: [70, 200],  wide: 2.8 },
-    { model: 'NIKKOR Z 24-200mm f/4-6.3 VR',        range: [24, 200],  wide: 4.0 },
-    { model: 'AF-S NIKKOR 105mm f/1.4E ED',         range: [105, 105], wide: 1.4 },
-    { model: 'NIKKOR Z 35mm f/1.8 S',               range: [35, 35],   wide: 1.8 },
-    { model: 'AF-S NIKKOR 200-500mm f/5.6E ED VR',  range: [200, 500], wide: 5.6 },
+    { model: 'NIKKOR Z 24-70mm f/2.8 S',            range: [24, 70],   wide: 2.8, mount: 'Z' },
+    { model: 'NIKKOR Z 50mm f/1.8 S',               range: [50, 50],   wide: 1.8, mount: 'Z' },
+    { model: 'NIKKOR Z 85mm f/1.8 S',               range: [85, 85],   wide: 1.8, mount: 'Z' },
+    { model: 'NIKKOR Z 70-200mm f/2.8 VR S',        range: [70, 200],  wide: 2.8, mount: 'Z' },
+    { model: 'NIKKOR Z 24-200mm f/4-6.3 VR',        range: [24, 200],  wide: 4.0, mount: 'Z' },
+    { model: 'NIKKOR Z 35mm f/1.8 S',               range: [35, 35],   wide: 1.8, mount: 'Z' },
+    { model: 'NIKKOR Z 100-400mm f/4.5-5.6 VR S',   range: [100, 400], wide: 4.5, mount: 'Z' },
+    { model: 'AF-S NIKKOR 24-70mm f/2.8E ED VR',    range: [24, 70],   wide: 2.8, mount: 'F' },
+    { model: 'AF-S NIKKOR 50mm f/1.8G',             range: [50, 50],   wide: 1.8, mount: 'F' },
+    { model: 'AF-S NIKKOR 85mm f/1.8G',             range: [85, 85],   wide: 1.8, mount: 'F' },
+    { model: 'AF-S NIKKOR 70-200mm f/2.8E FL ED VR',range: [70, 200],  wide: 2.8, mount: 'F' },
+    { model: 'AF-S NIKKOR 35mm f/1.8G ED',          range: [35, 35],   wide: 1.8, mount: 'F' },
+    { model: 'AF-S NIKKOR 105mm f/1.4E ED',         range: [105, 105], wide: 1.4, mount: 'F' },
+    { model: 'AF-S NIKKOR 200-500mm f/5.6E ED VR',  range: [200, 500], wide: 5.6, mount: 'F' },
   ],
   'SONY': [
-    { model: 'FE 24-70mm F2.8 GM II',               range: [24, 70],   wide: 2.8 },
-    { model: 'FE 50mm F1.8',                        range: [50, 50],   wide: 1.8 },
-    { model: 'FE 85mm F1.4 GM',                     range: [85, 85],   wide: 1.4 },
-    { model: 'FE 70-200mm F2.8 GM OSS II',          range: [70, 200],  wide: 2.8 },
-    { model: 'FE 135mm F1.8 GM',                    range: [135, 135], wide: 1.8 },
-    { model: 'FE 35mm F1.4 GM',                     range: [35, 35],   wide: 1.4 },
-    { model: 'FE 24-105mm F4 G OSS',                range: [24, 105],  wide: 4.0 },
+    { model: 'FE 24-70mm F2.8 GM II',               range: [24, 70],   wide: 2.8, mount: 'E' },
+    { model: 'FE 50mm F1.8',                        range: [50, 50],   wide: 1.8, mount: 'E' },
+    { model: 'FE 85mm F1.4 GM',                     range: [85, 85],   wide: 1.4, mount: 'E' },
+    { model: 'FE 70-200mm F2.8 GM OSS II',          range: [70, 200],  wide: 2.8, mount: 'E' },
+    { model: 'FE 135mm F1.8 GM',                    range: [135, 135], wide: 1.8, mount: 'E' },
+    { model: 'FE 35mm F1.4 GM',                     range: [35, 35],   wide: 1.4, mount: 'E' },
+    { model: 'FE 24-105mm F4 G OSS',                range: [24, 105],  wide: 4.0, mount: 'E' },
   ],
   'FUJIFILM': [
-    { model: 'XF23mmF2 R WR',                       range: [23, 23],   wide: 2.0 },
-    { model: 'XF35mmF1.4 R',                        range: [35, 35],   wide: 1.4 },
-    { model: 'XF56mmF1.2 R',                        range: [56, 56],   wide: 1.2 },
-    { model: 'XF18-55mmF2.8-4 R LM OIS',            range: [18, 55],   wide: 2.8 },
-    { model: 'XF90mmF2 R LM WR',                    range: [90, 90],   wide: 2.0 },
-    { model: 'XF55-200mmF3.5-4.8 R LM OIS',         range: [55, 200],  wide: 3.5 },
+    { model: 'XF23mmF2 R WR',                       range: [23, 23],   wide: 2.0, mount: 'X' },
+    { model: 'XF35mmF1.4 R',                        range: [35, 35],   wide: 1.4, mount: 'X' },
+    { model: 'XF56mmF1.2 R',                        range: [56, 56],   wide: 1.2, mount: 'X' },
+    { model: 'XF18-55mmF2.8-4 R LM OIS',            range: [18, 55],   wide: 2.8, mount: 'X' },
+    { model: 'XF90mmF2 R LM WR',                    range: [90, 90],   wide: 2.0, mount: 'X' },
+    { model: 'XF55-200mmF3.5-4.8 R LM OIS',         range: [55, 200],  wide: 3.5, mount: 'X' },
   ],
 };
 
@@ -348,6 +366,40 @@ export const DSLR_LENSES = {
  * focal length and open at least as wide as the chosen aperture — an
  * f/4 zoom cannot report f/1.4.
  */
+/**
+ * Choose focal length, aperture and lens as one consistent set.
+ *
+ * Order matters. Picking the aperture first and then hunting for a lens left no
+ * good option when nothing matched — the old fallback handed back any lens that
+ * reached the focal length, which is how an f/4 zoom ended up reporting f/1.2.
+ * Choosing the lens first and then drawing only from the f-numbers it can open
+ * to makes that combination unrepresentable.
+ */
+export function pickOptics(cam) {
+  if (cam.type === 'phone') {
+    const l = pick(cam.lenses);
+    return { focalPhys: l.phys, focalEquiv: l.equiv, aperture: l.f,
+             lens: getLensInfo(cam, l.phys, l.f) };
+  }
+
+  const focalPhys  = pick(cam.focals);
+  const focalEquiv = Math.round(focalPhys * (cam.crop || 1));
+
+  if (cam.fixedLens) {
+    return { focalPhys, focalEquiv, aperture: pick(cam.apertures), lens: { make: null, model: null } };
+  }
+
+  const covering = (DSLR_LENSES[cam.make] || []).filter(l =>
+    (cam.mounts || []).includes(l.mount) && focalPhys >= l.range[0] && focalPhys <= l.range[1]);
+  const chosen = covering.length ? pick(covering) : null;
+
+  const openable = chosen ? cam.apertures.filter(a => a >= chosen.wide - 0.01) : cam.apertures;
+  const aperture = openable.length ? pick(openable) : (chosen ? chosen.wide : pick(cam.apertures));
+
+  return { focalPhys, focalEquiv, aperture,
+           lens: { make: chosen ? cam.make : null, model: chosen ? chosen.model : null } };
+}
+
 export function getLensInfo(cam, focalPhys, aperture) {
   if (cam.type === 'phone') {
     const f = Number(aperture.toFixed(2));
@@ -358,13 +410,22 @@ export function getLensInfo(cam, focalPhys, aperture) {
     return { make: cam.make, model: `${cam.model} back camera ${focalPhys}mm f/${f}` };
   }
 
-  const pool = DSLR_LENSES[cam.make] || [];
-  const usable = pool.filter(l =>
-    focalPhys >= l.range[0] && focalPhys <= l.range[1] && aperture >= l.wide - 0.01);
+  // Fixed-lens bodies have nothing to report: the lens is not interchangeable,
+  // and naming an XF prime on an X100VI describes an impossible camera.
+  if (cam.fixedLens) return { make: null, model: null };
+
+  const mounts   = cam.mounts || [];
+  const fits     = l => mounts.includes(l.mount);
+  const covers   = l => focalPhys >= l.range[0] && focalPhys <= l.range[1];
+  const opens    = l => aperture >= l.wide - 0.01;
+
+  const pool     = (DSLR_LENSES[cam.make] || []).filter(fits);
+  const usable   = pool.filter(l => covers(l) && opens(l));
   if (usable.length) return { make: cam.make, model: pick(usable).model };
 
-  // Nothing covers it: fall back to any lens reaching that focal length.
-  const covering = pool.filter(l => focalPhys >= l.range[0] && focalPhys <= l.range[1]);
+  // Nothing opens that wide: fall back to any mountable lens reaching the focal
+  // length. Stopping a fast lens down is normal; the reverse is not.
+  const covering = pool.filter(covers);
   if (covering.length) return { make: cam.make, model: pick(covering).model };
   return { make: cam.make, model: pool.length ? pick(pool).model : `${focalPhys}mm` };
 }
