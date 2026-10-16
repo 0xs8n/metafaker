@@ -6,6 +6,7 @@
  */
 
 import { App, S } from './ui.js';
+import { ICONS } from './icons.js';
 
 // Exposed for console debugging only. Nothing in the page calls through
 // window any more — every handler is bound below, so the Content-Security
@@ -19,7 +20,7 @@ window.S = S;
 const savedTheme = localStorage.getItem('metafaker.theme') ||
   (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
 document.documentElement.setAttribute('data-theme', savedTheme);
-document.getElementById('themeIcon').textContent = savedTheme === 'dark' ? 'light_mode' : 'dark_mode';
+document.getElementById('themeIcon').innerHTML = savedTheme === 'dark' ? ICONS.sun : ICONS.moon;
 
 // ── Upload Zone Event Listeners ──────────────────────────────────
 

@@ -4,32 +4,39 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!--
-    Defence in depth behind the output escaping in exif.js: EXIF from an
-    untrusted image reaches the metadata panel, so if anything ever slips
-    through unescaped, script-src stops it executing. The page carries no
-    inline script (every handler is bound in main.js), and neither piexifjs
-    nor exifr uses eval or the Function constructor, so no 'unsafe-inline'
-    or 'unsafe-eval' is needed for script.
-    'unsafe-inline' remains on style-src only, for the style="" attributes
-    in the markup below. frame-ancestors is omitted because a <meta> CSP
-    cannot carry it.
+    This page makes no network request beyond its own files. Every script,
+    style and icon is served from the same origin: the two libraries are
+    vendored under vendor/, and the icons are inline SVG. A privacy tool that
+    fetched a font from Google or a script from a CDN would hand every user's
+    IP address and referrer to a third party on each visit, and a CDN-served
+    module import cannot even carry an integrity hash.
+
+    The Content-Security-Policy is defence in depth behind the output escaping
+    in exif.js: EXIF from an untrusted image reaches the metadata panel, so if
+    anything ever slips through unescaped, script-src stops it executing. The
+    page carries no inline script (every handler is bound in main.js), and
+    neither piexifjs nor exifr uses eval or the Function constructor.
+    'unsafe-inline' remains on style-src only, for the style="" attributes in
+    the markup below. frame-ancestors is omitted because a <meta> CSP cannot
+    carry it.
+
+    The referrer policy keeps this page's address out of any request a user
+    might follow from it.
   -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
-    script-src 'self' https://cdn.jsdelivr.net;
-    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
-    font-src https://fonts.gstatic.com;
+    script-src 'self';
+    style-src 'self' 'unsafe-inline';
     img-src 'self' blob: data:;
     connect-src 'self';
     base-uri 'none';
     form-action 'none'">
+  <meta name="referrer" content="no-referrer">
   <title>MetaFaker - Image Metadata Faker</title>
-  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232563eb'/><circle cx='16' cy='16' r='7.5' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='2.5' fill='white'/></svg>">
   <link rel="stylesheet" href="css/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.js"
-          integrity="sha384-yk/k1j9hKtYh4LJRX0d6o3pO9c8h4lp2IMnWdamQhThRA2Z9B0YNDeGKyDmPXnnJ"
-          crossorigin="anonymous"></script>
+  <script src="vendor/piexif.js"
+          integrity="sha384-yk/k1j9hKtYh4LJRX0d6o3pO9c8h4lp2IMnWdamQhThRA2Z9B0YNDeGKyDmPXnnJ"></script>
 </head>
 <body>
 
@@ -39,14 +46,14 @@
   <span class="header-spacer"></span>
   <span class="header-badge">100% Client-Side</span>
   <button class="theme-toggle" id="btnTheme" title="Toggle dark mode">
-    <span class="material-icons" id="themeIcon">dark_mode</span>
+    <span id="themeIcon"></span>
   </button>
 </header>
 
 <main>
   <!-- Upload zone — drag & drop or click to select images -->
   <div class="upload-zone" id="uploadZone">
-    <div class="upload-icon"><span class="material-icons" style="font-size:inherit">add_photo_alternate</span></div>
+    <div class="upload-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m21 19-5-5L5 21"/><path d="M19 2v6M16 5h6"/></svg></div>
     <div class="upload-title">Drop one or many images here</div>
     <div class="upload-sub">or tap to pick from your gallery &mdash; batch selection works on mobile too</div>
     <input type="file" id="fileInput" accept="image/*" multiple>
@@ -81,7 +88,7 @@
 
       <div class="action-card">
         <div class="action-card-title">Actions</div>
-        <label class="option-row">
+        <label class="option-row" title="Keeps the original calendar day in the generated metadata. Use only when the day is not sensitive: it links the output to the original.">
           <input type="checkbox" id="chkKeepDate">
           <span>Keep original date</span>
         </label>
@@ -107,7 +114,7 @@
       </div>
       <div class="meta-body" id="metaBody">
         <div class="no-meta">
-          <div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">info_outline</span></div>
+          <div class="no-meta-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg></div>
           <p>Loading...</p>
         </div>
       </div>
@@ -116,7 +123,7 @@
 </main>
 
 <footer>
-  MetaFaker &mdash; 100% client-side processing. Open source on <a href="https://github.com/0xs8n/metafaker" target="_blank" rel="noopener">GitHub</a>.
+  MetaFaker &mdash; 100% client-side processing. Open source on <a href="https://github.com/0xs8n/metafaker" target="_blank" rel="noopener noreferrer">GitHub</a>.
 </footer>
 
 <div id="toast"></div>

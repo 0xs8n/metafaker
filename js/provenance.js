@@ -46,7 +46,18 @@ export const EDITOR_QTABLE = {
   ],
 };
 
-export const EDITOR_SOFTWARE = "Adobe Photoshop Camera Raw 16.3 (Windows)";
+/**
+ * The exporter. Every 16.x release of Camera Raw shares the tables, profile
+ * and APP14 measured below, so the version and platform are drawn per image:
+ * a single fixed Software string on every file the tool produced was a
+ * perfect key for grouping them.
+ */
+const ACR_VERSIONS = ['16.1', '16.2', '16.3', '16.3', '16.4', '16.5'];
+export function pickEditor() {
+  const version  = ACR_VERSIONS[Math.floor(Math.random() * ACR_VERSIONS.length)];
+  const platform = Math.random() < 0.7 ? 'Windows' : 'Macintosh';
+  return { version, platform, software: `Adobe Photoshop Camera Raw ${version} (${platform})` };
+}
 const XMP_TOOLKIT = "Adobe XMP Core 7.0-c000 1.000000, 0000/00/00-00:00:00        ";
 
 /** sRGB IEC61966-2.1 (Hewlett-Packard), the profile Camera Raw embeds. */
@@ -121,26 +132,165 @@ export function editorIcc() {
 
 const pad = (n) => String(n).padStart(2, '0');
 
-/** "2024-06-06T18:48:40+08:00" — the form Adobe writes. */
-function xmpDate(d, offset) {
+/** "2024-06-06T18:48:40.83+08:00" — the form Adobe writes, sub-seconds when the camera recorded them. */
+function xmpDate(d, offset, subsec) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-       + `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${offset || 'Z'}`;
+       + `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+       + (subsec ? `.${subsec}` : '') + (offset || 'Z');
 }
 
 const hex = (n) => Array.from({ length: n },
   () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 const uuid = () => `${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`;
+const xml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const pickOne = (a) => a[Math.floor(Math.random() * a.length)];
+const signed = (n) => (n > 0 ? `+${n}` : String(n));
+
+/** Rational list in the form aux:LensInfo uses: "24/1 70/1 28/10 178/100" — the same encoding as the EXIF LensSpecification. */
+function lensInfoString(spec) {
+  const rat = v => (Number.isInteger(v) ? `${v}/1`
+    : Math.abs(v * 10 - Math.round(v * 10)) < 1e-9 ? `${Math.round(v * 10)}/10`
+    : `${Math.round(v * 100)}/100`);
+  return spec.map(rat).join(' ');
+}
+
+/**
+ * The Camera Raw settings block.
+ *
+ * A packet whose CreatorTool is Camera Raw but which carries no crs:
+ * namespace is a packet Camera Raw did not write: the develop settings are the
+ * bulk of every real one. These are the defaults a raw file opens with, plus
+ * the handful of sliders people actually move, with HasSettings and
+ * AlreadyApplied set as they are on an export. A JPEG source opens with the
+ * "Embedded" profile, no white-balance numbers and sharpening at zero.
+ */
+function crsAttributes({ editor, raw, scene }) {
+  const isRaw = raw !== 'image/jpeg';
+  const kelvin = { daylight: [5200, 5900], overcast: [5800, 6800], indoor: [2900, 3800],
+                   dim: [2800, 3600], night: [2600, 3600] }[scene] || [5000, 5600];
+  const temp = kelvin[0] + Math.floor(Math.random() * (kelvin[1] - kelvin[0]));
+  const tint = Math.floor(Math.random() * 21) - 5;
+  const exposure   = pickOne(['0.00', '0.00', '0.00', '+0.25', '-0.30', '+0.50', '-0.50', '+0.15', '+0.35']);
+  const highlights = pickOne(['0', '0', '-20', '-40', '-15', '-30']);
+  const shadows    = pickOne(['0', '0', '+20', '+35', '+10', '+25']);
+  const clarity    = pickOne(['0', '0', '0', '+10', '+15']);
+  const vibrance   = pickOne(['0', '0', '+10', '+15', '+5']);
+
+  const a = [
+    ['crs:Version', editor.version],
+    ['crs:ProcessVersion', '11.0'],
+    ['crs:WhiteBalance', 'As Shot'],
+  ];
+  if (isRaw) a.push(['crs:Temperature', String(temp)], ['crs:Tint', signed(tint)]);
+  a.push(
+    ['crs:Exposure2012', exposure],
+    ['crs:Contrast2012', '0'],
+    ['crs:Highlights2012', highlights],
+    ['crs:Shadows2012', shadows],
+    ['crs:Whites2012', '0'],
+    ['crs:Blacks2012', '0'],
+    ['crs:Texture', '0'],
+    ['crs:Clarity2012', clarity],
+    ['crs:Dehaze', '0'],
+    ['crs:Vibrance', vibrance],
+    ['crs:Saturation', '0'],
+    ['crs:ParametricShadows', '0'],
+    ['crs:ParametricDarks', '0'],
+    ['crs:ParametricLights', '0'],
+    ['crs:ParametricHighlights', '0'],
+    ['crs:ParametricShadowSplit', '25'],
+    ['crs:ParametricMidtoneSplit', '50'],
+    ['crs:ParametricHighlightSplit', '75'],
+    ['crs:Sharpness', isRaw ? '40' : '0'],
+    ['crs:SharpenRadius', '+1.0'],
+    ['crs:SharpenDetail', '25'],
+    ['crs:SharpenEdgeMasking', '0'],
+    ['crs:LuminanceSmoothing', '0'],
+    ['crs:ColorNoiseReduction', isRaw ? '25' : '0'],
+    ['crs:ColorNoiseReductionDetail', '50'],
+    ['crs:ColorNoiseReductionSmoothness', '50'],
+  );
+  for (const c of ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta']) {
+    a.push([`crs:HueAdjustment${c}`, '0'], [`crs:SaturationAdjustment${c}`, '0'], [`crs:LuminanceAdjustment${c}`, '0']);
+  }
+  a.push(
+    ['crs:SplitToningShadowHue', '0'],
+    ['crs:SplitToningShadowSaturation', '0'],
+    ['crs:SplitToningHighlightHue', '0'],
+    ['crs:SplitToningHighlightSaturation', '0'],
+    ['crs:SplitToningBalance', '0'],
+    ['crs:ColorGradeMidtoneHue', '0'],
+    ['crs:ColorGradeMidtoneSat', '0'],
+    ['crs:ColorGradeShadowLum', '0'],
+    ['crs:ColorGradeMidtoneLum', '0'],
+    ['crs:ColorGradeHighlightLum', '0'],
+    ['crs:ColorGradeBlending', '50'],
+    ['crs:ColorGradeGlobalHue', '0'],
+    ['crs:ColorGradeGlobalSat', '0'],
+    ['crs:ColorGradeGlobalLum', '0'],
+    ['crs:AutoLateralCA', '0'],
+    ['crs:LensProfileEnable', '0'],
+    ['crs:LensManualDistortionAmount', '0'],
+    ['crs:VignetteAmount', '0'],
+    ['crs:DefringePurpleAmount', '0'],
+    ['crs:DefringePurpleHueLo', '30'],
+    ['crs:DefringePurpleHueHi', '70'],
+    ['crs:DefringeGreenAmount', '0'],
+    ['crs:DefringeGreenHueLo', '40'],
+    ['crs:DefringeGreenHueHi', '60'],
+    ['crs:PerspectiveUpright', '0'],
+    ['crs:PerspectiveVertical', '0'],
+    ['crs:PerspectiveHorizontal', '0'],
+    ['crs:PerspectiveRotate', '0.0'],
+    ['crs:PerspectiveAspect', '0'],
+    ['crs:PerspectiveScale', '100'],
+    ['crs:PerspectiveX', '0.00'],
+    ['crs:PerspectiveY', '0.00'],
+    ['crs:GrainAmount', '0'],
+    ['crs:PostCropVignetteAmount', '0'],
+    ['crs:ShadowTint', '0'],
+    ['crs:RedHue', '0'],
+    ['crs:RedSaturation', '0'],
+    ['crs:GreenHue', '0'],
+    ['crs:GreenSaturation', '0'],
+    ['crs:BlueHue', '0'],
+    ['crs:BlueSaturation', '0'],
+    ['crs:ConvertToGrayscale', 'False'],
+    ['crs:ToneCurveName2012', 'Linear'],
+    ['crs:CameraProfile', isRaw ? 'Adobe Color' : 'Embedded'],
+    ['crs:CameraProfileDigest', isRaw ? hex(32).toUpperCase() : '54650A341B5B5CCAE8442D0B43A92BCE'],
+    ['crs:HasSettings', 'True'],
+    ['crs:HasCrop', 'False'],
+    ['crs:AlreadyApplied', 'True'],
+  );
+  return a.map(([k, v]) => `   ${k}="${v}"`).join('\n');
+}
+
+const TONE_CURVES = ['ToneCurvePV2012', 'ToneCurvePV2012Red', 'ToneCurvePV2012Green', 'ToneCurvePV2012Blue']
+  .map(n => `   <crs:${n}>\n    <rdf:Seq>\n     <rdf:li>0, 0</rdf:li>\n     <rdf:li>255, 255</rdf:li>\n    </rdf:Seq>\n   </crs:${n}>`)
+  .join('\n');
 
 /**
  * Build the XMP packet an export carries.
  *
  * Namespaces, ordering and the xmpMM identifiers follow a real Camera Raw
- * packet. DocumentID and InstanceID match each other, as they do in a file
- * that has been exported once and not edited since.
+ * packet. The capture time goes to CreateDate and DateCreated; the export
+ * time, which is later, goes to ModifyDate, MetadataDate and the history
+ * entry — on the earlier version all four were the capture time to the
+ * second, which no export produces. The history names the raw format the
+ * claimed camera actually shoots. DocumentID and InstanceID match, as they do
+ * in a file exported once and not edited since.
  */
-export function buildXmpPacket({ date, offset, make, model, lens, serial }) {
+export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport, subsec,
+                                 make, model, lens, editor, raw, scene }) {
   const id = uuid();
-  const created = xmpDate(date, offset);
+  const created  = xmpDate(capture, offsetCapture, subsec);
+  const modified = xmpDate(exportAt, offsetExport);
+  const source   = raw || 'image/jpeg';
+  const lensAttrs = [];
+  if (lens?.auxLens) lensAttrs.push(`   aux:Lens="${xml(lens.auxLens)}"`);
+  if (lens?.spec)    lensAttrs.push(`   aux:LensInfo="${lensInfoString(lens.spec)}"`);
+  if (lens?.model)   lensAttrs.push(`   exifEX:LensModel="${xml(lens.model)}"`);
   return `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="${XMP_TOOLKIT}">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
@@ -151,46 +301,54 @@ export function buildXmpPacket({ date, offset, make, model, lens, serial }) {
     xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
     xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"
     xmlns:stEvt="http://ns.adobe.com/xap/1.0/sType/ResourceEvent#"
-   xmp:ModifyDate="${created}"
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+   xmp:ModifyDate="${modified}"
    xmp:CreateDate="${created}"
-   xmp:MetadataDate="${created}"
-   xmp:CreatorTool="${EDITOR_SOFTWARE}"
-   aux:Lens="${lens || ''}"
-   aux:LensID="${serial || ''}"
-   photoshop:DateCreated="${created}"
+   xmp:MetadataDate="${modified}"
+   xmp:CreatorTool="${editor.software}"
+${lensAttrs.join('\n')}${lensAttrs.length ? '\n' : ''}   photoshop:DateCreated="${created}"
    xmpMM:DocumentID="xmp.did:${id}"
    xmpMM:InstanceID="xmp.iid:${id}"
-   xmpMM:OriginalDocumentID="${hex(32).toUpperCase()}">
+   xmpMM:OriginalDocumentID="${hex(32).toUpperCase()}"
+${crsAttributes({ editor, raw: source, scene })}>
    <xmpMM:History>
     <rdf:Seq>
      <rdf:li rdf:parseType="Resource">
       <stEvt:action>derived</stEvt:action>
-      <stEvt:parameters>converted from image/x-adobe-dng to image/jpeg, saved to new location</stEvt:parameters>
+      <stEvt:parameters>converted from ${source} to image/jpeg, saved to new location</stEvt:parameters>
      </rdf:li>
      <rdf:li rdf:parseType="Resource">
       <stEvt:action>saved</stEvt:action>
       <stEvt:instanceID>xmp.iid:${id}</stEvt:instanceID>
-      <stEvt:when>${created}</stEvt:when>
-      <stEvt:softwareAgent>${EDITOR_SOFTWARE}</stEvt:softwareAgent>
+      <stEvt:when>${modified}</stEvt:when>
+      <stEvt:softwareAgent>${editor.software}</stEvt:softwareAgent>
       <stEvt:changed>/</stEvt:changed>
      </rdf:li>
     </rdf:Seq>
    </xmpMM:History>
+${TONE_CURVES}
   </rdf:Description>
  </rdf:RDF>
 </x:xmpmeta>
 <?xpacket end="w"?>`;
 }
 
-/** Wrap an XMP packet as an APP1 segment. */
+/**
+ * Wrap an XMP packet as an APP1 segment.
+ *
+ * The packet is UTF-8, and it matters: the xpacket header opens with U+FEFF,
+ * which has to land as the three bytes EF BB BF. An earlier version masked
+ * each code unit with 0xFF, so every file began its packet with a lone 0xFF
+ * byte — invalid UTF-8 that readers tolerate silently, which made it a
+ * deterministic signature of this writer.
+ */
 export function xmpSegment(packet) {
-  const NS = 'http://ns.adobe.com/xap/1.0/\0';
-  const body = NS + packet;
+  const body = new TextEncoder().encode('http://ns.adobe.com/xap/1.0/\0' + packet);
   const len = body.length + 2;
   if (len > 0xFFFF) return null;
   const seg = new Uint8Array(2 + len);
   seg[0] = 0xFF; seg[1] = 0xE1;
   seg[2] = (len >> 8) & 0xFF; seg[3] = len & 0xFF;
-  for (let i = 0; i < body.length; i++) seg[4 + i] = body.charCodeAt(i) & 0xFF;
+  seg.set(body, 4);
   return seg;
 }

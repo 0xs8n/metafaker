@@ -66,3 +66,53 @@ Two cautions. Synthetic test fixtures give misleading numbers here — flat
 gradients drove blockiness to 1.395 and ghost to 0.295, neither of which
 reflects the pipeline. And three detectors are not a forensic suite: PRNU, ELA
 and the ML detectors (TruFor, Noiseprint++, CAT-Net) are untested.
+
+## Browser harness and offline build
+
+Two Node scripts (Node 22+, no npm packages) that drive the real app in
+headless Chrome over the DevTools protocol. Chrome is found automatically in
+its usual install locations, or set `CHROME=/path/to/chrome`. The launch and
+protocol plumbing is shared in `tools/lib/cdp.js`.
+
+### `check.js`
+
+    node tools/check.js
+
+Serves the repo on `127.0.0.1`, loads every `testimg/*.jpg`, randomizes the
+batch, strips one extra copy of the first image, and writes the outputs to
+`tools/out/` (git-ignored). Then it asserts:
+
+- **privacy** — every network request the page made went to `127.0.0.1`,
+  `blob:` or `data:`; no uncaught exceptions, `console.error` calls or
+  error-level log entries (CSP violations, failed loads).
+- **bytes** (own JPEG segment walker) — one SOI before SOS, no APP0, one DQT
+  carrying two tables, APP14 Adobe, baseline SOF0 with three 1x1 components
+  (4:4:4), DHT and SOS. Randomized files must carry APP1 Exif, APP1 XMP whose
+  packet begins with the UTF-8 BOM, and APP2 ICC_PROFILE; stripped files must
+  carry no APP1/APP2 at all. Nowhere in the file: `Google Inc`, `Skia`,
+  `JFIF`, `Chrome`, `Mozilla`, or UTF-16BE `Google` / `Skia`.
+- **exiftool** (when found on PATH or at the known Windows install path;
+  otherwise SKIPPED) — `-validate` reports OK with no warnings; Make/Model
+  present; Software is Adobe Camera Raw; ModifyDate >= DateTimeOriginal; the
+  XMP CreateDate matches DateTimeOriginal; GPS inside the US envelope; the
+  exposure triangle agrees with the APEX tags within 0.75 EV; no thumbnail,
+  JFIF or Google ICC tags; ExifImageWidth/Height equal the SOF0 frame; and the
+  sun is not below -6° at the GPS position and time when the exposure claims
+  bright daylight (EV > 11). Stripped files must carry no metadata groups.
+
+Exit code is 1 on any failure; each failure names the file, the assertion and
+the actual value.
+
+### `build.js`
+
+    node tools/build.js             # build and verify
+    node tools/build.js --no-verify
+
+Writes `dist/metafaker.html`, a single file that works opened from disk via
+`file://`. Chrome will not run ES modules from `file://`, so the `js/` modules
+are rewritten into classic-script IIFEs registered in a `__modules` map and
+emitted in dependency order; `css/style.css`, `vendor/piexif.js` and
+`vendor/exifr.umd.js` are inlined. The CSP is kept with `'unsafe-inline'` on
+script and style (everything is inline) and `connect-src 'none'`. The result is
+then opened in headless Chrome via `file://` and checked: `window.App` exists,
+one test image randomizes to a `modBlob`, and no request left the machine.

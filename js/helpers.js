@@ -120,9 +120,32 @@ export function gpsTimeStamp(d) {
   return [[d.getUTCHours(), 1], [d.getUTCMinutes(), 1], [d.getUTCSeconds(), 1]];
 }
 
-export function randomDate() {
-  const now = Date.now();
-  return new Date(now - Math.random() * 730 * 864e5);
+// ── Sun position ─────────────────────────────────────────────────
+
+/**
+ * Solar elevation in degrees at a point and UTC instant (USNO low-precision
+ * algorithm, good to a fraction of a degree, which is plenty).
+ *
+ * The scene brightness used to be drawn independently of the clock, so a
+ * daylight exposure at 02:40 local time came out about one night-time frame
+ * in three. Anyone with the GPS position and the timestamp can compute where
+ * the sun was, so the scene is now chosen from that.
+ */
+export function sunElevation(lat, lon, utc) {
+  const RAD = Math.PI / 180;
+  const d = utc.getTime() / 864e5 - 10957.5;                    // days since J2000.0
+  const g = (357.529 + 0.98560028 * d) * RAD;                    // mean anomaly
+  const q = 280.459 + 0.98564736 * d;                            // mean longitude
+  const L = (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * RAD;
+  const e = (23.439 - 0.00000036 * d) * RAD;                     // obliquity
+  const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L));
+  const dec = Math.asin(Math.sin(e) * Math.sin(L));
+  const gmst = (18.697374558 + 24.06570982441908 * d) % 24;
+  const lst = ((gmst + lon / 15) % 24 + 24) % 24;
+  const ha = lst * 15 * RAD - ra;
+  const el = Math.asin(Math.sin(lat * RAD) * Math.sin(dec)
+                     + Math.cos(lat * RAD) * Math.cos(dec) * Math.cos(ha));
+  return el / RAD;
 }
 
 // ── GPS Coordinate Conversion ────────────────────────────────────
@@ -149,15 +172,6 @@ export function dmsToDec(dms, ref) {
 
 // ── File / Blob Utilities ────────────────────────────────────────
 
-export function fileToDataUrl(file) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = e => res(e.target.result);
-    r.onerror = rej;
-    r.readAsDataURL(file);
-  });
-}
-
 export function dataUrlToBlob(dataUrl) {
   const m = dataUrl.match(/^data:([^;,]+)?(;base64)?,(.*)$/);
   if (!m) throw new Error('Invalid output image data');
@@ -172,23 +186,6 @@ export function dataUrlToBlob(dataUrl) {
 }
 
 // ── Canvas / Image Processing ────────────────────────────────────
-
-/**
- * Bimodal JPEG quality picker matched to camera type.
- * Wider range creates more quantization table diversity between images,
- * defeating Huffman-table clustering analysis.
- */
-export function randomJpegQuality(cameraType = 'phone') {
-  const r = Math.random();
-  if (cameraType === 'dslr') {
-    if (r < 0.15) return 0.78 + Math.random() * 0.07;  // 0.78–0.85
-    if (r < 0.60) return 0.86 + Math.random() * 0.06;  // 0.86–0.92
-    return 0.93 + Math.random() * 0.03;                  // 0.93–0.96
-  }
-  if (r < 0.40) return 0.70 + Math.random() * 0.10;    // 0.70–0.80
-  if (r < 0.80) return 0.82 + Math.random() * 0.10;    // 0.82–0.92
-  return 0.93 + Math.random() * 0.03;                    // 0.93–0.96
-}
 
 export function randomMaxEdge() {
   const edges = [2048, 2160, 2400, 2560, 2880, 3200];
@@ -699,6 +696,13 @@ function antiForensicRender(img, cam = {}) {
   const srcW    = img.naturalWidth  - cropL - cropR;
   const srcH    = img.naturalHeight - cropT - cropB;
 
+  // The container the export carries. A stripped file keeps only what
+  // `exiftool -all=` would leave on a Camera Raw export: the APP14 marker,
+  // which ExifTool does not count as metadata; no profile, no packet.
+  const container = cam.strip
+    ? { app14: ADOBE_APP14 }
+    : { icc: editorIcc(), app14: ADOBE_APP14, xmp: cam.xmpSegment || null };
+
   if (srcW < 100 || srcH < 100) {
     const c   = document.createElement('canvas');
     c.width   = img.naturalWidth;
@@ -711,9 +715,7 @@ function antiForensicRender(img, cam = {}) {
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
     let dataUrl = c.toDataURL('image/jpeg', 1.0);
     dataUrl = applyEditorQuantization(dataUrl);
-    dataUrl = normaliseAppSegments(dataUrl, {
-      icc: editorIcc(), app14: ADOBE_APP14, xmp: cam.xmpSegment || null,
-    });
+    dataUrl = normaliseAppSegments(dataUrl, container);
     return { dataUrl, width: c.width, height: c.height };
   }
 
@@ -774,60 +776,16 @@ function antiForensicRender(img, cam = {}) {
   // cleanest source for re-quantisation, being near-lossless.
   let dataUrl = c.toDataURL('image/jpeg', 1.0);
   dataUrl = applyEditorQuantization(dataUrl);
-  dataUrl = normaliseAppSegments(dataUrl, {
-    icc: editorIcc(), app14: ADOBE_APP14, xmp: cam.xmpSegment || null,
-  });
+  dataUrl = normaliseAppSegments(dataUrl, container);
 
   return { dataUrl, width: size.width, height: size.height };
 }
 
 /**
- * Render an EXIF IFD1 thumbnail from the finished image.
- *
- * Almost every camera JPEG carries one, so having none is conspicuous. It is
- * generated from the processed output rather than the original upload on
- * purpose: a thumbnail that disagrees with the full-size image is a louder
- * signal than a missing one, and is exactly what reveals edited photos.
- *
- * Returns a binary string, or null if anything fails or it exceeds the 64kB
- * that piexifjs (and the EXIF structure) allows.
+ * Decode an image and run it through the pipeline. `cam` carries the
+ * generated camera (type, make, ISO, XMP segment); `{ strip: true }` renders
+ * the metadata-free variant.
  */
-export function makeThumbnail(dataUrl, longEdge = 160) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.onerror = () => resolve(null);
-    img.onload = () => {
-      try {
-        const scale = longEdge / Math.max(img.naturalWidth, img.naturalHeight, 1);
-        const w = Math.max(1, Math.round(img.naturalWidth  * scale));
-        const h = Math.max(1, Math.round(img.naturalHeight * scale));
-        const c = document.createElement('canvas');
-        c.width = w; c.height = h;
-        const ctx = c.getContext('2d');
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, w, h);
-        const b64 = c.toDataURL('image/jpeg', 0.7).split(',')[1];
-        if (!b64) return resolve(null);
-        const bin = atob(b64);
-        resolve(bin.length <= 63000 ? { binary: bin, width: w, height: h } : null);
-      } catch (e) {
-        resolve(null);
-      }
-    };
-    img.src = dataUrl;
-  });
-}
-
-export function toJpeg(dataUrl, cam) {
-  return new Promise((res, rej) => {
-    const img   = new Image();
-    img.onload  = () => res(antiForensicRender(img, cam));
-    img.onerror = rej;
-    img.src     = dataUrl;
-  });
-}
-
 export function stripViaCanvas(dataUrl, cam) {
   return new Promise((res, rej) => {
     const img   = new Image();
@@ -868,20 +826,4 @@ export function escapeHtml(value) {
 export function makeId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();
   return `img_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-export async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (e) {
-    const area = document.createElement('textarea');
-    area.value = text;
-    area.setAttribute('readonly', 'readonly');
-    area.style.position = 'fixed';
-    area.style.opacity  = '0';
-    document.body.appendChild(area);
-    area.select();
-    document.execCommand('copy');
-    document.body.removeChild(area);
-  }
 }

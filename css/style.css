@@ -94,7 +94,22 @@
       color: var(--text);
       border-color: var(--text-muted);
     }
-    .theme-toggle .material-icons { font-size: 18px; }
+    .theme-toggle { font-size: 18px; }
+
+    /* Inline SVG icons: sized by the font-size of their container, drawn in
+       the current text colour. Replaces the Material Icons web font, which
+       was fetched from Google on every page load. */
+    .icon {
+      width: 1em;
+      height: 1em;
+      display: inline-block;
+      vertical-align: -0.15em;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
 
     /* --- Main layout --- */
     main {

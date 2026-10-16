@@ -7,14 +7,15 @@
 
 import {
   fmtBytes, escapeHtml, makeId, cryptoRandInt,
-  dataUrlToBlob, stripViaCanvas, makeThumbnail,
+  dataUrlToBlob, stripViaCanvas,
 } from './helpers.js';
 import { dumpExifSafe } from './exif-writer.js';
 import { buildXmpPacket, xmpSegment } from './provenance.js';
 import {
-  generateFake, enforceValidGps, readBackExifStrict,
+  generateFake, readBackExifStrict,
   parseFileExif, renderMeta,
 } from './exif.js';
+import { ICONS } from './icons.js';
 
 export const S = {
   items: [],
@@ -62,9 +63,12 @@ function hasProcessedOutput(item) {
 }
 
 /**
- * Camera-appropriate filename matching the faked camera model.
- * Date-based formats use the faked capture date so the filename and the
- * EXIF DateTimeOriginal agree; falls back to now if no fake date is set.
+ * The name Camera Raw gives an export: the source file's own name with a
+ * lowercase .jpg extension, so the convention follows the faked camera and
+ * date-based names use the faked capture time. A Pixel's raw is named
+ * PXL_<timestamp>.RAW-02.ORIGINAL.dng, and its export keeps that stem; the
+ * millisecond field is the frame's SubSecTime, as on the phone. Uppercase .JPG
+ * is what the camera writes, not what an editor writes.
  */
 function getOutputName(item) {
   const d  = (item?.fakeDate instanceof Date && !isNaN(item.fakeDate)) ? item.fakeDate : new Date();
@@ -75,25 +79,24 @@ function getOutputName(item) {
   const hh = p(d.getHours());
   const mm = p(d.getMinutes());
   const ss = p(d.getSeconds());
-  const ms = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+  const ms = String(item?.fakeSubSec ?? cryptoRandInt(0, 999)).padStart(3, '0');
   const seq = cryptoRandInt(1000, 9999);
 
   // Matches the EXIF Make, which is the manufacturer's own spelling —
   // "samsung" lowercase, "NIKON CORPORATION", "SONY".
   const make = item?.fakeCamera?.make || '';
+  const fromRaw = item?.fakeCamera?.raw && item.fakeCamera.raw !== 'image/jpeg';
 
   switch (make) {
-    // Phones: modern OS exports always produce lowercase .jpg
     case 'Apple':             return `IMG_${seq}.jpg`;
     case 'samsung':           return `${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
-    case 'Google':            return `PXL_${YYYY}${MM}${DD}_${hh}${mm}${ss}${ms}.jpg`;
+    case 'Google':            return `PXL_${YYYY}${MM}${DD}_${hh}${mm}${ss}${ms}${fromRaw ? '.RAW-02.ORIGINAL' : ''}.jpg`;
     case 'OnePlus':           return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
     case 'Xiaomi':            return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
-    // Dedicated cameras: uppercase .JPG is the genuine on-camera format
-    case 'Canon':             return `IMG_${seq}.JPG`;
-    case 'NIKON CORPORATION': return `DSC_${seq}.JPG`;
-    case 'SONY':              return `DSC0${seq}.JPG`;
-    case 'FUJIFILM':          return `DSCF${seq}.JPG`;
+    case 'Canon':             return `IMG_${seq}.jpg`;
+    case 'NIKON CORPORATION': return `DSC_${seq}.jpg`;
+    case 'SONY':              return `DSC0${seq}.jpg`;
+    case 'FUJIFILM':          return `DSCF${seq}.jpg`;
     default:                  return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
   }
 }
@@ -177,7 +180,7 @@ function renderBatchStrip() {
     const canRenderThumb = !!displayUrl && (!lightBatchMode || item.id === S.activeId);
     const thumb = canRenderThumb
       ? `<img class="batch-thumb" loading="lazy" decoding="async" src="${displayUrl}" alt="${escapeHtml(item.file.name)}">`
-      : `<div class="batch-thumb-empty"><span class="material-icons">image</span></div>`;
+      : `<div class="batch-thumb-empty">${ICONS.image}</div>`;
 
     return `
       <div class="batch-item${item.id === S.activeId ? ' active' : ''}" data-id="${escapeHtml(item.id)}">
@@ -218,7 +221,7 @@ function renderActiveTab() {
   if (!body) return;
 
   if (!current) {
-    body.innerHTML = `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">image</span></div><p>Select one or more images to begin.</p></div>`;
+    body.innerHTML = `<div class="no-meta"><div class="no-meta-icon">${ICONS.image}</div><p>Select one or more images to begin.</p></div>`;
     setBadge('none', 'No image');
     updateTabCounts();
     setTabs();
@@ -227,7 +230,7 @@ function renderActiveTab() {
   }
 
   if (hasProcessedOutput(current) && !current.fakeExif) {
-    body.innerHTML = `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">cleaning_services</span></div><p>Metadata was stripped from this image.</p></div>`;
+    body.innerHTML = `<div class="no-meta"><div class="no-meta-icon">${ICONS.clean}</div><p>Metadata was stripped from this image.</p></div>`;
     S.fieldCounts.orig = 0;
     setBadge('cleared', 'Cleared');
   } else if (current.fakeExif) {
@@ -236,7 +239,7 @@ function renderActiveTab() {
     S.fieldCounts.orig = res.count;
     setBadge('fake', 'Randomized');
   } else if (!current.origExif || Object.keys(current.origExif).length === 0) {
-    body.innerHTML = `<div class="no-meta"><div class="no-meta-icon"><span class="material-icons" style="font-size:inherit">photo_camera</span></div><p>No EXIF metadata found.</p></div>`;
+    body.innerHTML = `<div class="no-meta"><div class="no-meta-icon">${ICONS.camera}</div><p>No EXIF metadata found.</p></div>`;
     S.fieldCounts.orig = 0;
     setBadge('original', 'Original');
   } else {
@@ -331,11 +334,17 @@ async function processRandomizeItem(item, options = {}) {
       ...fake.cam,
       iso: fake.display.ISO,
       xmpSegment: xmpSegment(buildXmpPacket({
-        date: fake.display.DateTimeOriginal,
-        offset: fake.offset,
+        capture: fake.capture,
+        exportAt: fake.exportAt,
+        offsetCapture: fake.offset,
+        offsetExport: fake.exportOffset,
+        subsec: fake.subsec,
         make: fake.cam.make,
         model: fake.cam.model,
-        lens: fake.display.LensModel,
+        lens: fake.lens,
+        editor: fake.editor,
+        raw: fake.cam.raw,
+        scene: fake.scene,
       })),
     };
     const canvasResult = await stripViaCanvas(item.previewUrl, camWithIso);
@@ -347,20 +356,14 @@ async function processRandomizeItem(item, options = {}) {
     fake.display.PixelXDimension = canvasResult.width;
     fake.display.PixelYDimension = canvasResult.height;
 
-    // IFD1 thumbnail, rendered from the image we are actually shipping.
-    const thumb = await makeThumbnail(cleanJpeg);
-    if (thumb) {
-      fake.piexif.thumbnail = thumb.binary;
-      fake.piexif['1st'][px.ImageIFD.Compression]    = 6;   // JPEG-compressed
-      fake.piexif['1st'][px.ImageIFD.XResolution]    = [72, 1];
-      fake.piexif['1st'][px.ImageIFD.YResolution]    = [72, 1];
-      fake.piexif['1st'][px.ImageIFD.ResolutionUnit] = 2;
-      fake.piexif['1st'][px.ImageIFD.Orientation]    = 1;
-    }
-
+    // No IFD1 thumbnail. Camera Raw and Lightroom exports do not embed one,
+    // and the one this tool used to write was encoded by the browser: it
+    // carried Chrome's JFIF header and an ICC profile whose copyright string
+    // read "Google Inc. 2016", inside every file, one `exiftool -b
+    // -ThumbnailImage` away. The GPS block is written once, by generateFake,
+    // rather than re-read and re-written in a second pass.
     const bytes = dumpExifSafe(fake.piexif, px);
-    let modDataUrl = px.insert(bytes, cleanJpeg);
-    modDataUrl = enforceValidGps(modDataUrl, fake.loc, fake.display.GPSAltitude);
+    const modDataUrl = px.insert(bytes, cleanJpeg);
 
     const verified = await readBackExifStrict(modDataUrl);
 
@@ -380,7 +383,8 @@ async function processRandomizeItem(item, options = {}) {
     };
     item.fakePiexif = fake.piexif;
     item.fakeCamera = fake.cam;
-    item.fakeDate   = fake.display.DateTimeOriginal;
+    item.fakeDate   = fake.capture;
+    item.fakeSubSec = fake.subsec;
     item.fakeLocation = { ...fake.loc };
 
     const locTxt = item.fakeLocation?.city ? ` | ${item.fakeLocation.city}` : '';
@@ -410,7 +414,10 @@ async function processClearItem(item, options = {}) {
   if (!deferRender) renderCurrentItem();
 
   try {
-    const canvasResult = await stripViaCanvas(item.previewUrl);
+    // Same pixel pipeline, written as the export with its metadata removed:
+    // no Exif, no XMP, no ICC profile, Adobe's APP14 left in place, which is
+    // exactly what `exiftool -all=` leaves behind on a Camera Raw export.
+    const canvasResult = await stripViaCanvas(item.previewUrl, { strip: true });
     const newBlob = dataUrlToBlob(canvasResult.dataUrl);
 
     releaseProcessedResources(item);
@@ -550,7 +557,7 @@ export const App = {
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('metafaker.theme', next);
     const icon = document.getElementById('themeIcon');
-    if (icon) icon.textContent = next === 'dark' ? 'light_mode' : 'dark_mode';
+    if (icon) icon.innerHTML = next === 'dark' ? ICONS.sun : ICONS.moon;
   },
 
   reset() {
