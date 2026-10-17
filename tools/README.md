@@ -103,6 +103,48 @@ batch, strips one extra copy of the first image, and writes the outputs to
 Exit code is 1 on any failure; each failure names the file, the assertion and
 the actual value.
 
+### `stress.js`
+
+    node tools/stress.js <inDir> <outDir>
+
+Runs every image in `<inDir>` through **both** the randomize and strip paths of
+the real app in headless Chrome, one file at a time, and prints one JSON line
+per input plus a final summary line. Per file it reports the input type and
+dimensions, the classifier verdict (photo vs. non-photo and why), and for each
+path whether it errored, the output size and the mode. The summary counts
+pipeline failures, uncaught exceptions, console errors and any request that left
+the machine. Used to confirm the pipeline survives edge-case inputs — tiny and
+boundary sizes, odd dimensions, panoramas, grayscale/CMYK/progressive JPEG,
+WebP, RGBA PNG and screenshot-sized PNGs — without a single foreign request.
+
+On a low-memory machine, run it in small batches (a fresh Chrome per batch): the
+largest full-pipeline photos can exhaust Chrome's heap and drop the DevTools
+socket, which is an environmental limit, not a pipeline fault — the same file
+processes cleanly given its own Chrome.
+
+### `filecheck.js`
+
+    node tools/filecheck.js
+
+Loads `index.html` over `file://` — the scenario browsers block ES modules in —
+and asserts that `js/boot-check.js` shows its guidance overlay rather than
+leaving a dead page.
+
+### `prnu.py` and `prnu-process.js`
+
+    python tools/prnu.py
+
+Measures how well a camera's sensor fingerprint (PRNU) survives the shipped
+strip pipeline, the strongest link between a photo and the specific camera that
+took it. `prnu-process.js` runs a folder of images through the real strip path
+(the full pixel pipeline with no metadata added); `prnu.py` builds a synthetic
+fingerprint we control, stamps it into textured content, runs those through the
+pipeline, and measures the peak-to-correlation-energy against the estimated
+fingerprint before and after. Grounded in the shipped code rather than asserted.
+The result informs the honest "strong defence, not proven" wording in the
+README's threat model: downscaling is the reliable disruptor; the warp alone was
+not enough.
+
 ### `build.js`
 
     node tools/build.js             # build and verify

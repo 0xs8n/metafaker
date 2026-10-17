@@ -53,9 +53,9 @@ The application is split into small browser modules:
 - `css/style.css` — layout, batch queue, preview card, metadata table and toast styling.
 - `js/main.js` — bootstraps the app, theme state, and wires drag/drop and file input events to the controller.
 - `js/ui.js` — application state, queue management, rendering, downloads, and the processing workflow.
-- `js/exif.js` — generates the metadata set, parses source EXIF, verifies written metadata, formats values for display.
+- `js/classify.js` — tells a camera photo from a screenshot or exported graphic before anything is faked, so a non-photo is never given a camera, lens or location.
+- `js/exif.js` — generates the Adobe-export metadata set in each firmware's measured encodings (the per-make `WRITERS` profiles), parses source EXIF, verifies written metadata, and formats values for display.
 - `js/data.js` — the camera database with the per-model EXIF facts measured from real files, the US location database, and the lens database.
-- `js/exif.js` — builds the metadata of an Adobe export, in each firmware's measured encodings.
 - `js/provenance.js` — everything the file says about the editor that wrote it: its quantization tables, ICC profile, APP14 marker, the Photoshop APP13 block, and the XMP packet.
 - `js/exif-writer.js` — the TIFF/Exif serialiser that replaces piexifjs's `dump`, little- or big-endian.
 - `js/jpeg-requantize.js` — the baseline JPEG transcoder that re-quantises the browser's output onto the exporter's tables, adds its restart interval and APP14, and optimises the Huffman tables.
@@ -63,7 +63,7 @@ The application is split into small browser modules:
 - `js/rng.js` — the one random source, backed by `crypto.getRandomValues`.
 - `js/md5.js` — MD5, for the Photoshop IPTCDigest resource.
 - `js/icons.js` — inline SVG icons.
-- `js/rng.js` — the one random source, backed by `crypto.getRandomValues`.
+- `js/boot-check.js` — a classic (non-module) script that shows a guidance overlay when `index.html` is opened from `file://` or the app otherwise fails to load.
 - `vendor/` — the two pinned libraries.
 - `tools/` — the test harness, the single-file build, and offline forensic measurement scripts.
 
@@ -124,7 +124,7 @@ A genuine Adobe export does not pass `exiftool -validate`: Adobe drops `Componen
 
 ### Consistency rules
 
-- **Per-make tag sets.** An export preserves the camera's tags, so a file claiming a Samsung has to carry Samsung's tag set, not a generic one. `EXIF_PROFILES` in `js/data.js` records, per make, which optional tags that firmware writes (which `SubSecTime` tags and at what width, `SensingMethod`, `SceneType`, `FileSource`, `CustomRendered`, the contrast/saturation/sharpness trio, `DigitalZoomRatio`, `LightSource`, `GainControl`, Nikon's `CFAPattern`, the CIPA sensitivity pair, which lens tags) and the values it uses (`MeteringMode`, the `Flash` codes for "did not fire"). Per model, `ExifVersion`, built-in flash, raw format and `OffsetTime` support are fixed, not drawn; the `OffsetTime` tags only exist from Exif 2.31, so a 0220 writer never carries them. Canon never writes `FocalLengthIn35mmFormat`; Apple writes no `MaxApertureValue`; Nikon writes `Flash` as 0; the Qualcomm-based Android makers write `ExifVersion` 0220. `FlashpixVersion` is always 0100. `ColorSpace` is always sRGB, because the export is.
+- **Per-make tag sets.** An export preserves the camera's tags, so a file claiming a Samsung has to carry Samsung's tag set, not a generic one. The per-make `WRITERS` profiles in `js/exif.js` record which optional tags that firmware writes (which `SubSecTime` tags and at what width, `SensingMethod`, `SceneType`, `FileSource`, `CustomRendered`, the contrast/saturation/sharpness trio, `DigitalZoomRatio`, `LightSource`, `GainControl`, Nikon's `CFAPattern`, the CIPA sensitivity pair, which lens tags) and the values it uses (`MeteringMode`, the `Flash` codes for "did not fire"). Per model, `ExifVersion`, built-in flash, raw format and `OffsetTime` support are fixed, not drawn; the `OffsetTime` tags only exist from Exif 2.31, so a 0220 writer never carries them. Canon never writes `FocalLengthIn35mmFormat`; Apple writes no `MaxApertureValue`; Nikon writes `Flash` as 0; the Qualcomm-based Android makers write `ExifVersion` 0220. `FlashpixVersion` is always 0100. `ColorSpace` is always sRGB, because the export is.
 - **Per-make encodings.** Each firmware serialises its rationals its own way and the export carries the strings through. Apple writes arbitrary-denominator rationals produced from floats and reduced fractions (`89/50` for f/1.78); Nikon and Sony write APEX values over 1000000; Canon snaps to eighth-stops and reduces exposure compensation in thirds; Nikon writes compensation in unreduced sixths; the Android makers and Fujifilm write over 100. GPS coordinates are the exception: they are written as the **exporter** writes them, degrees plus decimal minutes to four places with a zero seconds field, because XMP stores them as `DDD,MM.mmmmN` and the exporter reconciles that back into EXIF.
 - **Manufacturer spellings.** Samsung writes `samsung`, Nikon writes `NIKON CORPORATION` and `NIKON Z 9` with a space, Sony writes `SONY`.
 - **The sun fixes the scene.** The capture hour is drawn from when people actually take pictures, then the sun's elevation at the claimed place and time is computed, and the scene brightness is chosen from it: no daylight exposures after dark. The exposure is then solved, not sampled: shutter and ISO are solved against the aperture through `N² / t = (ISO / 100) · 2^EV`, clamped to what the body can meter, and snapped to the shutter ladder. The APEX tags and `BrightnessValue` are derived from the same solution.
@@ -160,7 +160,9 @@ What this tool does and does not protect against, stated plainly, because the pe
 node tools/check.js
 ```
 
-Launches headless Chrome, processes every image in `testimg/`, and asserts the output's structure byte by byte (segment order, no JFIF, no thumbnail, correct XMP byte-order mark, no browser strings anywhere in the file), that the page made no request to any host but the test server, and, when `exiftool` is installed, that each file validates clean, that its dates, GPS, exposure and sun position are consistent, and that no browser-encoded data survives. See `tools/README.md` for the offline pixel-domain measurements.
+Launches headless Chrome, processes every image in `testimg/`, and asserts the output's structure byte by byte (segment order, no JFIF, no thumbnail, correct XMP byte-order mark, no browser strings anywhere in the file), that the page made no request to any host but the test server, and, when `exiftool` is installed, that each file validates clean, that its dates, GPS, exposure and sun position are consistent, and that no browser-encoded data survives.
+
+`node tools/stress.js <inDir> <outDir>` runs both the randomize and strip paths over a folder of edge-case inputs (tiny, boundary and odd sizes, panoramas, grayscale/CMYK/progressive JPEG, WebP, RGBA and screenshot PNGs) and reports the classifier verdict and any failure per file. See `tools/README.md` for this and the offline pixel-domain measurements.
 
 ## Runtime dependencies
 
