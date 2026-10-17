@@ -869,7 +869,7 @@ function snapToCameraFrame(x, y, w, h, cam) {
  * or nothing for a stripped one. Falls back to dropping the browser markers
  * and adding APP14 if the re-encoder cannot handle the frame.
  */
-function encodeExportPixels(ctx, width, height) {
+function encodeExportPixels(ctx, width, height, minimal = false) {
   const mcusX = Math.ceil(width / 8);   // 4:4:4, so the MCU is 8px; DRI = MCUs per row
   const url = ctx.canvas.toDataURL('image/jpeg', 1.0);
   const r = requantizeToExport(url, pickEditorQtable(),
@@ -899,17 +899,28 @@ function antiForensicRender(img, cam = {}) {
   const srcW    = imgW - cropL - cropR;
   const srcH    = imgH - cropT - cropB;
 
+  // A non-photo (screenshot, graphic) has no sensor fingerprint and no lens,
+  // so the anti-forensic stages — colour science, ISP, lens optics, sensor
+  // noise, the PRNU warp — are pointless for it and would be wrong: a
+  // screenshot with added vignetting and sensor noise is less plausible, not
+  // more. `minimal` runs only crop, downscale and a clean re-encode. It is
+  // also far lighter on memory, since it skips the full-resolution buffers the
+  // warp and ISP stages allocate.
+  const minimal = !!cam.minimal;
+
   if (srcW < 100 || srcH < 100) {
     const c   = document.createElement('canvas');
     c.width   = imgW;
     c.height  = imgH;
     const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(img, 0, 0);
-    applyCameraColorProfile(ctx, c.width, c.height, cameraMake);
-    applyISPSimulation(ctx, c.width, c.height);
-    applyLensOpticalEffects(ctx, c.width, c.height, cam);
-    addPixelNoise(ctx, c.width, c.height, iso, cameraType);
-    return { dataUrl: encodeExportPixels(ctx, c.width, c.height), width: c.width, height: c.height };
+    if (!minimal) {
+      applyCameraColorProfile(ctx, c.width, c.height, cameraMake);
+      applyISPSimulation(ctx, c.width, c.height);
+      applyLensOpticalEffects(ctx, c.width, c.height, cam);
+      addPixelNoise(ctx, c.width, c.height, iso, cameraType);
+    }
+    return { dataUrl: encodeExportPixels(ctx, c.width, c.height, minimal), width: c.width, height: c.height };
   }
 
   // 3. Reshape to a frame the camera can produce, then size the output.
@@ -922,8 +933,13 @@ function antiForensicRender(img, cam = {}) {
   // well within the range an export resizes by.
   const frame = snapToCameraFrame(srcX, srcY, srcW, srcH, cam);
   const longest = Math.max(frame.w, frame.h);
-  const cap  = Math.min(randomMaxEdge(), Math.round(longest * (0.80 + rnd() * 0.12)));
-  const size = frame.out || getExportDimensions(frame.w, frame.h, cap);
+  // Non-photos are capped at 1600 on the long edge. They keep the exporter's
+  // 4:4:4 container like everything else, so the quality-1.0 encode must stay
+  // bounded: a very large, near-incompressible frame (fine noise) can exhaust
+  // the renderer at quality 1.0, and no real screenshot needs more than 1600.
+  const maxEdge = minimal ? Math.min(1600, Math.round(longest * (0.80 + rnd() * 0.12)))
+                          : Math.min(randomMaxEdge(), Math.round(longest * (0.80 + rnd() * 0.12)));
+  const size = frame.out || getExportDimensions(frame.w, frame.h, maxEdge);
 
   const c   = document.createElement('canvas');
   c.width   = size.width;
@@ -934,6 +950,12 @@ function antiForensicRender(img, cam = {}) {
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
+
+  if (minimal) {
+    // Crop and downscale only, no rotation or sensor-pattern work.
+    ctx.drawImage(img, frame.x, frame.y, frame.w, frame.h, 0, 0, size.width, size.height);
+    return { dataUrl: encodeExportPixels(ctx, size.width, size.height, minimal), width: size.width, height: size.height };
+  }
 
   // 2. Rotation on about two images in three, 0.3–2.0° either way. Rotating
   // every image was a tell twice over: a tilted horizon on each, and one more
@@ -978,7 +1000,7 @@ function antiForensicRender(img, cam = {}) {
   // is the only setting at which the browser emits 4:4:4 chroma, which is what
   // an editor export uses. Everything lower is 4:2:0 and would contradict the
   // story the file tells. It is also the cleanest source for re-quantisation.
-  return { dataUrl: encodeExportPixels(ctx, size.width, size.height), width: size.width, height: size.height };
+  return { dataUrl: encodeExportPixels(ctx, size.width, size.height, minimal), width: size.width, height: size.height };
 }
 
 /**

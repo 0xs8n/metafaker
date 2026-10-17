@@ -394,7 +394,7 @@ async function processGraphicItem(item, options = {}) {
   if (!deferRender) renderCurrentItem();
   try {
     const fake = generateGraphic();
-    const { verified, modDataUrl } = await assembleAdobeExport(item, fake, {});
+    const { verified, modDataUrl } = await assembleAdobeExport(item, fake, { minimal: true });
     releaseProcessedResources(item);
     item.modBlob = verified.blob;
     item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL)
@@ -504,10 +504,12 @@ async function processClearItem(item, options = {}) {
   if (!deferRender) renderCurrentItem();
 
   try {
-    // Same pixel pipeline, written as the export with its metadata removed:
-    // no Exif, no XMP, no ICC profile, Adobe's APP14 left in place, which is
-    // exactly what `exiftool -all=` leaves behind on a Camera Raw export.
-    const canvasResult = await stripViaCanvas(item.file, {});
+    // The export with its metadata removed: no Exif, no XMP, no ICC profile,
+    // Adobe's APP14 left in place, which is what `exiftool -all=` leaves on a
+    // Camera Raw export. A real photo keeps the full anti-forensic pixel
+    // pipeline (the sensor-pattern defence still applies); a non-photo uses the
+    // light path, since a screenshot has no sensor fingerprint to hide.
+    const canvasResult = await stripViaCanvas(item.file, { minimal: !item.inputClass?.isPhoto });
     const newBlob = dataUrlToBlob(canvasResult.dataUrl);
 
     releaseProcessedResources(item);

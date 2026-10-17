@@ -89,14 +89,37 @@ class BitReader {
   bits(n) { let v = 0; for (let i = 0; i < n; i++) v = (v << 1) | this.bit(); return v; }
 }
 
+/**
+ * A growable byte buffer backed by a Uint8Array. Building the output as a plain
+ * array with per-byte push, then Uint8Array.from, cost enough memory to crash
+ * the renderer on a large, high-detail image (a few million bytes of entropy
+ * data in a boxed JS array plus the copy). This holds the bytes in a typed
+ * array that doubles when full.
+ */
+class ByteSink {
+  constructor(cap = 1 << 16) { this.buf = new Uint8Array(cap); this.len = 0; }
+  _ensure(n) {
+    if (this.len + n <= this.buf.length) return;
+    let c = this.buf.length * 2;
+    while (c < this.len + n) c *= 2;
+    const b = new Uint8Array(c);
+    b.set(this.buf.subarray(0, this.len));
+    this.buf = b;
+  }
+  byte(v) { if (this.len >= this.buf.length) this._ensure(1); this.buf[this.len++] = v & 0xFF; }
+  push(...bytes) { this._ensure(bytes.length); for (let i = 0; i < bytes.length; i++) this.buf[this.len++] = bytes[i] & 0xFF; }
+  append(arr) { this._ensure(arr.length); this.buf.set(arr, this.len); this.len += arr.length; }
+  bytes() { return this.buf.subarray(0, this.len); }
+}
+
 class BitWriter {
-  constructor() { this.out = []; this.acc = 0; this.n = 0; }
+  constructor() { this.sink = new ByteSink(1 << 18); this.acc = 0; this.n = 0; }
   write(code, len) {
     for (let i = len - 1; i >= 0; i--) {
       this.acc = ((this.acc << 1) | ((code >> i) & 1)) & 0xFF;
       if (++this.n === 8) {
-        this.out.push(this.acc);
-        if (this.acc === 0xFF) this.out.push(0x00);   // byte stuffing
+        this.sink.byte(this.acc);
+        if (this.acc === 0xFF) this.sink.byte(0x00);   // byte stuffing
         this.acc = 0; this.n = 0;
       }
     }
@@ -354,7 +377,7 @@ export function requantize(data, target, opts = {}) {
       for (let mx = 0; mx < mcusX; mx++) {
         if (restartInterval && mcuCount > 0 && mcuCount % restartInterval === 0) {
           bw.flush();
-          bw.out.push(0xFF, 0xD0 + (rstIndex & 7));
+          bw.sink.push(0xFF, 0xD0 + (rstIndex & 7));
           rstIndex++;
           frame.comps.forEach(c => (wPreds[c.id].v = 0));
         }
@@ -388,10 +411,10 @@ export function requantize(data, target, opts = {}) {
   bw.flush();
 
   // ── assemble ──
-  const out = [];
+  const out = new ByteSink(bw.sink.len + (1 << 16));
   const push = (...b) => out.push(...b);
   push(0xFF, 0xD8);
-  for (const seg of preSegments) out.push(...seg);
+  for (const seg of preSegments) out.append(seg);
 
   // DQT: both tables in one segment, which is how the exporter packs them.
   const tqs = [...new Set(frame.comps.map(c => c.tq))].sort();
@@ -410,7 +433,7 @@ export function requantize(data, target, opts = {}) {
   }
   // An APP14 handed in goes here, between DRI and SOF0, which is where the
   // exporter puts it in its embedded thumbnails.
-  if (opts.app14) out.push(...opts.app14);
+  if (opts.app14) out.append(opts.app14);
   // SOF0. Component identifiers are renumbered 0, 1, 2: the browser's
   // encoder writes 1, 2, 3, every Adobe export measured writes 0, 1, 2.
   const nc = frame.comps.length;
@@ -436,8 +459,8 @@ export function requantize(data, target, opts = {}) {
     push(i, (sel << 4) | sel);
   });
   push(0x00, 0x3F, 0x00);
-  for (const b of bw.out) out.push(b);
+  out.append(bw.sink.bytes());
   push(0xFF, 0xD9);
 
-  return Uint8Array.from(out);
+  return out.bytes().slice();
 }
