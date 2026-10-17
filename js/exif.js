@@ -683,6 +683,49 @@ function phoneStem(cam, d, subsec) {
   return `IMG_${ymd}_${hms}`;
 }
 
+/**
+ * Metadata for a non-photo (a screenshot, a graphic) that was opened in an
+ * editor and exported. It carries no camera, no lens, no exposure and no GPS,
+ * because none of those exist for an image that never passed through a lens;
+ * it carries only the editor's own fields — Software, resolution, dates and
+ * the XMP/crs provenance. The container is still the Adobe export the pixel
+ * pipeline writes, so the Software must stay Adobe (a GIMP Software tag on an
+ * Adobe APP14 container would be its own contradiction). Returning the same
+ * shape as generateFake lets the caller reuse the container assembly.
+ */
+export function generateGraphic() {
+  const px = window.piexif;
+  registerTags(px);
+  const editor = pickEditor(rnd() < 0.5 ? 'acr' : 'lr');
+  const anchor = Date.now() - randInt(1, 120) * DAY - Math.floor(rnd() * DAY);
+  const exportAt = new Date(anchor);
+  exportAt.setHours(randInt(8, 23), randInt(0, 59), randInt(0, 59), 0);
+  const capture = new Date(exportAt.getTime() - randInt(1, 600) * 60000);   // edited minutes to hours earlier
+
+  const I = px.ImageIFD, E = px.ExifIFD;
+  const p = { "0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {} };
+  p["0th"][I.XResolution]    = [editor.dpi, 1];
+  p["0th"][I.YResolution]    = [editor.dpi, 1];
+  p["0th"][I.ResolutionUnit] = 2;
+  p["0th"][I.Software]       = editor.software;
+  p["0th"][I.DateTime]       = fmtDate(exportAt);
+  p["Exif"][E.ExifVersion]       = "0232";
+  p["Exif"][E.DateTimeOriginal]  = fmtDate(capture);
+  p["Exif"][E.DateTimeDigitized] = fmtDate(capture);
+  p["Exif"][E.ColorSpace]        = 1;
+  alignAsciiValues(p, px);
+
+  return {
+    display: { Software: editor.software, DateTimeOriginal: capture, DateTime: exportAt, ColorSpace: 1,
+               XResolution: editor.dpi, YResolution: editor.dpi },
+    piexif: p, cam: null, loc: null, lens: null, editor,
+    capture, exportAt, offset: null, exportOffset: null, subsec: null,
+    scene: 'daylight', ev: 0,
+    lensMeta: {}, aux: {},
+    source: { raw: false, fileName: `image_${digits(4)}.jpg` },
+  };
+}
+
 // ── Metadata Display ─────────────────────────────────────────────
 
 export const SECTIONS = [

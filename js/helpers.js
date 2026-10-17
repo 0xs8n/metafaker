@@ -883,8 +883,12 @@ function antiForensicRender(img, cam = {}) {
   const cameraMake = cam.make || '';
   const iso        = cam.iso  || 100;
 
+  // Works for an HTMLImageElement (naturalWidth) and an ImageBitmap (width).
+  const imgW = img.naturalWidth || img.width;
+  const imgH = img.naturalHeight || img.height;
+
   // 1. Proportional crop
-  const minDim  = Math.min(img.naturalWidth, img.naturalHeight);
+  const minDim  = Math.min(imgW, imgH);
   const maxCrop = Math.max(6, Math.floor(minDim * 0.012));
   const cropT   = randInt(1, maxCrop);
   const cropB   = randInt(1, maxCrop);
@@ -892,13 +896,13 @@ function antiForensicRender(img, cam = {}) {
   const cropR   = randInt(1, maxCrop);
   const srcX    = cropL;
   const srcY    = cropT;
-  const srcW    = img.naturalWidth  - cropL - cropR;
-  const srcH    = img.naturalHeight - cropT - cropB;
+  const srcW    = imgW - cropL - cropR;
+  const srcH    = imgH - cropT - cropB;
 
   if (srcW < 100 || srcH < 100) {
     const c   = document.createElement('canvas');
-    c.width   = img.naturalWidth;
-    c.height  = img.naturalHeight;
+    c.width   = imgW;
+    c.height  = imgH;
     const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(img, 0, 0);
     applyCameraColorProfile(ctx, c.width, c.height, cameraMake);
@@ -982,13 +986,40 @@ function antiForensicRender(img, cam = {}) {
  * generated camera (type, make, ISO, XMP segment); `{ strip: true }` renders
  * the metadata-free variant.
  */
-export function stripViaCanvas(dataUrl, cam) {
-  return new Promise((res, rej) => {
-    const img   = new Image();
-    img.onload  = () => res(antiForensicRender(img, cam));
-    img.onerror = rej;
-    img.src     = dataUrl;
-  });
+/**
+ * Decode an image from a Blob/File (or a URL string) into something
+ * drawImage accepts, trying every path the browser supports.
+ *
+ * createImageBitmap decodes more formats than an <img> and whatever the
+ * browser's codecs cover — JPEG, PNG, WebP, AVIF, and HEIC on browsers that
+ * support it (Safari, and Chrome where the platform provides it). An <img>
+ * fallback covers the rest. When nothing can decode it, the error names the
+ * format so the message is actionable: HEIC on a browser without HEIC support
+ * is the common case, and the fix (convert to JPEG, or use Safari) is clear.
+ */
+async function decodeImage(src) {
+  const isBlob = typeof Blob !== 'undefined' && src instanceof Blob;
+  if (isBlob && typeof createImageBitmap === 'function') {
+    try { return await createImageBitmap(src); } catch (e) { /* fall through to <img> */ }
+  }
+  try {
+    return await new Promise((res, rej) => {
+      const img = new Image();
+      img.onload  = () => res(img);
+      img.onerror = () => rej(new Error('img decode failed'));
+      img.src = isBlob ? URL.createObjectURL(src) : src;
+    });
+  } catch (e) {
+    const type = (isBlob && src.type) ? src.type : '';
+    if (/heic|heif/i.test(type) || /heic|heif/i.test(String(src.name || ''))) {
+      throw new Error('This browser cannot decode HEIC/HEIF. Convert the image to JPEG first, or open MetaFaker in Safari, which decodes HEIC natively.');
+    }
+    throw new Error('Could not decode this image' + (type ? ' (' + type + ')' : '') + '. It may be an unsupported format or a corrupt file.');
+  }
+}
+
+export function stripViaCanvas(src, cam) {
+  return decodeImage(src).then(img => antiForensicRender(img, cam));
 }
 
 // ── Display / String Utilities ───────────────────────────────────

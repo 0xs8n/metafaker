@@ -189,8 +189,11 @@ function byteChecks(name, buf, mode) {
   const soiCount = countBytes(buf, Buffer.from([0xFF, 0xD8]), walk.sosOffset);
   if (mode === 'randomized') {
     assert(name, 'jpeg: main SOI plus two embedded thumbnails', soiCount === 3, `found ${soiCount} x FFD8 before SOS`);
-  } else {
+  } else if (mode === 'stripped') {
     assert(name, 'jpeg: exactly one SOI before SOS', soiCount === 1, `found ${soiCount} x FFD8 before SOS`);
+  } else {
+    // nonphoto: blank strip (1 SOI) or exported graphic (3, with thumbnails)
+    assert(name, 'jpeg: SOI count is 1 or 3', soiCount === 1 || soiCount === 3, `found ${soiCount} x FFD8 before SOS`);
   }
   assert(name, 'jpeg: no APP0', app0.length === 0, `${app0.length} APP0 segment(s): ${app0.map(describeApp).join(',')}`);
   assert(name, 'jpeg: DQT is one segment with 2 tables', dqt.length === 1 && countDqtTables(dqt[0]) === 2,
@@ -223,15 +226,17 @@ function byteChecks(name, buf, mode) {
     }
     assert(name, 'jpeg: APP2 ICC_PROFILE present', icc.length >= 1 && app2.length === icc.length,
       `APP2 count=${app2.length} (ICC=${icc.length})`);
-  } else {
+  } else if (mode === 'stripped') {
     assert(name, 'jpeg: no APP1', app1.length === 0, `${app1.length} APP1: ${app1.map(describeApp).join(',')}`);
     assert(name, 'jpeg: no APP2', app2.length === 0, `${app2.length} APP2: ${app2.map(describeApp).join(',')}`);
   }
+  // mode 'nonphoto' varies (blank strip or Adobe-exported graphic), so only
+  // the common structure and forbidden-strings checks apply to it.
 
-  // No unexpected application segments either way. A randomized file carries
-  // the Adobe export's set: APP1 (Exif, XMP), APP13 (Photoshop), APP2 (ICC),
-  // APP14 (Adobe). A stripped file carries only APP14.
-  const allowed = mode === 'randomized' ? new Set([0xE1, 0xE2, 0xED, 0xEE]) : new Set([0xEE]);
+  // No unexpected application segments. A randomized or graphic file carries
+  // the Adobe set: APP1 (Exif, XMP), APP13 (Photoshop), APP2 (ICC), APP14; a
+  // stripped file carries only APP14.
+  const allowed = mode === 'stripped' ? new Set([0xEE]) : new Set([0xE1, 0xE2, 0xED, 0xEE]);
   const stray = segs.filter(s => ((s.marker >= 0xE0 && s.marker <= 0xEF) || s.marker === 0xFE) && !allowed.has(s.marker));
   assert(name, 'jpeg: no other APPn/COM segments', stray.length === 0, stray.map(describeApp).join(','));
 
@@ -336,6 +341,18 @@ function exiftoolChecks(name, t, mode, info) {
   const warnings = Array.isArray(t.__warnings) && t.__warnings.length ? t.__warnings : keysNamed(t, 'Warning').map(k => t[k]);
   const errors = keysNamed(t, 'Error').map(k => t[k]);
   assert(name, 'exiftool: no Error', errors.length === 0, errors.join(' | '));
+
+  if (mode === 'nonphoto') {
+    // A non-photo (screenshot/graphic) must never carry a camera, a lens or a
+    // location, whichever variant it came out as. Editor provenance is allowed.
+    assert(name, 'exiftool: non-photo has no camera Make', keysNamed(t, 'Make').length === 0, `Make=${tag(t, 'Make')}`);
+    assert(name, 'exiftool: non-photo has no camera Model', keysNamed(t, 'Model').length === 0, `Model=${tag(t, 'Model')}`);
+    assert(name, 'exiftool: non-photo has no GPS', groupKeys(t, 'GPS').length === 0, groupKeys(t, 'GPS').join(','));
+    assert(name, 'exiftool: non-photo has no LensModel', keysNamed(t, 'LensModel').length === 0, 'LensModel present');
+    const sw = tag(t, 'Software', 'IFD0');
+    assert(name, 'exiftool: non-photo Software (if any) is Adobe', !sw || /^Adobe /.test(sw), `Software=${sw}`);
+    return;
+  }
 
   if (mode !== 'randomized') {
     // A stripped file should carry no metadata at all.
@@ -492,7 +509,7 @@ async function processInBrowser(page, origin, names) {
       error: it.error,
       hasBlob: !!it.modBlob,
       size: it.modBlob ? it.modBlob.size : 0,
-      mode: it.fakeExif ? 'randomized' : 'stripped',
+      mode: it.id === shotId ? 'nonphoto' : (it.fakeExif ? 'randomized' : 'stripped'),
       isPhoto: it.inputClass ? it.inputClass.isPhoto : null,
       isScreenshotCase: it.id === shotId,
       batch: batchIds.has(it.id),
@@ -522,7 +539,7 @@ async function processInBrowser(page, origin, names) {
   const shot = summary.find(it => it.isScreenshotCase);
   if (shot) {
     assert('(screenshot)', 'classify: PNG screenshot flagged non-photo', shot.isPhoto === false, `isPhoto=${shot.isPhoto}`);
-    assert('(screenshot)', 'classify: Randomize stripped it (no fake camera)', shot.mode === 'stripped' && !shot.camera, `mode=${shot.mode} camera=${shot.camera}`);
+    assert('(screenshot)', 'classify: no fake camera or location on non-photo', !shot.camera && !shot.city, `camera=${shot.camera} city=${shot.city}`);
   } else {
     assert('(screenshot)', 'classify: screenshot case present', false, 'screenshot item missing');
   }

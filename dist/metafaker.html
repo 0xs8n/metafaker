@@ -5269,8 +5269,12 @@ function antiForensicRender(img, cam = {}) {
   const cameraMake = cam.make || '';
   const iso        = cam.iso  || 100;
 
+  // Works for an HTMLImageElement (naturalWidth) and an ImageBitmap (width).
+  const imgW = img.naturalWidth || img.width;
+  const imgH = img.naturalHeight || img.height;
+
   // 1. Proportional crop
-  const minDim  = Math.min(img.naturalWidth, img.naturalHeight);
+  const minDim  = Math.min(imgW, imgH);
   const maxCrop = Math.max(6, Math.floor(minDim * 0.012));
   const cropT   = randInt(1, maxCrop);
   const cropB   = randInt(1, maxCrop);
@@ -5278,13 +5282,13 @@ function antiForensicRender(img, cam = {}) {
   const cropR   = randInt(1, maxCrop);
   const srcX    = cropL;
   const srcY    = cropT;
-  const srcW    = img.naturalWidth  - cropL - cropR;
-  const srcH    = img.naturalHeight - cropT - cropB;
+  const srcW    = imgW - cropL - cropR;
+  const srcH    = imgH - cropT - cropB;
 
   if (srcW < 100 || srcH < 100) {
     const c   = document.createElement('canvas');
-    c.width   = img.naturalWidth;
-    c.height  = img.naturalHeight;
+    c.width   = imgW;
+    c.height  = imgH;
     const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(img, 0, 0);
     applyCameraColorProfile(ctx, c.width, c.height, cameraMake);
@@ -5368,13 +5372,40 @@ function antiForensicRender(img, cam = {}) {
  * generated camera (type, make, ISO, XMP segment); `{ strip: true }` renders
  * the metadata-free variant.
  */
-function stripViaCanvas(dataUrl, cam) {
-  return new Promise((res, rej) => {
-    const img   = new Image();
-    img.onload  = () => res(antiForensicRender(img, cam));
-    img.onerror = rej;
-    img.src     = dataUrl;
-  });
+/**
+ * Decode an image from a Blob/File (or a URL string) into something
+ * drawImage accepts, trying every path the browser supports.
+ *
+ * createImageBitmap decodes more formats than an <img> and whatever the
+ * browser's codecs cover — JPEG, PNG, WebP, AVIF, and HEIC on browsers that
+ * support it (Safari, and Chrome where the platform provides it). An <img>
+ * fallback covers the rest. When nothing can decode it, the error names the
+ * format so the message is actionable: HEIC on a browser without HEIC support
+ * is the common case, and the fix (convert to JPEG, or use Safari) is clear.
+ */
+async function decodeImage(src) {
+  const isBlob = typeof Blob !== 'undefined' && src instanceof Blob;
+  if (isBlob && typeof createImageBitmap === 'function') {
+    try { return await createImageBitmap(src); } catch (e) { /* fall through to <img> */ }
+  }
+  try {
+    return await new Promise((res, rej) => {
+      const img = new Image();
+      img.onload  = () => res(img);
+      img.onerror = () => rej(new Error('img decode failed'));
+      img.src = isBlob ? URL.createObjectURL(src) : src;
+    });
+  } catch (e) {
+    const type = (isBlob && src.type) ? src.type : '';
+    if (/heic|heif/i.test(type) || /heic|heif/i.test(String(src.name || ''))) {
+      throw new Error('This browser cannot decode HEIC/HEIF. Convert the image to JPEG first, or open MetaFaker in Safari, which decodes HEIC natively.');
+    }
+    throw new Error('Could not decode this image' + (type ? ' (' + type + ')' : '') + '. It may be an unsupported format or a corrupt file.');
+  }
+}
+
+function stripViaCanvas(src, cam) {
+  return decodeImage(src).then(img => antiForensicRender(img, cam));
 }
 
 // ── Display / String Utilities ───────────────────────────────────
@@ -6872,6 +6903,49 @@ function phoneStem(cam, d, subsec) {
   return `IMG_${ymd}_${hms}`;
 }
 
+/**
+ * Metadata for a non-photo (a screenshot, a graphic) that was opened in an
+ * editor and exported. It carries no camera, no lens, no exposure and no GPS,
+ * because none of those exist for an image that never passed through a lens;
+ * it carries only the editor's own fields — Software, resolution, dates and
+ * the XMP/crs provenance. The container is still the Adobe export the pixel
+ * pipeline writes, so the Software must stay Adobe (a GIMP Software tag on an
+ * Adobe APP14 container would be its own contradiction). Returning the same
+ * shape as generateFake lets the caller reuse the container assembly.
+ */
+function generateGraphic() {
+  const px = window.piexif;
+  registerTags(px);
+  const editor = pickEditor(rnd() < 0.5 ? 'acr' : 'lr');
+  const anchor = Date.now() - randInt(1, 120) * DAY - Math.floor(rnd() * DAY);
+  const exportAt = new Date(anchor);
+  exportAt.setHours(randInt(8, 23), randInt(0, 59), randInt(0, 59), 0);
+  const capture = new Date(exportAt.getTime() - randInt(1, 600) * 60000);   // edited minutes to hours earlier
+
+  const I = px.ImageIFD, E = px.ExifIFD;
+  const p = { "0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {} };
+  p["0th"][I.XResolution]    = [editor.dpi, 1];
+  p["0th"][I.YResolution]    = [editor.dpi, 1];
+  p["0th"][I.ResolutionUnit] = 2;
+  p["0th"][I.Software]       = editor.software;
+  p["0th"][I.DateTime]       = fmtDate(exportAt);
+  p["Exif"][E.ExifVersion]       = "0232";
+  p["Exif"][E.DateTimeOriginal]  = fmtDate(capture);
+  p["Exif"][E.DateTimeDigitized] = fmtDate(capture);
+  p["Exif"][E.ColorSpace]        = 1;
+  alignAsciiValues(p, px);
+
+  return {
+    display: { Software: editor.software, DateTimeOriginal: capture, DateTime: exportAt, ColorSpace: 1,
+               XResolution: editor.dpi, YResolution: editor.dpi },
+    piexif: p, cam: null, loc: null, lens: null, editor,
+    capture, exportAt, offset: null, exportOffset: null, subsec: null,
+    scene: 'daylight', ev: 0,
+    lensMeta: {}, aux: {},
+    source: { raw: false, fileName: `image_${digits(4)}.jpg` },
+  };
+}
+
 // ── Metadata Display ─────────────────────────────────────────────
 
 const SECTIONS = [
@@ -7002,7 +7076,7 @@ function renderMeta(exifObj, isFake = false) {
   return { html, count };
 }
 
-;return { parseFileExif, piexifToDisplay, readBackExifStrict, makePersona, generateFake, SECTIONS, LABELS, fmtVal, renderMeta };
+;return { parseFileExif, piexifToDisplay, readBackExifStrict, makePersona, generateFake, generateGraphic, SECTIONS, LABELS, fmtVal, renderMeta };
 })();
 
 // ── js/classify.js ────────────────────────────────────────────────────
@@ -7090,10 +7164,10 @@ __modules["ui"] = (function () {
  * for randomizing, stripping, and downloading processed JPEGs.
  */
 
-const { fmtBytes, escapeHtml, makeId, cryptoRandInt, dataUrlToBlob, stripViaCanvas, makeAdobeThumbnail, insertAfterSoi, iccApp2Segment } = __modules["helpers"];
+const { fmtBytes, escapeHtml, makeId, cryptoRandInt, rnd, dataUrlToBlob, stripViaCanvas, makeAdobeThumbnail, insertAfterSoi, iccApp2Segment } = __modules["helpers"];
 const { dumpExifSafe } = __modules["exif-writer"];
 const { buildXmpPacket, xmpSegment, buildPhotoshopApp13 } = __modules["provenance"];
-const { generateFake, makePersona, readBackExifStrict, parseFileExif, renderMeta } = __modules["exif"];
+const { generateFake, generateGraphic, makePersona, readBackExifStrict, parseFileExif, renderMeta } = __modules["exif"];
 const { classifyInput } = __modules["classify"];
 const { ICONS } = __modules["icons"];
 
@@ -7422,6 +7496,79 @@ function downloadBlob(blob, name) {
   }, 1000);
 }
 
+/**
+ * Render the pixel container and wrap the four Adobe metadata segments around
+ * it (Exif, Photoshop APP13, ICC, XMP), the same way for a faked photo and for
+ * an exported graphic. `fake` is a generateFake or generateGraphic result;
+ * `pixelCam` drives the pixel pipeline (camera colour for a photo, {} for a
+ * graphic). Returns { verified, modDataUrl, width, height }.
+ */
+async function assembleAdobeExport(item, fake, pixelCam) {
+  const canvasResult = await stripViaCanvas(item.file, pixelCam);
+  const cleanJpeg = canvasResult.dataUrl;
+  const px = window.piexif;
+
+  const thumb = await makeAdobeThumbnail(cleanJpeg);
+  if (thumb) {
+    fake.piexif.thumbnail = thumb.binary;
+    fake.piexif['1st'][px.ImageIFD.Compression]    = 6;
+    fake.piexif['1st'][px.ImageIFD.XResolution]    = [72, 1];
+    fake.piexif['1st'][px.ImageIFD.YResolution]    = [72, 1];
+    fake.piexif['1st'][px.ImageIFD.ResolutionUnit] = 2;
+  }
+
+  const tiff = dumpExifSafe(fake.piexif, px, { littleEndian: true });
+  const exifApp1 = exifApp1Segment(tiff);
+  const app13 = buildPhotoshopApp13({
+    dpi: fake.editor.dpi, capture: fake.capture, offset: fake.offset || '+00:00',
+    thumb: thumb ? thumb.bytes : null,
+    thumbWidth: thumb ? thumb.width : 0, thumbHeight: thumb ? thumb.height : 0,
+  });
+  const xmp = xmpSegment(buildXmpPacket({
+    capture: fake.capture, exportAt: fake.exportAt,
+    offsetCapture: fake.offset, offsetExport: fake.exportOffset, subsec: fake.subsec,
+    lens: fake.lensMeta, editor: fake.editor, source: fake.source, scene: fake.scene, aux: fake.aux,
+  }));
+  const modDataUrl = insertAfterSoi(cleanJpeg, [exifApp1, app13, iccApp2Segment(), xmp]);
+  const verified = await readBackExifStrict(modDataUrl);
+  return { verified, modDataUrl, width: canvasResult.width, height: canvasResult.height };
+}
+
+/**
+ * A non-photo (screenshot, graphic) written as an Adobe-exported graphic:
+ * editor provenance only, no camera, no lens, no exposure, no GPS. One of two
+ * non-photo outputs; the other is the plain clean strip. Varying them keeps
+ * stripped non-photos from all sharing one blank signature.
+ */
+async function processGraphicItem(item, options = {}) {
+  const { deferRender = false } = options;
+  item.processing = true;
+  item.error = null;
+  if (!deferRender) renderCurrentItem();
+  try {
+    const fake = generateGraphic();
+    const { verified, modDataUrl } = await assembleAdobeExport(item, fake, {});
+    releaseProcessedResources(item);
+    item.modBlob = verified.blob;
+    item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL)
+      ? URL.createObjectURL(verified.blob) : modDataUrl;
+    item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
+    item.fakeExif = { ...verified.exif };      // editor provenance, no camera, no GPS
+    item.fakePiexif = fake.piexif;
+    item.fakeCamera = null;
+    item.fakeDate = fake.capture;
+    item.fakeLocation = null;
+  } catch (e) {
+    item.error = e.message;
+    releaseProcessedResources(item);
+    item.fakeExif = null; item.fakePiexif = null; item.fakeCamera = null; item.fakeLocation = null;
+    throw e;
+  } finally {
+    item.processing = false;
+    if (!deferRender) renderCurrentItem();
+  }
+}
+
 async function processRandomizeItem(item, options = {}) {
   const { deferRender = false, persona = null } = options;
 
@@ -7431,9 +7578,13 @@ async function processRandomizeItem(item, options = {}) {
   // fabricated camera — which is what a real shared screenshot looks like — so
   // the randomize path falls back to stripping it.
   if (!item.inputClass?.isPhoto) {
-    await processClearItem(item, { deferRender });
+    // Two non-photo outputs, chosen at random so they do not all share one
+    // signature: a plain clean strip, or an Adobe-exported graphic carrying
+    // editor provenance only. Neither invents a camera, a lens or GPS.
+    if (rnd() < 0.45) await processClearItem(item, { deferRender });
+    else              await processGraphicItem(item, { deferRender });
     const why = item.inputClass?.reason ? ` (${item.inputClass.reason})` : '';
-    showToast(`${item.file.name} looks like a screenshot, not a camera photo${why}. Metadata was stripped rather than faked as a camera.`, 'warning');
+    showToast(`${item.file.name} looks like a screenshot, not a camera photo${why}. It was cleaned of camera, lens and location rather than faked as a photo.`, 'warning');
     return;
   }
 
@@ -7454,44 +7605,10 @@ async function processRandomizeItem(item, options = {}) {
     }
 
     const fake = generateFake({ originalDate, persona, sourceName: item.file.name });
-    // Render the exporter's pixel container (DQT, DRI, APP14, SOF0, DHT, SOS).
-    const canvasResult = await stripViaCanvas(item.previewUrl, { ...fake.cam, iso: fake.display.ISO });
-    const cleanJpeg = canvasResult.dataUrl;
-
-    const px = window.piexif;
-    fake.display.PixelXDimension = canvasResult.width;
-    fake.display.PixelYDimension = canvasResult.height;
-
-    // An Adobe-encoded thumbnail, the same bytes in IFD1 and the Photoshop
-    // block, rendered from the image actually shipping. Adobe exports carry
-    // one; it is encoded the way the exporter encodes it, not by the browser.
-    const thumb = await makeAdobeThumbnail(cleanJpeg);
-    if (thumb) {
-      fake.piexif.thumbnail = thumb.binary;
-      fake.piexif['1st'][px.ImageIFD.Compression]    = 6;
-      fake.piexif['1st'][px.ImageIFD.XResolution]    = [72, 1];
-      fake.piexif['1st'][px.ImageIFD.YResolution]    = [72, 1];
-      fake.piexif['1st'][px.ImageIFD.ResolutionUnit] = 2;
-    }
-
-    // The four metadata segments, inserted after SOI in the order the measured
-    // exports show: Exif (little-endian, as every Adobe export is), the
-    // Photoshop APP13, the APP2 ICC profile, and the APP1 XMP packet.
-    const tiff = dumpExifSafe(fake.piexif, px, { littleEndian: true });
-    const exifApp1 = exifApp1Segment(tiff);
-    const app13 = buildPhotoshopApp13({
-      dpi: fake.editor.dpi, capture: fake.capture, offset: fake.offset,
-      thumb: thumb ? thumb.bytes : null,
-      thumbWidth: thumb ? thumb.width : 0, thumbHeight: thumb ? thumb.height : 0,
-    });
-    const xmp = xmpSegment(buildXmpPacket({
-      capture: fake.capture, exportAt: fake.exportAt,
-      offsetCapture: fake.offset, offsetExport: fake.exportOffset, subsec: fake.subsec,
-      lens: fake.lensMeta, editor: fake.editor, source: fake.source, scene: fake.scene, aux: fake.aux,
-    }));
-    const modDataUrl = insertAfterSoi(cleanJpeg, [exifApp1, app13, iccApp2Segment(), xmp]);
-
-    const verified = await readBackExifStrict(modDataUrl);
+    // Render the pixel container and wrap the Adobe metadata segments around it.
+    const { verified, modDataUrl, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
+    fake.display.PixelXDimension = width;
+    fake.display.PixelYDimension = height;
 
     releaseProcessedResources(item);
     item.modBlob = verified.blob;
@@ -7543,7 +7660,7 @@ async function processClearItem(item, options = {}) {
     // Same pixel pipeline, written as the export with its metadata removed:
     // no Exif, no XMP, no ICC profile, Adobe's APP14 left in place, which is
     // exactly what `exiftool -all=` leaves behind on a Camera Raw export.
-    const canvasResult = await stripViaCanvas(item.previewUrl, {});
+    const canvasResult = await stripViaCanvas(item.file, {});
     const newBlob = dataUrlToBlob(canvasResult.dataUrl);
 
     releaseProcessedResources(item);

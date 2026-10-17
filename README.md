@@ -4,7 +4,17 @@ MetaFaker is a static browser application for loading one or many images, re-enc
 
 ## Current behavior
 
-- Accepts multiple images from drag and drop or the file picker.
+- Accepts multiple images from drag and drop or the file picker, decoded with
+  `createImageBitmap`, which covers JPEG, PNG, WebP, AVIF and HEIC wherever the
+  browser's codecs do (Safari decodes HEIC; Chrome without HEIC support gets a
+  clear message to convert to JPEG). An undecodable file fails with a readable
+  reason rather than silently.
+- Tells a camera photo from a non-photo before faking anything. A screenshot
+  or exported graphic never passed through a lens, so inventing a camera, lens
+  and GPS for it would be a louder tell than the metadata it arrived with. Such
+  inputs are cleaned of any identifying metadata instead — either a plain strip
+  or an Adobe-exported graphic carrying editor provenance only, chosen at random
+  so they do not share one signature, and never a camera or a location.
 - Builds a local batch queue with previews and per-image state.
 - Parses original EXIF locally in the browser.
 - Re-encodes each processed image as a new JPEG through an anti-forensic pixel pipeline.
