@@ -1,0 +1,15 @@
+# Normalise text to LF in the repository, so line endings never differ between
+# platforms or between the working tree and what a host (GitHub Pages) serves.
+* text=auto eol=lf
+
+# Keep the vendored, hash-pinned libraries byte-for-byte. piexif.js carries a
+# Subresource Integrity hash in index.html; CRLF conversion changed its bytes
+# and broke that hash on GitHub Pages, so the browser refused to run it and
+# every Randomize/Strip failed. Treating vendor/ as binary prevents any
+# conversion, so the served bytes match the hash.
+vendor/** -text
+
+# Images are binary.
+*.jpg binary
+*.jpeg binary
+*.png binary
