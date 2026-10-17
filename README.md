@@ -27,13 +27,13 @@ A privacy tool that phones home is not one. The page therefore:
 
 The app is static. Serve the directory with any static host (`python -m http.server`, GitHub Pages, nginx) and open `index.html`.
 
-Opening `index.html` straight from disk does **not** work in Chrome: the app is written as ES modules, and Chrome blocks module imports from `file://`. For offline use, build the single-file version:
+**To run it offline, open `dist/metafaker.html`** — one self-contained file with every script, style and library inlined, which works by double-clicking in any browser and can be copied to an air-gapped machine. Rebuild it after changing the source with:
 
 ```
 node tools/build.js
 ```
 
-That writes `dist/metafaker.html`, one self-contained file with every script, style and library inlined, which opens from `file://` in any browser and can be copied to an air-gapped machine.
+Opening the modular `index.html` straight from disk does **not** work: browsers block ES module imports from `file://`, so the controller never loads and the buttons do nothing. If you open it that way, a message now says so and points you to the single-file build or to serving the folder, rather than leaving a dead page.
 
 ## Architecture
 
