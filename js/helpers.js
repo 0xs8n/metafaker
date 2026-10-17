@@ -496,7 +496,7 @@ export function applyWarp(ctx, w, h) {
  * texture survives; the sharpen stage restores edges.
  */
 export function applyDenoise(ctx, w, h) {
-  const strength = 0.25 + rnd() * 0.25;
+  const strength = 0.35 + rnd() * 0.3;
   const id   = ctx.getImageData(0, 0, w, h);
   const d    = id.data;
   const blur = boxBlurRGB(d, w, h, 1);
@@ -909,10 +909,17 @@ function antiForensicRender(img, cam = {}) {
   }
 
   // 3. Reshape to a frame the camera can produce, then size the output.
-  // A native capture resolution is used when reachable; otherwise the usual
-  // random long edge, which keeps dimensions from clustering.
+  // A native capture resolution is used when reachable; otherwise a downscale
+  // is always applied, even to an already-small input. Resampling onto a new,
+  // smaller grid is the one transform that reliably breaks sensor-pattern
+  // (PRNU) correlation — it moves every photosite's noise off the lattice an
+  // investigator's fingerprint lives on. The crop, rotation and warp weaken
+  // that correlation; the downscale is what defeats it. 8–20% is invisible and
+  // well within the range an export resizes by.
   const frame = snapToCameraFrame(srcX, srcY, srcW, srcH, cam);
-  const size  = frame.out || getExportDimensions(frame.w, frame.h, randomMaxEdge());
+  const longest = Math.max(frame.w, frame.h);
+  const cap  = Math.min(randomMaxEdge(), Math.round(longest * (0.80 + rnd() * 0.12)));
+  const size = frame.out || getExportDimensions(frame.w, frame.h, cap);
 
   const c   = document.createElement('canvas');
   c.width   = size.width;
