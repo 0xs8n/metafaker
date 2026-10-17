@@ -471,6 +471,21 @@ async function processInBrowser(page, origin, names) {
     await App.loadFiles([dup]);
     App.select(S.items[S.items.length - 1].id);
     await App.clear();
+
+    // A synthetic PNG screenshot at a laptop screen size: Randomize must NOT
+    // invent a camera for it; it must be classified non-photo and stripped.
+    const c = document.createElement('canvas');
+    c.width = 2560; c.height = 1600;
+    const cx = c.getContext('2d');
+    cx.fillStyle = '#1e293b'; cx.fillRect(0, 0, 2560, 1600);
+    cx.fillStyle = '#e2e8f0'; cx.fillRect(40, 40, 900, 60);
+    const pngBlob = await new Promise(res => c.toBlob(res, 'image/png'));
+    const shot = new File([pngBlob], 'screenshot.png', { type: 'image/png' });
+    await App.loadFiles([shot]);
+    const shotId = S.items[S.items.length - 1].id;
+    App.select(shotId);
+    await App.randomize();                     // should fall back to strip
+
     return S.items.map((it, i) => ({
       index: i,
       name: it.file.name,
@@ -478,6 +493,8 @@ async function processInBrowser(page, origin, names) {
       hasBlob: !!it.modBlob,
       size: it.modBlob ? it.modBlob.size : 0,
       mode: it.fakeExif ? 'randomized' : 'stripped',
+      isPhoto: it.inputClass ? it.inputClass.isPhoto : null,
+      isScreenshotCase: it.id === shotId,
       batch: batchIds.has(it.id),
       camera: it.fakeCamera ? `${it.fakeCamera.make} ${it.fakeCamera.model}` : '',
       city: it.fakeLocation ? it.fakeLocation.city : '',
@@ -499,6 +516,15 @@ async function processInBrowser(page, origin, names) {
     const ordered = [...b].sort((x, y) => Date.parse(x.date) - Date.parse(y.date)).map(it => it.seq);
     const monotone = ordered.every((s, i) => i === 0 || (typeof s === 'number' && s > ordered[i - 1]));
     assert('(batch)', 'persona: frame counters follow capture order', monotone, ordered.join(','));
+  }
+
+  // Screenshot: classified non-photo and stripped by Randomize, not given a camera.
+  const shot = summary.find(it => it.isScreenshotCase);
+  if (shot) {
+    assert('(screenshot)', 'classify: PNG screenshot flagged non-photo', shot.isPhoto === false, `isPhoto=${shot.isPhoto}`);
+    assert('(screenshot)', 'classify: Randomize stripped it (no fake camera)', shot.mode === 'stripped' && !shot.camera, `mode=${shot.mode} camera=${shot.camera}`);
+  } else {
+    assert('(screenshot)', 'classify: screenshot case present', false, 'screenshot item missing');
   }
 
   // Pull blobs one at a time: a single returnByValue of all of them is too big.

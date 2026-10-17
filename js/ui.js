@@ -15,6 +15,7 @@ import {
   generateFake, makePersona, readBackExifStrict,
   parseFileExif, renderMeta,
 } from './exif.js';
+import { classifyInput } from './classify.js';
 import { ICONS } from './icons.js';
 
 /** Wrap a serialised TIFF block ("Exif\0\0" + data) as an APP1 segment. */
@@ -47,9 +48,25 @@ function createItem(file) {
     fakePiexif: null,
     fakeCamera: null,
     fakeLocation: null,
+    inputClass: { isPhoto: true, kind: 'photo', reason: '' },
     error: null,
     processing: false,
   };
+}
+
+/** Read an image's pixel dimensions from its file, or {0,0} on failure. */
+function readDimensions(file) {
+  return new Promise(resolve => {
+    if (typeof createImageBitmap === 'function') {
+      createImageBitmap(file).then(bmp => {
+        const d = { width: bmp.width, height: bmp.height };
+        if (bmp.close) bmp.close();
+        resolve(d);
+      }).catch(() => resolve({ width: 0, height: 0 }));
+    } else {
+      resolve({ width: 0, height: 0 });
+    }
+  });
 }
 
 function getItem(id) {
@@ -242,7 +259,10 @@ function renderActiveTab() {
   }
 
   if (hasProcessedOutput(current) && !current.fakeExif) {
-    body.innerHTML = `<div class="no-meta"><div class="no-meta-icon">${ICONS.clean}</div><p>Metadata was stripped from this image.</p></div>`;
+    const stripNote = (current.inputClass && !current.inputClass.isPhoto)
+      ? `This looks like a screenshot, not a camera photo, so no camera was faked. Metadata was stripped instead.`
+      : `Metadata was stripped from this image.`;
+    body.innerHTML = `<div class="no-meta"><div class="no-meta-icon">${ICONS.clean}</div><p>${escapeHtml(stripNote)}</p></div>`;
     S.fieldCounts.orig = 0;
     setBadge('cleared', 'Cleared');
   } else if (current.fakeExif) {
@@ -295,6 +315,8 @@ async function hydrateItem(file) {
   const item = createItem(file);
   item.processing = true;
   item.origExif = await parseFileExif(file);
+  const dims = await readDimensions(file);
+  item.inputClass = classifyInput({ type: file.type, exif: item.origExif, width: dims.width, height: dims.height });
   item.processing = false;
   return item;
 }
@@ -323,6 +345,19 @@ function downloadBlob(blob, name) {
 
 async function processRandomizeItem(item, options = {}) {
   const { deferRender = false, persona = null } = options;
+
+  // A screenshot or exported graphic never passed through a lens, so inventing
+  // a camera, lens, exposure and GPS for it would be a louder tell than the
+  // metadata it arrived with. The honest output is a clean file with no
+  // fabricated camera — which is what a real shared screenshot looks like — so
+  // the randomize path falls back to stripping it.
+  if (!item.inputClass?.isPhoto) {
+    await processClearItem(item, { deferRender });
+    const why = item.inputClass?.reason ? ` (${item.inputClass.reason})` : '';
+    showToast(`${item.file.name} looks like a screenshot, not a camera photo${why}. Metadata was stripped rather than faked as a camera.`, 'warning');
+    return;
+  }
+
   item.processing = true;
   item.error = null;
   if (!deferRender) renderCurrentItem();
