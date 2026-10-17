@@ -290,7 +290,7 @@ async function verify(outFile) {
     if (result) {
       check(!result.error, `processing ${sample} reported no error`, result.error);
       check(result.size > 0, 'modBlob produced', `size=${result.size}`);
-      check(result.hasExif, 'fake EXIF generated', '');
+      check(result.hasExif, 'generated EXIF present', '');
       console.log(`  info  ${sample} -> ${result.size} bytes as ${result.camera}`);
     }
 

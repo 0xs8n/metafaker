@@ -1,6 +1,6 @@
-"""Pixel-domain forensic measures, for comparing our output against real files.
+"""Pixel-domain image-analysis measures, for comparing our output against real files.
 
-Three standard detectors, chosen because they are content-robust enough to
+Three standard measures, chosen because they are content-robust enough to
 compare across different pictures:
 
   resample   Popescu-Farid style. Resizing or rotating an image makes each

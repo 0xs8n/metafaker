@@ -91,8 +91,8 @@ function hasProcessedOutput(item) {
 
 /**
  * The name Camera Raw gives an export: the source file's own name with a
- * lowercase .jpg extension, so the convention follows the faked camera and
- * date-based names use the faked capture time. A Pixel's raw is named
+ * lowercase .jpg extension, so the convention follows the generated camera and
+ * date-based names use the generated capture time. A Pixel's raw is named
  * PXL_<timestamp>.RAW-02.ORIGINAL.dng, and its export keeps that stem; the
  * millisecond field is the frame's SubSecTime, as on the phone. Uppercase .JPG
  * is what the camera writes, not what an editor writes.
@@ -260,7 +260,7 @@ function renderActiveTab() {
 
   if (hasProcessedOutput(current) && !current.fakeExif) {
     const stripNote = (current.inputClass && !current.inputClass.isPhoto)
-      ? `This looks like a screenshot, not a camera photo, so no camera was faked. Metadata was stripped instead.`
+      ? `This looks like a screenshot, not a camera photo, so no camera details were added. Its metadata was removed instead.`
       : `Metadata was stripped from this image.`;
     body.innerHTML = `<div class="no-meta"><div class="no-meta-icon">${ICONS.clean}</div><p>${escapeHtml(stripNote)}</p></div>`;
     S.fieldCounts.orig = 0;
@@ -345,7 +345,7 @@ function downloadBlob(blob, name) {
 
 /**
  * Render the pixel container and wrap the four Adobe metadata segments around
- * it (Exif, Photoshop APP13, ICC, XMP), the same way for a faked photo and for
+ * it (Exif, Photoshop APP13, ICC, XMP), the same way for a photo and for
  * an exported graphic. `fake` is a generateFake or generateGraphic result;
  * `pixelCam` drives the pixel pipeline (camera colour for a photo, {} for a
  * graphic). Returns { verified, modDataUrl, width, height }.
@@ -419,11 +419,11 @@ async function processGraphicItem(item, options = {}) {
 async function processRandomizeItem(item, options = {}) {
   const { deferRender = false, persona = null } = options;
 
-  // A screenshot or exported graphic never passed through a lens, so inventing
-  // a camera, lens, exposure and GPS for it would be a louder tell than the
-  // metadata it arrived with. The honest output is a clean file with no
-  // fabricated camera — which is what a real shared screenshot looks like — so
-  // the randomize path falls back to stripping it.
+  // A screenshot or exported graphic never passed through a lens, so giving it
+  // a camera, lens, exposure and GPS would make it inconsistent with what it
+  // is. The honest output is a file with no camera information — which is what
+  // a real shared screenshot looks like — so the randomize path cleans it
+  // instead, in one of the two ways below.
   if (!item.inputClass?.isPhoto) {
     // Two non-photo outputs, chosen at random so they do not all share one
     // signature: a plain clean strip, or an Adobe-exported graphic carrying
@@ -431,7 +431,7 @@ async function processRandomizeItem(item, options = {}) {
     if (rnd() < 0.45) await processClearItem(item, { deferRender });
     else              await processGraphicItem(item, { deferRender });
     const why = item.inputClass?.reason ? ` (${item.inputClass.reason})` : '';
-    showToast(`${item.file.name} looks like a screenshot, not a camera photo${why}. It was cleaned of camera, lens and location rather than faked as a photo.`, 'warning');
+    showToast(`${item.file.name} looks like a screenshot, not a camera photo${why}. It was cleaned of camera, lens and location details rather than given new camera metadata.`, 'warning');
     return;
   }
 
@@ -506,9 +506,9 @@ async function processClearItem(item, options = {}) {
   try {
     // The export with its metadata removed: no Exif, no XMP, no ICC profile,
     // Adobe's APP14 left in place, which is what `exiftool -all=` leaves on a
-    // Camera Raw export. A real photo keeps the full anti-forensic pixel
-    // pipeline (the sensor-pattern defence still applies); a non-photo uses the
-    // light path, since a screenshot has no sensor fingerprint to hide.
+    // Camera Raw export. A real photo keeps the full privacy pixel pipeline
+    // (the sensor-pattern protection still applies); a non-photo uses the
+    // light path, since a screenshot has no sensor fingerprint to remove.
     const canvasResult = await stripViaCanvas(item.file, { minimal: !item.inputClass?.isPhoto });
     const newBlob = dataUrlToBlob(canvasResult.dataUrl);
 

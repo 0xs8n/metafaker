@@ -214,10 +214,10 @@ function gaussRand() {
  *   a = shot noise coefficient  (signal-dependent, scales linearly with ISO)
  *   b = read noise variance     (constant per sensor, scales with ISO²)
  *
- * Uniform Gaussian (previous model) is detectable by Noiseprint++, TruFor,
- * and heteroscedastic noise forensic analysis — those tools explicitly verify
- * that brighter pixels have higher variance. The Poisson-Gaussian model
- * matches what real sensors produce.
+ * Uniform Gaussian noise (the previous model) is not what a real sensor
+ * produces: real sensor noise is heteroscedastic, so brighter pixels have
+ * higher variance. The Poisson-Gaussian model matches what real sensors
+ * produce, so the output reads as an ordinary photo.
  */
 export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
   // Explicit sigma ranges matched to real camera output in 8-bit JPEG space.
@@ -230,11 +230,11 @@ export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
   else                  baseSigma = 3.0 + rnd() * 2.0;  // 3.0–5.0
 
   // Decompose into Poisson-Gaussian model: σ²(x) = a·x + b
-  // The signal-dependent component gives the heteroscedastic structure that
-  // ML forensic tools (Noiseprint++, TruFor) verify, while keeping total
-  // noise within the calibrated sigma range above. The shot-to-read split and
-  // the per-channel factors are drawn per image: a fixed split was itself a
-  // recipe that a classifier trained on this tool's output could learn.
+  // The signal-dependent component gives the heteroscedastic structure real
+  // sensors have, while keeping total noise within the calibrated sigma range
+  // above. The shot-to-read split and the per-channel factors are drawn per
+  // image: a fixed split would be a constant shared by every output, and a
+  // shared constant is what lets separate images be linked to one another.
   const sig2 = baseSigma * baseSigma;
   const shot = 0.03 + rnd() * 0.12;    // 3–15% signal-dependent
   const a    = shot * sig2 / 128;
@@ -336,12 +336,13 @@ export function applyCameraColorProfile(ctx, w, h, make) {
 }
 
 /**
- * Simulate camera ISP pipeline statistical traces.
+ * Reproduce the statistical character of a camera's image pipeline.
  *
  * Real cameras run demosaicing → denoising → sharpening → tone mapping before
- * JPEG encoding. Each stage leaves characteristic statistical traces that ML
- * forensic tools (TruFor, CAT-Net, ManTraNet) are trained to detect.
- * Their absence from a browser-processed image is a strong forensic signal.
+ * JPEG encoding, and each stage leaves characteristic statistical traces in
+ * the pixels. An image re-encoded by a browser lacks them, which sets it apart
+ * from ordinary photos; reproducing them keeps the output consistent with the
+ * photo it presents as.
  *
  * Simulates:
  *   1. Demosaicing residuals — Laplacian traces from Bayer CFA interpolation
@@ -390,8 +391,9 @@ export function applyISPSimulation(ctx, w, h) {
   const d  = id.data;
 
   // Every stage here is drawn per image, including whether it runs at all.
-  // Applying the same curve and the same 3x3 sharpen to every file was a
-  // recipe, and a recipe is what a detector trained on this tool would learn.
+  // Applying the same curve and the same 3x3 sharpen to every file would be a
+  // fixed recipe shared by every output, which would link separate images to
+  // one another.
 
   // ── 1. S-curve tone mapping (LUT), four images in five ──────
   // Camera firmware applies a characteristic S-shaped tone curve for contrast.
@@ -413,7 +415,7 @@ export function applyISPSimulation(ctx, w, h) {
 
   // ── 2. Unsharp mask, three images in four, radius 1 or 2 px ──
   // In-camera and editor sharpening creates characteristic halo/ringing
-  // around edges — a statistical trace that forensic models are trained to see.
+  // around edges, a statistical trace every ordinary photo carries.
   if (rnd() < 0.75) {
     const sharpStr = 0.05 + rnd() * 0.15;           // 0.05–0.20
     const radius   = rnd() < 0.6 ? 1 : 2;
@@ -432,14 +434,16 @@ export function applyISPSimulation(ctx, w, h) {
 /**
  * Non-rigid warp: a smooth, random displacement field of about a pixel.
  *
- * This is the PRNU defence that the crop, rotation and resize alone are not.
- * Those are one global affine transform, and a sensor-pattern match can be
- * re-registered through it by searching over scale and rotation. A field that
- * varies across the frame has no single inverse to search for: every block is
- * misaligned by its own fraction of a pixel, and the pattern correlation,
- * which is summed over the whole frame, collapses. The displacement is a sum
- * of three low-frequency waves with random directions, wavelengths and
- * phases, and a total amplitude under two pixels, so nothing is visible.
+ * Part of the sensor-pattern (PRNU) protection. A crop and rotation are one
+ * global transform, and a sensor-pattern match can be re-aligned through it by
+ * searching over scale and rotation. A field that varies across the frame has
+ * no single inverse to search for: every block is misaligned by its own
+ * fraction of a pixel, which weakens the whole-frame correlation. Measured with
+ * tools/prnu.py, the warp alone cuts the correlation sharply but does not
+ * reliably break it; the downscale in the main pipeline is what does. The
+ * displacement is a sum of three low-frequency waves with random directions,
+ * wavelengths and phases, and a total amplitude under two pixels, so nothing
+ * is visible.
  */
 export function applyWarp(ctx, w, h) {
   const id  = ctx.getImageData(0, 0, w, h);
@@ -511,8 +515,8 @@ export function applyDenoise(ctx, w, h) {
 /**
  * Simulate lens optical artifacts: vignetting + chromatic aberration.
  *
- * Every real camera lens produces both. Their absence is detectable by
- * forensic lens-profile databases and ML models.
+ * Every real camera lens produces both, so a photo without them is
+ * inconsistent with the lens it names.
  *
  * Vignetting: cos⁴ light falloff toward corners (polynomial approximation).
  * Chromatic aberration: wavelength-dependent refraction causes radial colour
@@ -791,7 +795,8 @@ export function normaliseAppSegments(dataUrl, opts = {}) {
 }
 
 /**
- * Core anti-forensic canvas pipeline.
+ * Core privacy canvas pipeline: removes the traces in the pixels that could
+ * link an image back to the original photo and the device that took it.
  *
  * The stages, in order. Every parameter is drawn per image and several stages
  * run on only a share of images, so there is no fixed recipe to learn:
@@ -799,8 +804,9 @@ export function normaliseAppSegments(dataUrl, opts = {}) {
  *   1. Proportional crop (≤1.2% per edge) — shifts the sensor grid
  *   2. Rotation (±0.3°–2.0°) on two images in three
  *   3. Reshape to a frame the camera can produce, then size
- *   3b. Non-rigid warp (sub-pixel to ~2 px) and a light denoise — the PRNU
- *       defence; a global transform can be re-registered, a field cannot
+ *   3b. Non-rigid warp (sub-pixel to ~2 px) and a light denoise — weakens the
+ *       sensor-pattern (PRNU) link to the camera; a global transform can be
+ *       re-aligned, a field cannot
  *   4. Camera colour science — brand-specific tone/saturation/contrast
  *   5. ISP simulation — S-curve (4 in 5) + unsharp mask (3 in 4, radius 1–2)
  *   6. Lens optics — vignetting (7 in 10) + chromatic aberration (3 in 5,
@@ -811,9 +817,10 @@ export function normaliseAppSegments(dataUrl, opts = {}) {
 /**
  * Reshape the source rectangle to a frame the camera could actually produce.
  *
- * This is the loudest tell in the output. A file claiming to be a Pixel 6a at
- * 533x1598 describes a frame no Pixel has ever produced — the aspect ratio
- * alone rules it out before anyone looks at the resolution. The dimensions come
+ * This is the most visible inconsistency an output could carry. A file
+ * presenting as a Pixel 6a at 533x1598 describes a frame no Pixel has ever
+ * produced — the aspect ratio alone rules it out before anyone looks at the
+ * resolution. The dimensions come
  * from whatever image was loaded, not from the camera being claimed.
  *
  * Where the source is already close to one of the camera's frame shapes, it is
@@ -848,7 +855,8 @@ function snapToCameraFrame(x, y, w, h, cam) {
   const ny = y + Math.round((h - nh) / 2);
 
   // Land on a real capture resolution when the source is big enough to get
-  // there by downscaling. Upscaling to reach it would be its own giveaway.
+  // there by downscaling. Upscaling to reach it would add an inconsistency of
+  // its own.
   let out = null;
   for (const [mw0, mh0] of cam.modes || []) {
     for (const [mw, mh] of [[mw0, mh0], [mh0, mw0]]) {
@@ -878,7 +886,7 @@ function encodeExportPixels(ctx, width, height, minimal = false) {
   return normaliseAppSegments(url, { app14: ADOBE_APP14 });   // fallback: at least drop APP0/ICC
 }
 
-function antiForensicRender(img, cam = {}) {
+function privacyRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
   const cameraMake = cam.make || '';
   const iso        = cam.iso  || 100;
@@ -900,7 +908,7 @@ function antiForensicRender(img, cam = {}) {
   const srcH    = imgH - cropT - cropB;
 
   // A non-photo (screenshot, graphic) has no sensor fingerprint and no lens,
-  // so the anti-forensic stages — colour science, ISP, lens optics, sensor
+  // so the privacy stages — colour science, ISP, lens optics, sensor
   // noise, the PRNU warp — are pointless for it and would be wrong: a
   // screenshot with added vignetting and sensor noise is less plausible, not
   // more. `minimal` runs only crop, downscale and a clean re-encode. It is
@@ -927,10 +935,11 @@ function antiForensicRender(img, cam = {}) {
   // A native capture resolution is used when reachable; otherwise a downscale
   // is always applied, even to an already-small input. Resampling onto a new,
   // smaller grid is the one transform that reliably breaks sensor-pattern
-  // (PRNU) correlation — it moves every photosite's noise off the lattice an
-  // investigator's fingerprint lives on. The crop, rotation and warp weaken
-  // that correlation; the downscale is what defeats it. 8–20% is invisible and
-  // well within the range an export resizes by.
+  // (PRNU) correlation — it moves every photosite's noise off the lattice the
+  // camera's fingerprint lives on, so the photo can no longer be matched to the
+  // camera that took it. The crop, rotation and warp weaken that link; the
+  // downscale is what breaks it. 8–20% is invisible and well within the range
+  // an export resizes by.
   const frame = snapToCameraFrame(srcX, srcY, srcW, srcH, cam);
   const longest = Math.max(frame.w, frame.h);
   // Non-photos are capped at 1600 on the long edge. They keep the exporter's
@@ -958,9 +967,9 @@ function antiForensicRender(img, cam = {}) {
   }
 
   // 2. Rotation on about two images in three, 0.3–2.0° either way. Rotating
-  // every image was a tell twice over: a tilted horizon on each, and one more
-  // constant in the recipe. The warp below carries the PRNU defence on the
-  // images that are not rotated.
+  // every image would stand out twice over: a tilted horizon on each, and one
+  // more constant shared by every output. The warp below carries the
+  // sensor-pattern protection on the images that are not rotated.
   const angleDeg = rnd() < 0.65 ? (rnd() < 0.5 ? 1 : -1) * (0.3 + rnd() * 1.7) : 0;
   const angle = angleDeg * (Math.PI / 180);
 
@@ -980,7 +989,8 @@ function antiForensicRender(img, cam = {}) {
   ctx.drawImage(img, frame.x, frame.y, frame.w, frame.h, 0, 0, size.width, size.height);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-  // 3b. Non-rigid warp and a light denoise: the sensor-pattern defence.
+  // 3b. Non-rigid warp and a light denoise: part of the sensor-pattern
+  // protection.
   applyWarp(ctx, size.width, size.height);
   applyDenoise(ctx, size.width, size.height);
 
@@ -1041,7 +1051,7 @@ async function decodeImage(src) {
 }
 
 export function stripViaCanvas(src, cam) {
-  return decodeImage(src).then(img => antiForensicRender(img, cam));
+  return decodeImage(src).then(img => privacyRender(img, cam));
 }
 
 // ── Display / String Utilities ───────────────────────────────────

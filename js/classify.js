@@ -4,15 +4,16 @@
  * The metadata generator invents a camera, lens, exposure and GPS fix. That is
  * right for a photo taken on a phone or a camera, and wrong for anything that
  * never passed through a lens: a screenshot, an exported graphic, a scan, a
- * meme. Stamping "iPhone 15 Pro, f/1.78, GPS in Houston" onto a MacBook
- * screenshot is a louder tell than any metadata the screenshot came with,
- * because a screenshot has no camera to name. For those inputs the honest
- * output is a clean file with no fabricated camera — which is what a real
- * shared screenshot looks like.
+ * meme. Writing "iPhone 15 Pro, f/1.78, GPS in Houston" onto a MacBook
+ * screenshot would make it inconsistent with what it is, because a screenshot
+ * has no camera to name. For those inputs the honest output is a clean file
+ * with no camera information — which is what a real shared screenshot looks
+ * like.
  *
  * The test is deliberately high-precision: it only calls something a non-photo
  * when the evidence is strong, so a genuine photo is never mistaken for a
- * screenshot and quietly stripped when the user wanted it faked. The signals:
+ * screenshot and quietly stripped when the user wanted new metadata for it.
+ * The signals:
  *
  *   - It already carries a camera Make or Model. Cameras and phones always
  *     write one; a screenshot never does. Present → it is a photo, full stop.

@@ -10,8 +10,8 @@
  * qtables.js — Real camera JPEG quantization tables, in zigzag order.
  *
  * The quantization table is one of the strongest camera fingerprints in a JPEG:
- * manufacturers use their own, forensic tools match against databases of them,
- * and the browser's table says "browser". Substituting the DQT bytes alone
+ * manufacturers use their own, image-analysis tools match against databases of
+ * them, and the browser's table says "browser". Substituting the DQT bytes alone
  * would change the picture, because the coefficients were quantized against the
  * old table, so js/jpeg-requantize.js rescales the coefficients onto the new
  * table instead.

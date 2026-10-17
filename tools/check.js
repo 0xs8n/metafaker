@@ -7,7 +7,7 @@
  * the bytes (segment layout, forbidden encoder strings) and, when exiftool is
  * available, on the metadata (validation, internal consistency, plausibility).
  *
- *   node tools/check.js            # all testimg/*.jpg
+ *   node tools/check.js            # all testimg/*.jpg plus a synthetic PNG screenshot
  *   node tools/check.js --keep     # leave Chrome's temp profile in place
  *   CHROME=/path/to/chrome node tools/check.js
  *
@@ -489,8 +489,9 @@ async function processInBrowser(page, origin, names) {
     App.select(S.items[S.items.length - 1].id);
     await App.clear();
 
-    // A synthetic PNG screenshot at a laptop screen size: Randomize must NOT
-    // invent a camera for it; it must be classified non-photo and stripped.
+    // A synthetic PNG screenshot at a laptop screen size: Randomize must not
+    // give it a camera; it must be classified non-photo and cleaned (a plain
+    // strip or an exported graphic, chosen at random).
     const c = document.createElement('canvas');
     c.width = 2560; c.height = 1600;
     const cx = c.getContext('2d');
@@ -501,7 +502,7 @@ async function processInBrowser(page, origin, names) {
     await App.loadFiles([shot]);
     const shotId = S.items[S.items.length - 1].id;
     App.select(shotId);
-    await App.randomize();                     // should fall back to strip
+    await App.randomize();                     // should clean, not add a camera
 
     return S.items.map((it, i) => ({
       index: i,
@@ -535,11 +536,11 @@ async function processInBrowser(page, origin, names) {
     assert('(batch)', 'persona: frame counters follow capture order', monotone, ordered.join(','));
   }
 
-  // Screenshot: classified non-photo and stripped by Randomize, not given a camera.
+  // Screenshot: classified non-photo and cleaned by Randomize, not given a camera.
   const shot = summary.find(it => it.isScreenshotCase);
   if (shot) {
     assert('(screenshot)', 'classify: PNG screenshot flagged non-photo', shot.isPhoto === false, `isPhoto=${shot.isPhoto}`);
-    assert('(screenshot)', 'classify: no fake camera or location on non-photo', !shot.camera && !shot.city, `camera=${shot.camera} city=${shot.city}`);
+    assert('(screenshot)', 'classify: no camera or location on non-photo', !shot.camera && !shot.city, `camera=${shot.camera} city=${shot.city}`);
   } else {
     assert('(screenshot)', 'classify: screenshot case present', false, 'screenshot item missing');
   }

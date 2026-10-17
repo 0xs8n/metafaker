@@ -1,11 +1,12 @@
-"""Faithful offline port of the pixel stages in js/helpers.py, so the whole
-pipeline can be measured on full-resolution real photos without going through
-the browser (which would need the input re-encoded to inject it, contaminating
-the very compression history we are trying to measure).
+"""Offline port of the pixel stages in js/helpers.js, so the pipeline can be
+measured on full-resolution real photos without going through the browser
+(which would need the input re-encoded to inject it, contaminating the very
+compression history we are trying to measure).
 
-Stage order mirrors antiForensicRender: crop, rotate+scale, resize, colour
+Stage order follows privacyRender: crop, rotate+scale, resize, colour
 profile, ISP (S-curve + unsharp), lens (vignette + chromatic aberration),
-Poisson-Gaussian noise, encode.
+Poisson-Gaussian noise, encode. It predates the non-rigid warp and denoise
+stages, which it does not include.
 """
 import numpy as np
 from PIL import Image

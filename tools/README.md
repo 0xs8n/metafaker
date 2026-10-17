@@ -1,7 +1,9 @@
-# Forensic measurement tools
+# Measurement tools
 
 Pixel-domain checks for comparing MetaFaker's output against real camera files.
-Metadata is only half the problem; these cover the other half.
+Metadata is only half of what can identify a photo; the pixels are the other
+half. These check that the pixels carry no trace that would link an output back
+to its original or set it apart from an ordinary photo.
 
 Requires `numpy`, `scipy`, `pillow`. Run them against your own JPEGs — no sample
 images are committed here, because the useful ones are other people's
@@ -44,8 +46,9 @@ browser means re-encoding it first, which contaminates the compression history
 the measurements are trying to read. This way a full-resolution original can go
 through the same stages untouched.
 
-It is a port, not the shipped code: the resampling kernel and RNG differ, so
-treat its output as indicative rather than exact.
+It is a port, not the shipped code: the resampling kernel and RNG differ, and
+it predates the non-rigid warp and denoise stages, so treat its output as
+indicative rather than exact.
 
 ## Reference measurements
 
@@ -64,8 +67,9 @@ Every measure falls inside the range real files occupy.
 
 Two cautions. Synthetic test fixtures give misleading numbers here — flat
 gradients drove blockiness to 1.395 and ghost to 0.295, neither of which
-reflects the pipeline. And three detectors are not a forensic suite: PRNU, ELA
-and the ML detectors (TruFor, Noiseprint++, CAT-Net) are untested.
+reflects the pipeline. And three measures are not a complete analysis: ELA and
+the machine-learning models (TruFor, Noiseprint++, CAT-Net) are untested, and
+PRNU is covered separately by `prnu.py` below.
 
 ## Browser harness and offline build
 
@@ -78,27 +82,35 @@ protocol plumbing is shared in `tools/lib/cdp.js`.
 
     node tools/check.js
 
-Serves the repo on `127.0.0.1`, loads every `testimg/*.jpg`, randomizes the
-batch, strips one extra copy of the first image, and writes the outputs to
-`tools/out/` (git-ignored). Then it asserts:
+Serves the repo on `127.0.0.1`, loads every `testimg/*.jpg`, puts the first
+three through Randomize Entire Batch and the rest through Randomize one by one,
+strips one extra copy of the first image, and randomizes a synthetic PNG
+screenshot. Outputs go to `tools/out/` (git-ignored). Then it asserts:
 
 - **privacy** — every network request the page made went to `127.0.0.1`,
   `blob:` or `data:`; no uncaught exceptions, `console.error` calls or
   error-level log entries (CSP violations, failed loads).
-- **bytes** (own JPEG segment walker) — one SOI before SOS, no APP0, one DQT
-  carrying two tables, APP14 Adobe, baseline SOF0 with three 1x1 components
-  (4:4:4), DHT and SOS. Randomized files must carry APP1 Exif, APP1 XMP whose
-  packet begins with the UTF-8 BOM, and APP2 ICC_PROFILE; stripped files must
-  carry no APP1/APP2 at all. Nowhere in the file: `Google Inc`, `Skia`,
-  `JFIF`, `Chrome`, `Mozilla`, or UTF-16BE `Google` / `Skia`.
+- **bytes** (own JPEG segment walker) — no APP0, one DQT carrying two tables,
+  APP14 Adobe, baseline SOF0 with three 1x1 components (4:4:4), DHT and SOS.
+  Randomized files carry three SOI markers before SOS (the image plus the IFD1
+  and Photoshop thumbnails), APP1 Exif, APP1 XMP whose packet begins with the
+  UTF-8 BOM, and APP2 ICC_PROFILE; stripped files carry one SOI and no
+  APP1/APP2 at all. Nowhere in the file: `Google Inc`, `Skia`, `JFIF`,
+  `Chrome`, `Mozilla`, or UTF-16BE `Google` / `Skia`.
+- **persona** — the batch shares one camera and one city, its captures fall
+  within eight days, and its frame counters follow capture order.
+- **non-photo** — the screenshot is classified as a non-photo and carries no
+  camera Make or Model, no lens and no GPS; any `Software` it names is Adobe.
 - **exiftool** (when found on PATH or at the known Windows install path;
-  otherwise SKIPPED) — `-validate` reports OK with no warnings; Make/Model
-  present; Software is Adobe Camera Raw; ModifyDate >= DateTimeOriginal; the
-  XMP CreateDate matches DateTimeOriginal; GPS inside the US envelope; the
-  exposure triangle agrees with the APEX tags within 0.75 EV; no thumbnail,
-  JFIF or Google ICC tags; ExifImageWidth/Height equal the SOF0 frame; and the
-  sun is not below -6° at the GPS position and time when the exposure claims
-  bright daylight (EV > 11). Stripped files must carry no metadata groups.
+  otherwise SKIPPED) — `-validate` reports only the warnings a real Adobe
+  export produces and no others; Make/Model present; Software is Adobe Camera
+  Raw or Lightroom; ModifyDate >= DateTimeOriginal; the XMP CreateDate matches
+  DateTimeOriginal; GPS latitude within 18-72° N and longitude within 65-180° W
+  (the United States); the exposure triangle agrees with the APEX tags within
+  0.75 EV; an IFD1 thumbnail present; no JFIF or Google ICC tags;
+  ExifImageWidth/Height absent, as Adobe drops them; and the sun is not below
+  -6° at the GPS position and time when the exposure indicates bright daylight
+  (EV > 11). Stripped files must carry no metadata groups and validate clean.
 
 Exit code is 1 on any failure; each failure names the file, the assertion and
 the actual value.
@@ -141,9 +153,10 @@ took it. `prnu-process.js` runs a folder of images through the real strip path
 fingerprint we control, stamps it into textured content, runs those through the
 pipeline, and measures the peak-to-correlation-energy against the estimated
 fingerprint before and after. Grounded in the shipped code rather than asserted.
-The result informs the honest "strong defence, not proven" wording in the
-README's threat model: downscaling is the reliable disruptor; the warp alone was
-not enough.
+The result is reported in the README's threat model: on an earlier pipeline,
+the warp and denoise cut the median correlation by roughly 98.6% but 7 of 10
+images still matched, which is why the pipeline now always downscales. The
+strengthened pipeline has not yet been re-measured.
 
 ### `build.js`
 

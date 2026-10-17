@@ -6,25 +6,26 @@ tool's pixel pipeline, using the real shipped code (via tools/prnu-process.js)
 and a synthetic sensor fingerprint we control, so the number is grounded rather
 than asserted.
 
-Method, standard PRNU forensics:
+Method, standard PRNU analysis:
   1. Build a fingerprint K (a fixed multiplicative noise field) for one
      "camera", and a different K2 for an unrelated camera.
   2. Make N textured content images. Stamp K into them (img*(1+K)) and save as
      high-quality JPEG: these are that camera's originals. Stamp K2 into a
      second set: an unrelated camera's originals.
   3. Estimate the fingerprint K_hat from the camera's originals (average of
-     their noise residuals) — this is what an investigator who owns the camera
-     would build.
+     their noise residuals) — the reference anyone with access to the camera
+     could build to link photos to it.
   4. Run every original through the shipped pipeline (prnu-process.js).
   5. For each processed image, measure the peak-to-correlation energy (PCE)
      between its residual and K_hat, searching over small scale/rotation/shift
-     to re-register — this is the attack the non-rigid warp is meant to defeat.
+     to re-align — the strongest form of the linking the pipeline is meant to
+     prevent.
 
 Reported:
   - baseline PCE   : K_hat vs the camera's own ORIGINALS (match, pre-pipeline)
   - processed PCE  : K_hat vs the camera's PROCESSED images (what survives)
   - unrelated PCE  : K_hat vs the OTHER camera's processed images (true non-match)
-A questioned image is normally declared a match at PCE >= 60. The pipeline
+An image is normally treated as a match at PCE >= 60. The pipeline
 succeeds when processed PCE falls to the non-match floor.
 
 Requires numpy, scipy, pillow, and Node. Run from the repo root:
@@ -100,8 +101,8 @@ def pce(w, k):
 
 
 def pce_registered(w, k):
-    """Max PCE over the realistic attack: resize the fingerprint k to the
-    questioned residual's size (the investigator knows the output dimensions),
+    """Max PCE over the strongest realistic linking attempt: resize the
+    fingerprint k to the residual's size (the output dimensions are known),
     then search a fine scale/rotation grid; translation is handled by the FFT."""
     if k.shape != w.shape:
         k = zoom(k, (w.shape[0] / k.shape[0], w.shape[1] / k.shape[1]), order=1)
@@ -183,7 +184,7 @@ def main():
                   'fall to the non-match floor.')
         else:
             print(f'  RESULT: {survived}/{len(proc_pce)} processed images still match; '
-                  'the pipeline does not fully defeat correlation here.')
+                  'the pipeline does not fully break the correlation here.')
         print()
         print('  Caveat: a synthetic fingerprint and a high-pass residual estimator, not a '
               'full PRNU suite (no Wiener/zero-mean wavelet denoise, no real sensor). It '

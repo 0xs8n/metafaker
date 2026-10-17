@@ -26,7 +26,7 @@
 import { pick, rnd } from './helpers.js';
 
 // Frame shapes each body can actually produce. A generated photo whose aspect
-// ratio matches no mode the camera offers is the loudest tell in the file.
+// ratio matches no mode the camera offers is inconsistent with that camera.
 const ASPECTS_PHONE = [4/3, 3/4, 16/9, 9/16, 1];
 const ASPECTS_DSLR  = [3/2, 2/3];
 
