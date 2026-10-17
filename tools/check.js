@@ -183,9 +183,15 @@ function byteChecks(name, buf, mode) {
   const sof = segs.filter(s => s.marker >= 0xC0 && s.marker <= 0xCF && s.marker !== 0xC4 && s.marker !== 0xC8 && s.marker !== 0xCC);
   const sof0 = sof.filter(s => s.marker === 0xC0);
 
-  // Common structure
-  assert(name, 'jpeg: exactly one SOI before SOS', countBytes(buf, Buffer.from([0xFF, 0xD8]), walk.sosOffset) === 1,
-    `found ${countBytes(buf, Buffer.from([0xFF, 0xD8]), walk.sosOffset)} x FFD8 before SOS (embedded thumbnail?)`);
+  // Common structure. A randomized file is an Adobe export and carries two
+  // embedded thumbnails (IFD1 and the Photoshop block), so three SOI appear
+  // before SOS; a stripped file has just the one.
+  const soiCount = countBytes(buf, Buffer.from([0xFF, 0xD8]), walk.sosOffset);
+  if (mode === 'randomized') {
+    assert(name, 'jpeg: main SOI plus two embedded thumbnails', soiCount === 3, `found ${soiCount} x FFD8 before SOS`);
+  } else {
+    assert(name, 'jpeg: exactly one SOI before SOS', soiCount === 1, `found ${soiCount} x FFD8 before SOS`);
+  }
   assert(name, 'jpeg: no APP0', app0.length === 0, `${app0.length} APP0 segment(s): ${app0.map(describeApp).join(',')}`);
   assert(name, 'jpeg: DQT is one segment with 2 tables', dqt.length === 1 && countDqtTables(dqt[0]) === 2,
     `DQT segments=${dqt.length} tables=${dqt.map(countDqtTables).join('+') || 0}`);
@@ -222,8 +228,10 @@ function byteChecks(name, buf, mode) {
     assert(name, 'jpeg: no APP2', app2.length === 0, `${app2.length} APP2: ${app2.map(describeApp).join(',')}`);
   }
 
-  // No unexpected application segments either way.
-  const allowed = mode === 'randomized' ? new Set([0xE1, 0xE2, 0xEE]) : new Set([0xEE]);
+  // No unexpected application segments either way. A randomized file carries
+  // the Adobe export's set: APP1 (Exif, XMP), APP13 (Photoshop), APP2 (ICC),
+  // APP14 (Adobe). A stripped file carries only APP14.
+  const allowed = mode === 'randomized' ? new Set([0xE1, 0xE2, 0xED, 0xEE]) : new Set([0xEE]);
   const stray = segs.filter(s => ((s.marker >= 0xE0 && s.marker <= 0xEF) || s.marker === 0xFE) && !allowed.has(s.marker));
   assert(name, 'jpeg: no other APPn/COM segments', stray.length === 0, stray.map(describeApp).join(','));
 
@@ -340,14 +348,34 @@ function exiftoolChecks(name, t, mode, info) {
     return;
   }
 
-  const validate = tag(t, 'Validate', 'ExifTool');
-  assert(name, 'exiftool: Validate == OK', validate === 'OK' || /^(0\s*)+$/.test(String(validate)), String(validate));
-  assert(name, 'exiftool: no Warning', warnings.length === 0, warnings.join(' | '));
+  // A genuine Adobe export does not validate clean: it drops
+  // ComponentsConfiguration, ExifImageWidth/Height and YCbCrPositioning, and
+  // ExifTool reports exactly those four. Matching Adobe means carrying the
+  // same four and no others; any further warning is a real defect.
+  const ADOBE_WARNINGS = new Set([
+    'Missing required JPEG ExifIFD tag 0x9101 ComponentsConfiguration',
+    'Missing required JPEG ExifIFD tag 0xa002 ExifImageWidth',
+    'Missing required JPEG ExifIFD tag 0xa003 ExifImageHeight',
+    'Missing required JPEG IFD0 tag 0x0213 YCbCrPositioning',
+    // Samsung and OnePlus firmware writes OffsetTime and LensModel with
+    // ExifVersion 0220, which the Exif spec added only at 0231 and 0230; real
+    // files from those phones, and their exports, carry these exact warnings.
+    'ExifIFD tag 0x9010 OffsetTime requires ExifVersion 0231 or higher',
+    'ExifIFD tag 0x9011 OffsetTimeOriginal requires ExifVersion 0231 or higher',
+    'ExifIFD tag 0x9012 OffsetTimeDigitized requires ExifVersion 0231 or higher',
+    'ExifIFD tag 0xa434 LensModel requires ExifVersion 0230 or higher',
+    'ExifIFD tag 0xa433 LensMake requires ExifVersion 0230 or higher',
+    'ExifIFD tag 0xa432 LensInfo requires ExifVersion 0230 or higher',
+  ]);
+  const unexpected = warnings.filter(w => !ADOBE_WARNINGS.has(w) && !/^\[minor\]/.test(w));
+  assert(name, 'exiftool: only the Adobe-export validation warnings', unexpected.length === 0, unexpected.join(' | '));
 
   const make = tag(t, 'Make', 'IFD0'), model = tag(t, 'Model', 'IFD0');
   assert(name, 'exiftool: Make/Model present', !!make && !!model, `Make=${make} Model=${model}`);
   const software = tag(t, 'Software', 'IFD0');
-  assert(name, 'exiftool: Software is Adobe Camera Raw', typeof software === 'string' && software.startsWith('Adobe Photoshop Camera Raw'), `Software=${software}`);
+  assert(name, 'exiftool: Software is Adobe Camera Raw or Lightroom',
+    typeof software === 'string' && (software.startsWith('Adobe Photoshop Camera Raw') || software.startsWith('Adobe Lightroom')),
+    `Software=${software}`);
 
   const dto = tag(t, 'DateTimeOriginal', 'ExifIFD');
   const modify = tag(t, 'ModifyDate', 'IFD0');
@@ -380,15 +408,16 @@ function exiftoolChecks(name, t, mode, info) {
       `EV=${fmt(ev)} APEX EV=${fmt(apexEv)} (Av=${fmt(apexAv)} Tv=${fmt(apexTv)})`);
   }
 
-  const thumbKeys = Object.keys(t).filter(k => /:(ThumbnailImage|ThumbnailOffset|ThumbnailLength)$/.test(k));
-  assert(name, 'exiftool: no thumbnail tags', thumbKeys.length === 0, thumbKeys.join(','));
+  // Adobe exports carry an IFD1 thumbnail and a matching Photoshop thumbnail.
+  const thumbLen = num(tag(t, 'ThumbnailLength', 'IFD1'));
+  assert(name, 'exiftool: IFD1 thumbnail present', Number.isFinite(thumbLen) && thumbLen > 0, `ThumbnailLength=${thumbLen}`);
   const jfif = groupKeys(t, 'JFIF');
   assert(name, 'exiftool: no JFIF tags', jfif.length === 0, jfif.join(','));
   const copyright = tag(t, 'ProfileCopyright', 'ICC-header') ?? tag(t, 'ProfileCopyright');
   assert(name, 'exiftool: ICC ProfileCopyright not Google', !(typeof copyright === 'string' && /Google/i.test(copyright)), `ProfileCopyright=${copyright}`);
-
-  const ew = num(tag(t, 'ExifImageWidth', 'ExifIFD')), eh = num(tag(t, 'ExifImageHeight', 'ExifIFD'));
-  assert(name, 'exiftool: ExifImageWidth/Height == SOF0', ew === info.width && eh === info.height, `Exif=${ew}x${eh} SOF0=${info.width}x${info.height}`);
+  // Adobe drops ExifImageWidth/Height on export; they must be absent.
+  assert(name, 'exiftool: no ExifImageWidth/Height (Adobe drops them)',
+    keysNamed(t, 'ExifImageWidth').length === 0 && keysNamed(t, 'ExifImageHeight').length === 0, 'present');
 
   // Sun check: no bright daylight exposure in the middle of the night.
   let when = null;
@@ -414,19 +443,30 @@ function exiftoolChecks(name, t, mode, info) {
 
 // ── Browser driving ──────────────────────────────────────────────
 
+const BATCH_SIZE = 3;   // the first N images go through Randomize Entire Batch as one persona
+
 async function processInBrowser(page, origin, names) {
-  // Load all images, randomize the batch, then load the first image a second
-  // time and strip it — so one output of each kind exists.
-  const summary = await page.evaluate(async (base, names) => {
+  // The first BATCH_SIZE images go through "Randomize Entire Batch", which
+  // gives them one shared persona (same body, city, trip). The rest are
+  // loaded afterwards and randomized one by one, so each draws its own
+  // camera and the run still covers many models. Finally the first image is
+  // loaded once more and stripped, so one output of each kind exists.
+  const summary = await page.evaluate(async (base, names, batchSize) => {
     const toFile = async n => {
       const r = await fetch(`${base}/testimg/${n}`);
       if (!r.ok) throw new Error(`fetch ${n}: HTTP ${r.status}`);
       return new File([await r.blob()], n, { type: 'image/jpeg' });
     };
-    const files = [];
-    for (const n of names) files.push(await toFile(n));
-    await App.loadFiles(files);
+    const batch = [];
+    for (const n of names.slice(0, batchSize)) batch.push(await toFile(n));
+    await App.loadFiles(batch);
     await App.randomizeAll();
+    const batchIds = new Set(S.items.map(it => it.id));
+    for (const n of names.slice(batchSize)) {
+      await App.loadFiles([await toFile(n)]);
+      App.select(S.items[S.items.length - 1].id);
+      await App.randomize();
+    }
     const dup = await toFile(names[0]);
     await App.loadFiles([dup]);
     App.select(S.items[S.items.length - 1].id);
@@ -438,11 +478,28 @@ async function processInBrowser(page, origin, names) {
       hasBlob: !!it.modBlob,
       size: it.modBlob ? it.modBlob.size : 0,
       mode: it.fakeExif ? 'randomized' : 'stripped',
+      batch: batchIds.has(it.id),
       camera: it.fakeCamera ? `${it.fakeCamera.make} ${it.fakeCamera.model}` : '',
       city: it.fakeLocation ? it.fakeLocation.city : '',
       date: it.fakeDate ? new Date(it.fakeDate).toISOString() : '',
+      seq: it.fakeSeq ?? null,
     }));
-  }, origin, names);
+  }, origin, names, BATCH_SIZE);
+
+  // Persona: the batch shares one camera and one city, its captures fall
+  // within one trip (a week at most), and frame counters follow capture order.
+  const b = summary.filter(it => it.batch && it.mode === 'randomized');
+  if (b.length) {
+    const cams = new Set(b.map(it => it.camera)), cities = new Set(b.map(it => it.city));
+    assert('(batch)', 'persona: batch shares one camera', cams.size === 1, [...cams].join(' | '));
+    assert('(batch)', 'persona: batch shares one city', cities.size === 1, [...cities].join(' | '));
+    const times = b.map(it => Date.parse(it.date)).filter(Number.isFinite);
+    const span = (Math.max(...times) - Math.min(...times)) / 86400000;
+    assert('(batch)', 'persona: batch captures within 8 days', span <= 8, `span ${span.toFixed(1)} days`);
+    const ordered = [...b].sort((x, y) => Date.parse(x.date) - Date.parse(y.date)).map(it => it.seq);
+    const monotone = ordered.every((s, i) => i === 0 || (typeof s === 'number' && s > ordered[i - 1]));
+    assert('(batch)', 'persona: frame counters follow capture order', monotone, ordered.join(','));
+  }
 
   // Pull blobs one at a time: a single returnByValue of all of them is too big.
   for (const item of summary) {

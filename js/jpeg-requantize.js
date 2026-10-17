@@ -104,6 +104,47 @@ class BitWriter {
   flush() { while (this.n !== 0) this.write(1, 1); }
 }
 
+/**
+ * Optimal Huffman table for a symbol frequency count (JPEG Annex K.2, as
+ * implemented by libjpeg's jpeg_gen_optimal_table). `freq` has 257 entries;
+ * entry 256 is the reserved code point that keeps any real code from being
+ * all ones. Returns { bits[16], vals[] }.
+ */
+function optimalTable(freqIn) {
+  const freq = Int32Array.from(freqIn);
+  freq[256] = 1;
+  const codesize = new Int32Array(257);
+  const others = new Int32Array(257).fill(-1);
+  for (;;) {
+    let c1 = -1, c2 = -1, v = 0x7fffffff;
+    for (let i = 0; i <= 256; i++) if (freq[i] && freq[i] <= v) { v = freq[i]; c1 = i; }
+    v = 0x7fffffff;
+    for (let i = 0; i <= 256; i++) if (freq[i] && freq[i] <= v && i !== c1) { v = freq[i]; c2 = i; }
+    if (c2 < 0) break;
+    freq[c1] += freq[c2]; freq[c2] = 0;
+    codesize[c1]++;
+    while (others[c1] >= 0) { c1 = others[c1]; codesize[c1]++; }
+    others[c1] = c2;
+    codesize[c2]++;
+    while (others[c2] >= 0) { c2 = others[c2]; codesize[c2]++; }
+  }
+  const bits = new Int32Array(33);
+  for (let i = 0; i <= 256; i++) if (codesize[i]) bits[codesize[i]]++;
+  let i = 32;
+  while (i > 16) {
+    if (bits[i] > 0) {
+      let j = i - 2;
+      while (bits[j] === 0) j--;
+      bits[i] -= 2; bits[i - 1]++; bits[j + 1] += 2; bits[j]--;
+    } else i--;
+  }
+  while (bits[i] === 0) i--;
+  bits[i]--;                                   // drop the reserved code point
+  const vals = [];
+  for (let len = 1; len <= 32; len++) for (let s = 0; s < 256; s++) if (codesize[s] === len) vals.push(s);
+  return { bits: Array.from(bits.subarray(1, 17)), vals };
+}
+
 const extend = (v, t) => (v < (1 << (t - 1)) ? v - (1 << t) + 1 : v);
 const category = v => { let a = Math.abs(v), n = 0; while (a) { n++; a >>= 1; } return n; };
 const toBits = (v, s) => (v >= 0 ? v : v + (1 << s) - 1);
@@ -122,14 +163,20 @@ function decodeHuff(br, map) {
 /**
  * @param {Uint8Array} data  a baseline JPEG
  * @param {{luma:number[], chroma:number[]}} target  64-entry zigzag tables
+ * @param {{restartInterval?: number}} [opts]  MCUs between RSTn markers; 0 = none.
+ *   Adobe's exporter writes a DRI segment and restart markers, and the
+ *   re-encoder reproduces that: after every `restartInterval` MCUs the bit
+ *   stream is padded with 1-bits, an RSTn marker (n cycling 0–7) is written,
+ *   and the DC predictors reset.
  * @returns {Uint8Array|null}
  */
-export function requantize(data, target) {
+export function requantize(data, target, opts = {}) {
+  const restartInterval = Math.max(0, Math.floor(opts.restartInterval || 0));
   if (data[0] !== 0xFF || data[1] !== 0xD8) return null;
 
   const srcQ = {};           // id -> Int32Array(64)
   const dcTabs = {}, acTabs = {};
-  let frame = null, sosPos = -1, sos = null, restartInterval = 0;
+  let frame = null, sosPos = -1, sos = null, srcRestart = 0;
   const preSegments = [];    // APPn / COM to carry over verbatim
 
   let i = 2;
@@ -177,8 +224,8 @@ export function requantize(data, target) {
     } else if (m === 0xC1 || m === 0xC2 || m === 0xC3 || (m >= 0xC5 && m <= 0xCF && m !== 0xC8)) {
       return null;                                       // not baseline sequential
     } else if (m === 0xDD) {
-      restartInterval = (data[body] << 8) | data[body + 1];
-      if (restartInterval !== 0) return null;            // restart markers: not handled
+      srcRestart = (data[body] << 8) | data[body + 1];
+      if (srcRestart !== 0) return null;                 // input restart markers: not handled
     } else if (m === 0xDA) {
       const n = data[body];
       const scan = [];
@@ -188,9 +235,9 @@ export function requantize(data, target) {
       }
       sos = scan; sosPos = end;
       break;
-    } else if (m === 0xE0 || m === 0xEE || m === 0xFE) {
-      preSegments.push(data.subarray(i, end));
     }
+    // The browser's APP0/APP2 are not carried over: the caller supplies the
+    // exporter's own APP14 through opts.app14 and its metadata separately.
     i = end;
   }
   if (!frame || !sos || sosPos < 0) return null;
@@ -252,17 +299,66 @@ export function requantize(data, target) {
     }
   }
 
+  // ── Huffman tables ──
+  // Adobe's exporter writes tables optimised for the image (its DHT runs
+  // 150–280 bytes); its thumbnails use the standard Annex K tables (416
+  // bytes). Both are reproduced: `optimizeHuffman` gathers the symbol
+  // statistics of the re-quantised coefficients and builds the tables the
+  // way libjpeg's jpeg_gen_optimal_table does.
+  let tables;
+  if (opts.optimizeHuffman !== false) {
+    const freq = [new Int32Array(257), new Int32Array(257), new Int32Array(257), new Int32Array(257)]; // dc0, ac0, dc1, ac1
+    const fPreds = {}; frame.comps.forEach(c => (fPreds[c.id] = { v: 0 }));
+    let fi = 0, fMcu = 0;
+    for (let my = 0; my < mcusY; my++) {
+      for (let mx = 0; mx < mcusX; mx++) {
+        if (restartInterval && fMcu > 0 && fMcu % restartInterval === 0) frame.comps.forEach(c => (fPreds[c.id].v = 0));
+        fMcu++;
+        for (const comp of frame.comps) {
+          const sel = comp === frame.comps[0] ? 0 : 1;
+          for (let n = 0; n < comp.v * comp.h; n++) {
+            const blk = blocks[fi++].blk;
+            const diff = blk[0] - fPreds[comp.id].v;
+            fPreds[comp.id].v = blk[0];
+            freq[sel * 2][category(diff)]++;
+            let run = 0;
+            for (let k = 1; k < 64; k++) {
+              if (blk[k] === 0) { run++; continue; }
+              while (run > 15) { freq[sel * 2 + 1][0xF0]++; run -= 16; }
+              freq[sel * 2 + 1][(run << 4) | category(blk[k])]++;
+              run = 0;
+            }
+            if (run > 0) freq[sel * 2 + 1][0x00]++;
+          }
+        }
+      }
+    }
+    tables = freq.map(f => optimalTable(f));
+  } else {
+    tables = [
+      { bits: STD_DC_LUMA_BITS, vals: STD_DC_LUMA_VALS },
+      { bits: STD_AC_LUMA_BITS, vals: STD_AC_LUMA_VALS },
+      { bits: STD_DC_CHROMA_BITS, vals: STD_DC_CHROMA_VALS },
+      { bits: STD_AC_CHROMA_BITS, vals: STD_AC_CHROMA_VALS },
+    ];
+  }
+  const dcEnc = [huffEncodeTable(tables[0].bits, tables[0].vals), huffEncodeTable(tables[2].bits, tables[2].vals)];
+  const acEnc = [huffEncodeTable(tables[1].bits, tables[1].vals), huffEncodeTable(tables[3].bits, tables[3].vals)];
+
   // ── re-encode ──
-  const dcEnc = [huffEncodeTable(STD_DC_LUMA_BITS, STD_DC_LUMA_VALS),
-                 huffEncodeTable(STD_DC_CHROMA_BITS, STD_DC_CHROMA_VALS)];
-  const acEnc = [huffEncodeTable(STD_AC_LUMA_BITS, STD_AC_LUMA_VALS),
-                 huffEncodeTable(STD_AC_CHROMA_BITS, STD_AC_CHROMA_VALS)];
   const bw = new BitWriter();
   const wPreds = {}; frame.comps.forEach(c => (wPreds[c.id] = { v: 0 }));
-  let bi = 0;
+  let bi = 0, mcuCount = 0, rstIndex = 0;
   try {
     for (let my = 0; my < mcusY; my++) {
       for (let mx = 0; mx < mcusX; mx++) {
+        if (restartInterval && mcuCount > 0 && mcuCount % restartInterval === 0) {
+          bw.flush();
+          bw.out.push(0xFF, 0xD0 + (rstIndex & 7));
+          rstIndex++;
+          frame.comps.forEach(c => (wPreds[c.id].v = 0));
+        }
+        mcuCount++;
         for (const comp of frame.comps) {
           const sel = comp === frame.comps[0] ? 0 : 1;
           for (let n = 0; n < comp.v * comp.h; n++) {
@@ -308,31 +404,37 @@ export function requantize(data, target) {
       for (let k = 0; k < 64; k++) push(Math.max(1, Math.min(255, t[k])));
     }
   }
-  // SOF0
+  // DRI, as the exporter places it: after DQT, before the frame header.
+  if (restartInterval) {
+    push(0xFF, 0xDD, 0x00, 0x04, (restartInterval >> 8) & 0xFF, restartInterval & 0xFF);
+  }
+  // An APP14 handed in goes here, between DRI and SOF0, which is where the
+  // exporter puts it in its embedded thumbnails.
+  if (opts.app14) out.push(...opts.app14);
+  // SOF0. Component identifiers are renumbered 0, 1, 2: the browser's
+  // encoder writes 1, 2, 3, every Adobe export measured writes 0, 1, 2.
   const nc = frame.comps.length;
   const sofLen = 8 + 3 * nc;
   push(0xFF, 0xC0, (sofLen >> 8) & 0xFF, sofLen & 0xFF, 8,
        (frame.h >> 8) & 0xFF, frame.h & 0xFF, (frame.w >> 8) & 0xFF, frame.w & 0xFF, nc);
-  for (const c of frame.comps) push(c.id, (c.h << 4) | c.v, c.tq);
-  // DHT: all four tables in one segment, again matching the exporter.
+  frame.comps.forEach((c, i) => push(i, (c.h << 4) | c.v, c.tq));
+  // DHT: all four tables in one segment, in the order libjpeg emits them.
   {
-    const tables = [
-      [0, 0, STD_DC_LUMA_BITS, STD_DC_LUMA_VALS],
-      [0, 1, STD_DC_CHROMA_BITS, STD_DC_CHROMA_VALS],
-      [1, 0, STD_AC_LUMA_BITS, STD_AC_LUMA_VALS],
-      [1, 1, STD_AC_CHROMA_BITS, STD_AC_CHROMA_VALS],
+    const dht = [
+      [0, 0, tables[0]], [1, 0, tables[1]],
+      [0, 1, tables[2]], [1, 1, tables[3]],
     ];
-    const len = 2 + tables.reduce((n, [, , bits, vals]) => n + 1 + 16 + vals.length, 0);
+    const len = 2 + dht.reduce((n, [, , t]) => n + 1 + 16 + t.vals.length, 0);
     push(0xFF, 0xC4, (len >> 8) & 0xFF, len & 0xFF);
-    for (const [tc, th, bits, vals] of tables) push((tc << 4) | th, ...bits, ...vals);
+    for (const [tc, th, t] of dht) push((tc << 4) | th, ...t.bits, ...t.vals);
   }
   // SOS
   const sosLen = 6 + 2 * nc;
   push(0xFF, 0xDA, (sosLen >> 8) & 0xFF, sosLen & 0xFF, nc);
-  for (const c of frame.comps) {
-    const sel = c === frame.comps[0] ? 0 : 1;
-    push(c.id, (sel << 4) | sel);
-  }
+  frame.comps.forEach((c, i) => {
+    const sel = i === 0 ? 0 : 1;
+    push(i, (sel << 4) | sel);
+  });
   push(0x00, 0x3F, 0x00);
   for (const b of bw.out) out.push(b);
   push(0xFF, 0xD9);

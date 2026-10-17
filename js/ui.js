@@ -7,15 +7,25 @@
 
 import {
   fmtBytes, escapeHtml, makeId, cryptoRandInt,
-  dataUrlToBlob, stripViaCanvas,
+  dataUrlToBlob, stripViaCanvas, makeAdobeThumbnail, insertAfterSoi, iccApp2Segment,
 } from './helpers.js';
 import { dumpExifSafe } from './exif-writer.js';
-import { buildXmpPacket, xmpSegment } from './provenance.js';
+import { buildXmpPacket, xmpSegment, buildPhotoshopApp13 } from './provenance.js';
 import {
-  generateFake, readBackExifStrict,
+  generateFake, makePersona, readBackExifStrict,
   parseFileExif, renderMeta,
 } from './exif.js';
 import { ICONS } from './icons.js';
+
+/** Wrap a serialised TIFF block ("Exif\0\0" + data) as an APP1 segment. */
+function exifApp1Segment(tiffStr) {
+  const len = tiffStr.length + 2;
+  const seg = new Uint8Array(2 + len);
+  seg[0] = 0xFF; seg[1] = 0xE1;
+  seg[2] = (len >> 8) & 0xFF; seg[3] = len & 0xFF;
+  for (let i = 0; i < tiffStr.length; i++) seg[4 + i] = tiffStr.charCodeAt(i) & 0xFF;
+  return seg;
+}
 
 export const S = {
   items: [],
@@ -80,7 +90,9 @@ function getOutputName(item) {
   const mm = p(d.getMinutes());
   const ss = p(d.getSeconds());
   const ms = String(item?.fakeSubSec ?? cryptoRandInt(0, 999)).padStart(3, '0');
-  const seq = cryptoRandInt(1000, 9999);
+  // Frame counters run in capture order across a batch (assigned after a
+  // batch run); a single image gets a random one.
+  const seq = item?.fakeSeq ?? cryptoRandInt(1000, 9999);
 
   // Matches the EXIF Make, which is the manufacturer's own spelling —
   // "samsung" lowercase, "NIKON CORPORATION", "SONY".
@@ -310,7 +322,7 @@ function downloadBlob(blob, name) {
 }
 
 async function processRandomizeItem(item, options = {}) {
-  const { deferRender = false } = options;
+  const { deferRender = false, persona = null } = options;
   item.processing = true;
   item.error = null;
   if (!deferRender) renderCurrentItem();
@@ -327,43 +339,43 @@ async function processRandomizeItem(item, options = {}) {
       }
     }
 
-    const fake = generateFake({ originalDate });
-    // The XMP packet rides along with the render, because the container is
-    // written there and it has to carry the same dates and lens as the EXIF.
-    const camWithIso = {
-      ...fake.cam,
-      iso: fake.display.ISO,
-      xmpSegment: xmpSegment(buildXmpPacket({
-        capture: fake.capture,
-        exportAt: fake.exportAt,
-        offsetCapture: fake.offset,
-        offsetExport: fake.exportOffset,
-        subsec: fake.subsec,
-        make: fake.cam.make,
-        model: fake.cam.model,
-        lens: fake.lens,
-        editor: fake.editor,
-        raw: fake.cam.raw,
-        scene: fake.scene,
-      })),
-    };
-    const canvasResult = await stripViaCanvas(item.previewUrl, camWithIso);
+    const fake = generateFake({ originalDate, persona, sourceName: item.file.name });
+    // Render the exporter's pixel container (DQT, DRI, APP14, SOF0, DHT, SOS).
+    const canvasResult = await stripViaCanvas(item.previewUrl, { ...fake.cam, iso: fake.display.ISO });
     const cleanJpeg = canvasResult.dataUrl;
 
     const px = window.piexif;
-    fake.piexif.Exif[px.ExifIFD.PixelXDimension] = canvasResult.width;
-    fake.piexif.Exif[px.ExifIFD.PixelYDimension] = canvasResult.height;
     fake.display.PixelXDimension = canvasResult.width;
     fake.display.PixelYDimension = canvasResult.height;
 
-    // No IFD1 thumbnail. Camera Raw and Lightroom exports do not embed one,
-    // and the one this tool used to write was encoded by the browser: it
-    // carried Chrome's JFIF header and an ICC profile whose copyright string
-    // read "Google Inc. 2016", inside every file, one `exiftool -b
-    // -ThumbnailImage` away. The GPS block is written once, by generateFake,
-    // rather than re-read and re-written in a second pass.
-    const bytes = dumpExifSafe(fake.piexif, px);
-    const modDataUrl = px.insert(bytes, cleanJpeg);
+    // An Adobe-encoded thumbnail, the same bytes in IFD1 and the Photoshop
+    // block, rendered from the image actually shipping. Adobe exports carry
+    // one; it is encoded the way the exporter encodes it, not by the browser.
+    const thumb = await makeAdobeThumbnail(cleanJpeg);
+    if (thumb) {
+      fake.piexif.thumbnail = thumb.binary;
+      fake.piexif['1st'][px.ImageIFD.Compression]    = 6;
+      fake.piexif['1st'][px.ImageIFD.XResolution]    = [72, 1];
+      fake.piexif['1st'][px.ImageIFD.YResolution]    = [72, 1];
+      fake.piexif['1st'][px.ImageIFD.ResolutionUnit] = 2;
+    }
+
+    // The four metadata segments, inserted after SOI in the order the measured
+    // exports show: Exif (little-endian, as every Adobe export is), the
+    // Photoshop APP13, the APP2 ICC profile, and the APP1 XMP packet.
+    const tiff = dumpExifSafe(fake.piexif, px, { littleEndian: true });
+    const exifApp1 = exifApp1Segment(tiff);
+    const app13 = buildPhotoshopApp13({
+      dpi: fake.editor.dpi, capture: fake.capture, offset: fake.offset,
+      thumb: thumb ? thumb.bytes : null,
+      thumbWidth: thumb ? thumb.width : 0, thumbHeight: thumb ? thumb.height : 0,
+    });
+    const xmp = xmpSegment(buildXmpPacket({
+      capture: fake.capture, exportAt: fake.exportAt,
+      offsetCapture: fake.offset, offsetExport: fake.exportOffset, subsec: fake.subsec,
+      lens: fake.lensMeta, editor: fake.editor, source: fake.source, scene: fake.scene, aux: fake.aux,
+    }));
+    const modDataUrl = insertAfterSoi(cleanJpeg, [exifApp1, app13, iccApp2Segment(), xmp]);
 
     const verified = await readBackExifStrict(modDataUrl);
 
@@ -417,7 +429,7 @@ async function processClearItem(item, options = {}) {
     // Same pixel pipeline, written as the export with its metadata removed:
     // no Exif, no XMP, no ICC profile, Adobe's APP14 left in place, which is
     // exactly what `exiftool -all=` leaves behind on a Camera Raw export.
-    const canvasResult = await stripViaCanvas(item.previewUrl, { strip: true });
+    const canvasResult = await stripViaCanvas(item.previewUrl, {});
     const newBlob = dataUrlToBlob(canvasResult.dataUrl);
 
     releaseProcessedResources(item);
@@ -495,11 +507,15 @@ export const App = {
     if (!S.items.length) return;
     let completed = 0;
 
+    // One persona for the whole batch: the same body and kit, the same city,
+    // one trip, one export session. Randomize Current stays independent.
+    const persona = makePersona();
+
     for (const item of S.items) {
       S.activeId = item.id;
       if (completed === 0 || completed % 4 === 0) renderCurrentItem();
       try {
-        await processRandomizeItem(item, { deferRender: true });
+        await processRandomizeItem(item, { deferRender: true, persona });
         completed++;
         if (completed % 4 === 0) {
           renderCurrentItem();
@@ -509,6 +525,13 @@ export const App = {
         showToast(`Batch failed for ${item.file.name}: ${e.message}`, 'error');
       }
     }
+
+    // Frame counters in capture order, from a random starting point, as a
+    // camera numbers a roll.
+    const done = S.items.filter(it => it.fakeExif && it.fakeDate instanceof Date)
+      .sort((a, b) => a.fakeDate - b.fakeDate);
+    let seq = cryptoRandInt(1000, 9000);
+    for (const it of done) { seq += cryptoRandInt(1, 4); it.fakeSeq = seq; }
 
     renderCurrentItem();
     showToast(`Randomized ${completed} image${completed === 1 ? '' : 's'} in the batch.`, 'success');

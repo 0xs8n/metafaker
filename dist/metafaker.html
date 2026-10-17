@@ -3336,6 +3336,47 @@ class BitWriter {
   flush() { while (this.n !== 0) this.write(1, 1); }
 }
 
+/**
+ * Optimal Huffman table for a symbol frequency count (JPEG Annex K.2, as
+ * implemented by libjpeg's jpeg_gen_optimal_table). `freq` has 257 entries;
+ * entry 256 is the reserved code point that keeps any real code from being
+ * all ones. Returns { bits[16], vals[] }.
+ */
+function optimalTable(freqIn) {
+  const freq = Int32Array.from(freqIn);
+  freq[256] = 1;
+  const codesize = new Int32Array(257);
+  const others = new Int32Array(257).fill(-1);
+  for (;;) {
+    let c1 = -1, c2 = -1, v = 0x7fffffff;
+    for (let i = 0; i <= 256; i++) if (freq[i] && freq[i] <= v) { v = freq[i]; c1 = i; }
+    v = 0x7fffffff;
+    for (let i = 0; i <= 256; i++) if (freq[i] && freq[i] <= v && i !== c1) { v = freq[i]; c2 = i; }
+    if (c2 < 0) break;
+    freq[c1] += freq[c2]; freq[c2] = 0;
+    codesize[c1]++;
+    while (others[c1] >= 0) { c1 = others[c1]; codesize[c1]++; }
+    others[c1] = c2;
+    codesize[c2]++;
+    while (others[c2] >= 0) { c2 = others[c2]; codesize[c2]++; }
+  }
+  const bits = new Int32Array(33);
+  for (let i = 0; i <= 256; i++) if (codesize[i]) bits[codesize[i]]++;
+  let i = 32;
+  while (i > 16) {
+    if (bits[i] > 0) {
+      let j = i - 2;
+      while (bits[j] === 0) j--;
+      bits[i] -= 2; bits[i - 1]++; bits[j + 1] += 2; bits[j]--;
+    } else i--;
+  }
+  while (bits[i] === 0) i--;
+  bits[i]--;                                   // drop the reserved code point
+  const vals = [];
+  for (let len = 1; len <= 32; len++) for (let s = 0; s < 256; s++) if (codesize[s] === len) vals.push(s);
+  return { bits: Array.from(bits.subarray(1, 17)), vals };
+}
+
 const extend = (v, t) => (v < (1 << (t - 1)) ? v - (1 << t) + 1 : v);
 const category = v => { let a = Math.abs(v), n = 0; while (a) { n++; a >>= 1; } return n; };
 const toBits = (v, s) => (v >= 0 ? v : v + (1 << s) - 1);
@@ -3354,14 +3395,20 @@ function decodeHuff(br, map) {
 /**
  * @param {Uint8Array} data  a baseline JPEG
  * @param {{luma:number[], chroma:number[]}} target  64-entry zigzag tables
+ * @param {{restartInterval?: number}} [opts]  MCUs between RSTn markers; 0 = none.
+ *   Adobe's exporter writes a DRI segment and restart markers, and the
+ *   re-encoder reproduces that: after every `restartInterval` MCUs the bit
+ *   stream is padded with 1-bits, an RSTn marker (n cycling 0–7) is written,
+ *   and the DC predictors reset.
  * @returns {Uint8Array|null}
  */
-function requantize(data, target) {
+function requantize(data, target, opts = {}) {
+  const restartInterval = Math.max(0, Math.floor(opts.restartInterval || 0));
   if (data[0] !== 0xFF || data[1] !== 0xD8) return null;
 
   const srcQ = {};           // id -> Int32Array(64)
   const dcTabs = {}, acTabs = {};
-  let frame = null, sosPos = -1, sos = null, restartInterval = 0;
+  let frame = null, sosPos = -1, sos = null, srcRestart = 0;
   const preSegments = [];    // APPn / COM to carry over verbatim
 
   let i = 2;
@@ -3409,8 +3456,8 @@ function requantize(data, target) {
     } else if (m === 0xC1 || m === 0xC2 || m === 0xC3 || (m >= 0xC5 && m <= 0xCF && m !== 0xC8)) {
       return null;                                       // not baseline sequential
     } else if (m === 0xDD) {
-      restartInterval = (data[body] << 8) | data[body + 1];
-      if (restartInterval !== 0) return null;            // restart markers: not handled
+      srcRestart = (data[body] << 8) | data[body + 1];
+      if (srcRestart !== 0) return null;                 // input restart markers: not handled
     } else if (m === 0xDA) {
       const n = data[body];
       const scan = [];
@@ -3420,9 +3467,9 @@ function requantize(data, target) {
       }
       sos = scan; sosPos = end;
       break;
-    } else if (m === 0xE0 || m === 0xEE || m === 0xFE) {
-      preSegments.push(data.subarray(i, end));
     }
+    // The browser's APP0/APP2 are not carried over: the caller supplies the
+    // exporter's own APP14 through opts.app14 and its metadata separately.
     i = end;
   }
   if (!frame || !sos || sosPos < 0) return null;
@@ -3484,17 +3531,66 @@ function requantize(data, target) {
     }
   }
 
+  // ── Huffman tables ──
+  // Adobe's exporter writes tables optimised for the image (its DHT runs
+  // 150–280 bytes); its thumbnails use the standard Annex K tables (416
+  // bytes). Both are reproduced: `optimizeHuffman` gathers the symbol
+  // statistics of the re-quantised coefficients and builds the tables the
+  // way libjpeg's jpeg_gen_optimal_table does.
+  let tables;
+  if (opts.optimizeHuffman !== false) {
+    const freq = [new Int32Array(257), new Int32Array(257), new Int32Array(257), new Int32Array(257)]; // dc0, ac0, dc1, ac1
+    const fPreds = {}; frame.comps.forEach(c => (fPreds[c.id] = { v: 0 }));
+    let fi = 0, fMcu = 0;
+    for (let my = 0; my < mcusY; my++) {
+      for (let mx = 0; mx < mcusX; mx++) {
+        if (restartInterval && fMcu > 0 && fMcu % restartInterval === 0) frame.comps.forEach(c => (fPreds[c.id].v = 0));
+        fMcu++;
+        for (const comp of frame.comps) {
+          const sel = comp === frame.comps[0] ? 0 : 1;
+          for (let n = 0; n < comp.v * comp.h; n++) {
+            const blk = blocks[fi++].blk;
+            const diff = blk[0] - fPreds[comp.id].v;
+            fPreds[comp.id].v = blk[0];
+            freq[sel * 2][category(diff)]++;
+            let run = 0;
+            for (let k = 1; k < 64; k++) {
+              if (blk[k] === 0) { run++; continue; }
+              while (run > 15) { freq[sel * 2 + 1][0xF0]++; run -= 16; }
+              freq[sel * 2 + 1][(run << 4) | category(blk[k])]++;
+              run = 0;
+            }
+            if (run > 0) freq[sel * 2 + 1][0x00]++;
+          }
+        }
+      }
+    }
+    tables = freq.map(f => optimalTable(f));
+  } else {
+    tables = [
+      { bits: STD_DC_LUMA_BITS, vals: STD_DC_LUMA_VALS },
+      { bits: STD_AC_LUMA_BITS, vals: STD_AC_LUMA_VALS },
+      { bits: STD_DC_CHROMA_BITS, vals: STD_DC_CHROMA_VALS },
+      { bits: STD_AC_CHROMA_BITS, vals: STD_AC_CHROMA_VALS },
+    ];
+  }
+  const dcEnc = [huffEncodeTable(tables[0].bits, tables[0].vals), huffEncodeTable(tables[2].bits, tables[2].vals)];
+  const acEnc = [huffEncodeTable(tables[1].bits, tables[1].vals), huffEncodeTable(tables[3].bits, tables[3].vals)];
+
   // ── re-encode ──
-  const dcEnc = [huffEncodeTable(STD_DC_LUMA_BITS, STD_DC_LUMA_VALS),
-                 huffEncodeTable(STD_DC_CHROMA_BITS, STD_DC_CHROMA_VALS)];
-  const acEnc = [huffEncodeTable(STD_AC_LUMA_BITS, STD_AC_LUMA_VALS),
-                 huffEncodeTable(STD_AC_CHROMA_BITS, STD_AC_CHROMA_VALS)];
   const bw = new BitWriter();
   const wPreds = {}; frame.comps.forEach(c => (wPreds[c.id] = { v: 0 }));
-  let bi = 0;
+  let bi = 0, mcuCount = 0, rstIndex = 0;
   try {
     for (let my = 0; my < mcusY; my++) {
       for (let mx = 0; mx < mcusX; mx++) {
+        if (restartInterval && mcuCount > 0 && mcuCount % restartInterval === 0) {
+          bw.flush();
+          bw.out.push(0xFF, 0xD0 + (rstIndex & 7));
+          rstIndex++;
+          frame.comps.forEach(c => (wPreds[c.id].v = 0));
+        }
+        mcuCount++;
         for (const comp of frame.comps) {
           const sel = comp === frame.comps[0] ? 0 : 1;
           for (let n = 0; n < comp.v * comp.h; n++) {
@@ -3540,31 +3636,37 @@ function requantize(data, target) {
       for (let k = 0; k < 64; k++) push(Math.max(1, Math.min(255, t[k])));
     }
   }
-  // SOF0
+  // DRI, as the exporter places it: after DQT, before the frame header.
+  if (restartInterval) {
+    push(0xFF, 0xDD, 0x00, 0x04, (restartInterval >> 8) & 0xFF, restartInterval & 0xFF);
+  }
+  // An APP14 handed in goes here, between DRI and SOF0, which is where the
+  // exporter puts it in its embedded thumbnails.
+  if (opts.app14) out.push(...opts.app14);
+  // SOF0. Component identifiers are renumbered 0, 1, 2: the browser's
+  // encoder writes 1, 2, 3, every Adobe export measured writes 0, 1, 2.
   const nc = frame.comps.length;
   const sofLen = 8 + 3 * nc;
   push(0xFF, 0xC0, (sofLen >> 8) & 0xFF, sofLen & 0xFF, 8,
        (frame.h >> 8) & 0xFF, frame.h & 0xFF, (frame.w >> 8) & 0xFF, frame.w & 0xFF, nc);
-  for (const c of frame.comps) push(c.id, (c.h << 4) | c.v, c.tq);
-  // DHT: all four tables in one segment, again matching the exporter.
+  frame.comps.forEach((c, i) => push(i, (c.h << 4) | c.v, c.tq));
+  // DHT: all four tables in one segment, in the order libjpeg emits them.
   {
-    const tables = [
-      [0, 0, STD_DC_LUMA_BITS, STD_DC_LUMA_VALS],
-      [0, 1, STD_DC_CHROMA_BITS, STD_DC_CHROMA_VALS],
-      [1, 0, STD_AC_LUMA_BITS, STD_AC_LUMA_VALS],
-      [1, 1, STD_AC_CHROMA_BITS, STD_AC_CHROMA_VALS],
+    const dht = [
+      [0, 0, tables[0]], [1, 0, tables[1]],
+      [0, 1, tables[2]], [1, 1, tables[3]],
     ];
-    const len = 2 + tables.reduce((n, [, , bits, vals]) => n + 1 + 16 + vals.length, 0);
+    const len = 2 + dht.reduce((n, [, , t]) => n + 1 + 16 + t.vals.length, 0);
     push(0xFF, 0xC4, (len >> 8) & 0xFF, len & 0xFF);
-    for (const [tc, th, bits, vals] of tables) push((tc << 4) | th, ...bits, ...vals);
+    for (const [tc, th, t] of dht) push((tc << 4) | th, ...t.bits, ...t.vals);
   }
   // SOS
   const sosLen = 6 + 2 * nc;
   push(0xFF, 0xDA, (sosLen >> 8) & 0xFF, sosLen & 0xFF, nc);
-  for (const c of frame.comps) {
-    const sel = c === frame.comps[0] ? 0 : 1;
-    push(c.id, (sel << 4) | sel);
-  }
+  frame.comps.forEach((c, i) => {
+    const sel = i === 0 ? 0 : 1;
+    push(i, (sel << 4) | sel);
+  });
   push(0x00, 0x3F, 0x00);
   for (const b of bw.out) out.push(b);
   push(0xFF, 0xD9);
@@ -3573,6 +3675,92 @@ function requantize(data, target) {
 }
 
 ;return { requantize };
+})();
+
+// ── js/rng.js ─────────────────────────────────────────────────────────
+__modules["rng"] = (function () {
+/**
+ * rng.js — One random source for everything the tool draws.
+ *
+ * Every choice in the output, from the camera to the per-pixel noise, used to
+ * come from Math.random, whose state is per page and in principle
+ * reconstructible from enough observed draws. Nothing here is believed to be
+ * exploitable that way, but a privacy tool should not have to argue the
+ * point. All draws now come from crypto.getRandomValues, refilled in blocks so
+ * the pixel loops, which draw tens of millions of times, stay fast.
+ */
+
+const BUF = new Uint32Array(8192);
+let pos = BUF.length;
+
+/** Uniform float in [0, 1). */
+function rnd() {
+  if (pos >= BUF.length) { crypto.getRandomValues(BUF); pos = 0; }
+  return BUF[pos++] / 4294967296;
+}
+
+/** Integer in [lo, hi], inclusive. */
+const randInt = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
+
+/** One element of a non-empty array. */
+const pick = a => a[Math.floor(rnd() * a.length)];
+
+;return { rnd, randInt, pick };
+})();
+
+// ── js/md5.js ─────────────────────────────────────────────────────────
+__modules["md5"] = (function () {
+/**
+ * md5.js — MD5 over a byte array, for the Photoshop IPTCDigest resource.
+ *
+ * Adobe writes an APP13 Photoshop block on every export whose 0x0425 resource
+ * is the MD5 of the IPTC data it carries. WebCrypto has no MD5, so this is
+ * the reference algorithm (RFC 1321), small and dependency-free.
+ */
+
+const S = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+           5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+           4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+           6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+const K = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0);
+
+const rotl = (x, c) => ((x << c) | (x >>> (32 - c))) >>> 0;
+
+/** @param {Uint8Array} bytes @returns {Uint8Array} 16-byte digest */
+function md5(bytes) {
+  const len = bytes.length;
+  const padded = new Uint8Array(((len + 8) >> 6 << 6) + 64);
+  padded.set(bytes);
+  padded[len] = 0x80;
+  const bits = len * 8;
+  const dv = new DataView(padded.buffer);
+  dv.setUint32(padded.length - 8, bits >>> 0, true);
+  dv.setUint32(padded.length - 4, Math.floor(bits / 4294967296), true);
+
+  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+  const M = new Uint32Array(16);
+  for (let off = 0; off < padded.length; off += 64) {
+    for (let i = 0; i < 16; i++) M[i] = dv.getUint32(off + i * 4, true);
+    let A = a0, B = b0, C = c0, D = d0;
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16)      { F = (B & C) | (~B & D); g = i; }
+      else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+      else if (i < 48) { F = B ^ C ^ D;          g = (3 * i + 5) % 16; }
+      else             { F = C ^ (B | ~D);       g = (7 * i) % 16; }
+      F = (F + A + K[i] + M[g]) >>> 0;
+      A = D; D = C; C = B;
+      B = (B + rotl(F, S[i])) >>> 0;
+    }
+    a0 = (a0 + A) >>> 0; b0 = (b0 + B) >>> 0; c0 = (c0 + C) >>> 0; d0 = (d0 + D) >>> 0;
+  }
+  const out = new Uint8Array(16);
+  const ov = new DataView(out.buffer);
+  ov.setUint32(0, a0, true); ov.setUint32(4, b0, true); ov.setUint32(8, c0, true); ov.setUint32(12, d0, true);
+  return out;
+}
+
+;return { md5 };
 })();
 
 // ── js/provenance.js ──────────────────────────────────────────────────
@@ -3601,27 +3789,112 @@ __modules["provenance"] = (function () {
  * Regenerated by scratchpad/dqt/gen_provenance.py.
  */
 
-/** Adobe's own quantization tables, zigzag order, from a real export. */
-const EDITOR_QTABLE = {
+/**
+ * Adobe's quantization tables, zigzag order, each read out of a real export.
+ * Three quality settings were seen across seven measured Camera Raw and
+ * Lightroom exports; drawing among them means the tool's output is not all
+ * at one quality. `q12` is the maximum (four exports), `q11` the next step
+ * (a Camera Raw 16.3 export), `q9` a lower Lightroom Classic export.
+ */
+const EDITOR_QTABLES = {
+  q12: {
+    luma: [
+        1,   1,   1,   1,   1,   1,   1,   1,
+        1,   1,   1,   1,   1,   1,   1,   1,
+        1,   1,   1,   1,   1,   1,   1,   1,
+        1,   1,   1,   1,   2,   1,   1,   1,
+        1,   1,   1,   2,   2,   2,   2,   2,
+        2,   2,   2,   2,   2,   2,   2,   2,
+        2,   3,   3,   3,   3,   3,   3,   3,
+        3,   3,   3,   3,   3,   3,   3,   3,
+    ],
+    chroma: [
+        1,   1,   1,   1,   1,   1,   2,   1,
+        1,   2,   3,   2,   2,   2,   3,   3,
+        3,   3,   3,   3,   3,   3,   3,   3,
+        3,   3,   3,   3,   3,   3,   3,   3,
+        3,   3,   3,   3,   3,   3,   3,   3,
+        3,   3,   3,   3,   3,   3,   3,   3,
+        3,   3,   3,   3,   3,   3,   3,   3,
+        3,   3,   3,   3,   3,   3,   3,   3,
+    ],
+  },
+  q11: {
+    luma: [
+        1,   1,   1,   1,   1,   1,   2,   1,
+        1,   2,   3,   2,   2,   2,   3,   3,
+        3,   3,   3,   3,   3,   4,   4,   4,
+        4,   4,   4,   4,   5,   4,   4,   4,
+        4,   4,   4,   5,   6,   5,   5,   5,
+        5,   5,   6,   7,   7,   7,   7,   7,
+        7,   8,   8,   8,   8,   8,   8,   8,
+        8,   8,   8,   8,   8,   8,   8,   8,
+    ],
+    chroma: [
+        1,   2,   2,   4,   2,   4,   7,   4,
+        4,   7,   8,   7,   7,   7,   8,   8,
+        8,   8,   8,   8,   8,   8,   8,   8,
+        8,   8,   8,   8,   8,   8,   8,   8,
+        8,   8,   8,   8,   8,   8,   8,   8,
+        8,   8,   8,   8,   8,   8,   8,   8,
+        8,   8,   8,   8,   8,   8,   8,   8,
+        8,   8,   8,   8,   8,   8,   8,   8,
+    ],
+  },
+  q9: {
+    luma: [
+       10,   7,   7,  11,   8,  11,  18,  10,
+       10,  18,  22,  17,  14,  17,  22,  27,
+       23,  22,  22,  23,  27,  34,  23,  23,
+       23,  23,  23,  34,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+    chroma: [
+       11,  14,  14,  31,  19,  31,  34,  24,
+       24,  34,  20,  14,  14,  14,  20,  20,
+       14,  14,  14,  14,  20,  17,  12,  12,
+       12,  12,  12,  17,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+  },
+};
+
+/** One of the measured qualities, weighted toward the maximum as the exports were. */
+function pickEditorQtable() {
+  const r = rnd();
+  return r < 0.5 ? EDITOR_QTABLES.q12 : r < 0.85 ? EDITOR_QTABLES.q11 : EDITOR_QTABLES.q9;
+}
+
+/**
+ * The tables Adobe uses for the 256-pixel thumbnail it embeds twice (IFD1 and
+ * the Photoshop block). Identical in all seven exports measured.
+ */
+const THUMB_QTABLE = {
   luma: [
-      1,   1,   1,   1,   1,   1,   2,   1,
-      1,   2,   3,   2,   2,   2,   3,   3,
-      3,   3,   3,   3,   3,   4,   4,   4,
-      4,   4,   4,   4,   5,   4,   4,   4,
-      4,   4,   4,   5,   6,   5,   5,   5,
-      5,   5,   6,   7,   7,   7,   7,   7,
-      7,   8,   8,   8,   8,   8,   8,   8,
-      8,   8,   8,   8,   8,   8,   8,   8,
+      6,   4,   4,   4,   5,   4,   6,   5,
+      5,   6,   9,   6,   5,   6,   9,  11,
+      8,   6,   6,   8,  11,  12,  10,  10,
+     11,  10,  10,  12,  16,  12,  12,  12,
+     12,  12,  12,  16,  12,  12,  12,  12,
+     12,  12,  12,  12,  12,  12,  12,  12,
+     12,  12,  12,  12,  12,  12,  12,  12,
+     12,  12,  12,  12,  12,  12,  12,  12,
   ],
   chroma: [
-      1,   2,   2,   4,   2,   4,   7,   4,
-      4,   7,   8,   7,   7,   7,   8,   8,
-      8,   8,   8,   8,   8,   8,   8,   8,
-      8,   8,   8,   8,   8,   8,   8,   8,
-      8,   8,   8,   8,   8,   8,   8,   8,
-      8,   8,   8,   8,   8,   8,   8,   8,
-      8,   8,   8,   8,   8,   8,   8,   8,
-      8,   8,   8,   8,   8,   8,   8,   8,
+      7,   7,   7,  13,  12,  13,  24,  16,
+     16,  24,  20,  14,  14,  14,  20,  20,
+     14,  14,  14,  14,  20,  17,  12,  12,
+     12,  12,  12,  17,  17,  12,  12,  12,
+     12,  12,  12,  17,  12,  12,  12,  12,
+     12,  12,  12,  12,  12,  12,  12,  12,
+     12,  12,  12,  12,  12,  12,  12,  12,
+     12,  12,  12,  12,  12,  12,  12,  12,
   ],
 };
 
@@ -3631,11 +3904,25 @@ const EDITOR_QTABLE = {
  * a single fixed Software string on every file the tool produced was a
  * perfect key for grouping them.
  */
+const { rnd } = __modules["rng"];
+const { md5 } = __modules["md5"];
+
+// Two Adobe identities were measured, both on XMP Core 7.0 and both writing
+// the same container: Camera Raw 16.x, which is how a raw file from a camera
+// body gets exported, and Lightroom 7.x, which is how a phone JPEG does.
+// Camera Raw writes 300 ppi, Lightroom 240.
 const ACR_VERSIONS = ['16.1', '16.2', '16.3', '16.3', '16.4', '16.5'];
-function pickEditor() {
-  const version  = ACR_VERSIONS[Math.floor(Math.random() * ACR_VERSIONS.length)];
-  const platform = Math.random() < 0.7 ? 'Windows' : 'Macintosh';
-  return { version, platform, software: `Adobe Photoshop Camera Raw ${version} (${platform})` };
+const LR_VERSIONS  = [['7.0', '16.0'], ['7.1.2', '16.1'], ['7.2', '16.2'], ['7.3', '16.3'], ['7.4', '16.4'], ['7.5', '16.5']];
+function pickEditor(kind = 'acr') {
+  const platform = rnd() < 0.6 ? 'Windows' : 'Macintosh';
+  if (kind === 'lr') {
+    const [version, crsVersion] = LR_VERSIONS[Math.floor(rnd() * LR_VERSIONS.length)];
+    return { kind, version, crsVersion, platform, dpi: 240,
+             software: `Adobe Lightroom ${version} (${platform})` };
+  }
+  const version = ACR_VERSIONS[Math.floor(rnd() * ACR_VERSIONS.length)];
+  return { kind: 'acr', version, crsVersion: version, platform, dpi: 300,
+           software: `Adobe Photoshop Camera Raw ${version} (${platform})` };
 }
 const XMP_TOOLKIT = "Adobe XMP Core 7.0-c000 1.000000, 0000/00/00-00:00:00        ";
 
@@ -3719,60 +4006,62 @@ function xmpDate(d, offset, subsec) {
 }
 
 const hex = (n) => Array.from({ length: n },
-  () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
+  () => '0123456789abcdef'[Math.floor(rnd() * 16)]).join('');
 const uuid = () => `${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`;
 const xml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-const pickOne = (a) => a[Math.floor(Math.random() * a.length)];
+const pickOne = (a) => a[Math.floor(rnd() * a.length)];
 const signed = (n) => (n > 0 ? `+${n}` : String(n));
 
-/** Rational list in the form aux:LensInfo uses: "24/1 70/1 28/10 178/100" — the same encoding as the EXIF LensSpecification. */
-function lensInfoString(spec) {
-  const rat = v => (Number.isInteger(v) ? `${v}/1`
-    : Math.abs(v * 10 - Math.round(v * 10)) < 1e-9 ? `${Math.round(v * 10)}/10`
-    : `${Math.round(v * 100)}/100`);
-  return spec.map(rat).join(' ');
-}
-
 /**
- * The Camera Raw settings block.
+ * The develop-settings attributes, in the order Adobe writes them.
  *
- * A packet whose CreatorTool is Camera Raw but which carries no crs:
- * namespace is a packet Camera Raw did not write: the develop settings are the
- * bulk of every real one. These are the defaults a raw file opens with, plus
- * the handful of sliders people actually move, with HasSettings and
- * AlreadyApplied set as they are on an export. A JPEG source opens with the
- * "Embedded" profile, no white-balance numbers and sharpening at zero.
+ * Measured from a Camera Raw 16.3 export of a raw file and a Lightroom 7.1.2
+ * export of a phone JPEG. A raw opens with Temperature/Tint, sharpening at
+ * 40 and colour noise reduction on; a JPEG opens with IncrementalTemperature
+ * and IncrementalTint, the three legacy keys Shadows/Brightness/Contrast, and
+ * sharpening at zero. A few sliders are moved at random, as people do.
  */
-function crsAttributes({ editor, raw, scene }) {
-  const isRaw = raw !== 'image/jpeg';
+function crsAttributes({ editor, isRaw, scene, cameraProfile }) {
   const kelvin = { daylight: [5200, 5900], overcast: [5800, 6800], indoor: [2900, 3800],
                    dim: [2800, 3600], night: [2600, 3600] }[scene] || [5000, 5600];
-  const temp = kelvin[0] + Math.floor(Math.random() * (kelvin[1] - kelvin[0]));
-  const tint = Math.floor(Math.random() * 21) - 5;
-  const exposure   = pickOne(['0.00', '0.00', '0.00', '+0.25', '-0.30', '+0.50', '-0.50', '+0.15', '+0.35']);
-  const highlights = pickOne(['0', '0', '-20', '-40', '-15', '-30']);
-  const shadows    = pickOne(['0', '0', '+20', '+35', '+10', '+25']);
-  const clarity    = pickOne(['0', '0', '0', '+10', '+15']);
-  const vibrance   = pickOne(['0', '0', '+10', '+15', '+5']);
+  const temp = kelvin[0] + Math.floor(rnd() * (kelvin[1] - kelvin[0]));
+  const tint = Math.floor(rnd() * 21) - 5;
+  const exposure   = pickOne(['0.00', '0.00', '0.00', '+0.25', '-0.30', '+0.50', '-0.50', '+0.15', '+0.35', '+0.80']);
+  const contrast   = pickOne(['0', '0', '0', '+10', '+20', '+6']);
+  const highlights = pickOne(['0', '0', '-20', '-40', '-15', '-30', '-7']);
+  const shadows    = pickOne(['0', '0', '+20', '+35', '+10', '+25', '+21']);
+  const whites     = pickOne(['0', '0', '0', '-20', '+23']);
+  const blacks     = pickOne(['0', '0', '0', '+20', '-18']);
+  const texture    = pickOne(['0', '0', '0', '+30']);
+  const clarity    = pickOne(['0', '0', '0', '+10', '+15', '+30']);
+  const dehaze     = pickOne(['0', '0', '0', '+10']);
+  const vibrance   = pickOne(['0', '0', '+10', '+15', '+5', '+24', '+9']);
+  const saturation = pickOne(['0', '0', '0', '+14', '+1']);
+  const lumSmooth  = isRaw && rnd() < 0.3 ? pickOne(['10', '20', '40']) : '0';
 
   const a = [
-    ['crs:Version', editor.version],
-    ['crs:ProcessVersion', '11.0'],
+    ['crs:Version', editor.crsVersion],
+    ['crs:ProcessVersion', '15.4'],
     ['crs:WhiteBalance', 'As Shot'],
   ];
-  if (isRaw) a.push(['crs:Temperature', String(temp)], ['crs:Tint', signed(tint)]);
+  if (isRaw) {
+    a.push(['crs:Temperature', String(temp)], ['crs:Tint', signed(tint)]);
+  } else {
+    a.push(['crs:IncrementalTemperature', '0'], ['crs:IncrementalTint', '0'],
+           ['crs:Shadows', '5'], ['crs:Brightness', '+50'], ['crs:Contrast', '+25']);
+  }
   a.push(
     ['crs:Exposure2012', exposure],
-    ['crs:Contrast2012', '0'],
+    ['crs:Contrast2012', contrast],
     ['crs:Highlights2012', highlights],
     ['crs:Shadows2012', shadows],
-    ['crs:Whites2012', '0'],
-    ['crs:Blacks2012', '0'],
-    ['crs:Texture', '0'],
+    ['crs:Whites2012', whites],
+    ['crs:Blacks2012', blacks],
+    ['crs:Texture', texture],
     ['crs:Clarity2012', clarity],
-    ['crs:Dehaze', '0'],
+    ['crs:Dehaze', dehaze],
     ['crs:Vibrance', vibrance],
-    ['crs:Saturation', '0'],
+    ['crs:Saturation', saturation],
     ['crs:ParametricShadows', '0'],
     ['crs:ParametricDarks', '0'],
     ['crs:ParametricLights', '0'],
@@ -3780,18 +4069,20 @@ function crsAttributes({ editor, raw, scene }) {
     ['crs:ParametricShadowSplit', '25'],
     ['crs:ParametricMidtoneSplit', '50'],
     ['crs:ParametricHighlightSplit', '75'],
-    ['crs:Sharpness', isRaw ? '40' : '0'],
-    ['crs:SharpenRadius', '+1.0'],
-    ['crs:SharpenDetail', '25'],
-    ['crs:SharpenEdgeMasking', '0'],
-    ['crs:LuminanceSmoothing', '0'],
-    ['crs:ColorNoiseReduction', isRaw ? '25' : '0'],
-    ['crs:ColorNoiseReductionDetail', '50'],
-    ['crs:ColorNoiseReductionSmoothness', '50'],
   );
-  for (const c of ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta']) {
-    a.push([`crs:HueAdjustment${c}`, '0'], [`crs:SaturationAdjustment${c}`, '0'], [`crs:LuminanceAdjustment${c}`, '0']);
+  if (isRaw) {
+    a.push(['crs:Sharpness', '40'], ['crs:SharpenRadius', '+1.0'], ['crs:SharpenDetail', '25'],
+           ['crs:SharpenEdgeMasking', '0'], ['crs:LuminanceSmoothing', lumSmooth]);
+    if (lumSmooth !== '0') a.push(['crs:LuminanceNoiseReductionDetail', '50'], ['crs:LuminanceNoiseReductionContrast', '0']);
+    a.push(['crs:ColorNoiseReduction', pickOne(['25', '25', '45'])],
+           ['crs:ColorNoiseReductionDetail', '50'], ['crs:ColorNoiseReductionSmoothness', '50']);
+  } else {
+    a.push(['crs:Sharpness', '0'], ['crs:LuminanceSmoothing', '0'], ['crs:ColorNoiseReduction', '0']);
   }
+  const hues = ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta'];
+  for (const c of hues) a.push([`crs:HueAdjustment${c}`, '0']);
+  for (const c of hues) a.push([`crs:SaturationAdjustment${c}`, '0']);
+  for (const c of hues) a.push([`crs:LuminanceAdjustment${c}`, '0']);
   a.push(
     ['crs:SplitToningShadowHue', '0'],
     ['crs:SplitToningShadowSaturation', '0'],
@@ -3834,11 +4125,19 @@ function crsAttributes({ editor, raw, scene }) {
     ['crs:GreenSaturation', '0'],
     ['crs:BlueHue', '0'],
     ['crs:BlueSaturation', '0'],
+    ['crs:HDREditMode', '0'],
     ['crs:ConvertToGrayscale', 'False'],
+    ['crs:OverrideLookVignette', 'False'],
     ['crs:ToneCurveName2012', 'Linear'],
-    ['crs:CameraProfile', isRaw ? 'Adobe Color' : 'Embedded'],
+    ['crs:CameraProfile', isRaw ? cameraProfile : 'Embedded'],
     ['crs:CameraProfileDigest', isRaw ? hex(32).toUpperCase() : '54650A341B5B5CCAE8442D0B43A92BCE'],
     ['crs:HasSettings', 'True'],
+    ['crs:CropTop', '0'],
+    ['crs:CropLeft', '0'],
+    ['crs:CropBottom', '1'],
+    ['crs:CropRight', '1'],
+    ['crs:CropAngle', '0'],
+    ['crs:CropConstrainToWarp', '0'],
     ['crs:HasCrop', 'False'],
     ['crs:AlreadyApplied', 'True'],
   );
@@ -3849,27 +4148,66 @@ const TONE_CURVES = ['ToneCurvePV2012', 'ToneCurvePV2012Red', 'ToneCurvePV2012Gr
   .map(n => `   <crs:${n}>\n    <rdf:Seq>\n     <rdf:li>0, 0</rdf:li>\n     <rdf:li>255, 255</rdf:li>\n    </rdf:Seq>\n   </crs:${n}>`)
   .join('\n');
 
+const POINT_COLORS = `   <crs:PointColors>\n    <rdf:Seq>\n     <rdf:li>${Array(19).fill('-1.000000').join(', ')}</rdf:li>\n    </rdf:Seq>\n   </crs:PointColors>`;
+
+/** Adobe pads every packet with whitespace: 40 lines of 100 spaces and a short last line, 4097 bytes in all. */
+const XMP_PADDING = '\n' + (' '.repeat(100) + '\n').repeat(40) + ' '.repeat(55) + '\n';
+
 /**
- * Build the XMP packet an export carries.
+ * Build the XMP packet an export carries, in the measured form.
  *
- * Namespaces, ordering and the xmpMM identifiers follow a real Camera Raw
- * packet. The capture time goes to CreateDate and DateCreated; the export
- * time, which is later, goes to ModifyDate, MetadataDate and the history
- * entry — on the earlier version all four were the capture time to the
- * second, which no export produces. The history names the raw format the
- * claimed camera actually shoots. DocumentID and InstanceID match, as they do
- * in a file exported once and not edited since.
+ * Two sources were measured: a Camera Raw export of a raw file, whose packet
+ * leads with xmp:ModifyDate and carries the aux: block the raw supplied, and
+ * a Lightroom export of a phone JPEG, which leads with xmp:CreatorTool. The
+ * capture time goes to CreateDate and DateCreated; the export time to
+ * ModifyDate, MetadataDate and the history entry. History entries are in
+ * Adobe's compact attribute form, followed by DerivedFrom, the four tone
+ * curves and PointColors, then the padding.
  */
 function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport, subsec,
-                                 make, model, lens, editor, raw, scene }) {
+                                 lens, editor, source, scene, aux = {} }) {
   const id = uuid();
   const created  = xmpDate(capture, offsetCapture, subsec);
   const modified = xmpDate(exportAt, offsetExport);
-  const source   = raw || 'image/jpeg';
-  const lensAttrs = [];
-  if (lens?.auxLens) lensAttrs.push(`   aux:Lens="${xml(lens.auxLens)}"`);
-  if (lens?.spec)    lensAttrs.push(`   aux:LensInfo="${lensInfoString(lens.spec)}"`);
-  if (lens?.model)   lensAttrs.push(`   exifEX:LensModel="${xml(lens.model)}"`);
+  const original = hex(32).toUpperCase();
+  const isRaw = !!source.raw;
+  const A = [];
+  if (isRaw) {
+    A.push(['xmp:ModifyDate', modified], ['xmp:CreateDate', created],
+           ['xmp:CreatorTool', editor.software], ['xmp:MetadataDate', modified]);
+    if (aux.serialNumber) A.push(['aux:SerialNumber', aux.serialNumber]);
+    if (lens?.lensInfo)   A.push(['aux:LensInfo', lens.lensInfo]);
+    if (lens?.auxLens)    A.push(['aux:Lens', xml(lens.auxLens)]);
+    if (aux.lensSerial)   A.push(['aux:LensSerialNumber', aux.lensSerial]);
+    A.push(['aux:ImageNumber', '0'],
+           ['aux:ApproximateFocusDistance', aux.focusDistance || '4294967295/1'],
+           ['aux:FlashCompensation', '0/1']);
+    if (aux.firmware) A.push(['aux:Firmware', aux.firmware]);
+    if (aux.corrected) A.push(['aux:DistortionCorrectionAlreadyApplied', 'True'],
+                              ['aux:LateralChromaticAberrationCorrectionAlreadyApplied', 'True'],
+                              ['aux:VignetteCorrectionAlreadyApplied', 'True']);
+    if (lens?.model) A.push(['exifEX:LensModel', xml(lens.model)]);
+  } else {
+    A.push(['xmp:CreatorTool', editor.software], ['xmp:ModifyDate', modified],
+           ['xmp:CreateDate', created], ['xmp:MetadataDate', modified]);
+    if (lens?.lensInfo) A.push(['aux:LensInfo', lens.lensInfo]);
+    if (lens?.auxLens)  A.push(['aux:Lens', xml(lens.auxLens)]);
+    if (lens?.model)    A.push(['exifEX:LensModel', xml(lens.model)]);
+  }
+  A.push(['photoshop:DateCreated', created],
+         ['xmpMM:DocumentID', `xmp.did:${id}`],
+         ['xmpMM:OriginalDocumentID', original],
+         ['xmpMM:InstanceID', `xmp.iid:${id}`],
+         ['dc:format', 'image/jpeg'],
+         ['crs:RawFileName', xml(source.fileName)]);
+  const attrs = A.map(([k, v]) => `   ${k}="${v}"`).join('\n');
+  const crs = crsAttributes({ editor, isRaw, scene, cameraProfile: source.cameraProfile || 'Adobe Color' });
+  const derivedParams = isRaw
+    ? `converted from ${source.mime} to image/jpeg, saved to new location`
+    : 'saved to new location';
+  const derivedFrom = isRaw
+    ? `   <xmpMM:DerivedFrom\n    stRef:documentID="${original}"\n    stRef:originalDocumentID="${original}"/>`
+    : `   <xmpMM:DerivedFrom\n    stRef:instanceID="xmp.iid:${uuid()}"\n    stRef:documentID="xmp.did:${uuid()}"\n    stRef:originalDocumentID="${original}"/>`;
   return `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="${XMP_TOOLKIT}">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
@@ -3880,36 +4218,85 @@ function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport, subsec
     xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
     xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"
     xmlns:stEvt="http://ns.adobe.com/xap/1.0/sType/ResourceEvent#"
+    xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
     xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
-   xmp:ModifyDate="${modified}"
-   xmp:CreateDate="${created}"
-   xmp:MetadataDate="${modified}"
-   xmp:CreatorTool="${editor.software}"
-${lensAttrs.join('\n')}${lensAttrs.length ? '\n' : ''}   photoshop:DateCreated="${created}"
-   xmpMM:DocumentID="xmp.did:${id}"
-   xmpMM:InstanceID="xmp.iid:${id}"
-   xmpMM:OriginalDocumentID="${hex(32).toUpperCase()}"
-${crsAttributes({ editor, raw: source, scene })}>
+${attrs}
+${crs}>
    <xmpMM:History>
     <rdf:Seq>
-     <rdf:li rdf:parseType="Resource">
-      <stEvt:action>derived</stEvt:action>
-      <stEvt:parameters>converted from ${source} to image/jpeg, saved to new location</stEvt:parameters>
-     </rdf:li>
-     <rdf:li rdf:parseType="Resource">
-      <stEvt:action>saved</stEvt:action>
-      <stEvt:instanceID>xmp.iid:${id}</stEvt:instanceID>
-      <stEvt:when>${modified}</stEvt:when>
-      <stEvt:softwareAgent>${editor.software}</stEvt:softwareAgent>
-      <stEvt:changed>/</stEvt:changed>
-     </rdf:li>
+     <rdf:li
+      stEvt:action="derived"
+      stEvt:parameters="${derivedParams}"/>
+     <rdf:li
+      stEvt:action="saved"
+      stEvt:instanceID="xmp.iid:${id}"
+      stEvt:when="${modified}"
+      stEvt:softwareAgent="${editor.software}"
+      stEvt:changed="/"/>
     </rdf:Seq>
    </xmpMM:History>
+${derivedFrom}
 ${TONE_CURVES}
+${POINT_COLORS}
   </rdf:Description>
  </rdf:RDF>
-</x:xmpmeta>
-<?xpacket end="w"?>`;
+</x:xmpmeta>${XMP_PADDING}<?xpacket end="w"?>`;
+}
+
+// ── Photoshop APP13 block ────────────────────────────────────────
+
+const be32 = n => [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF];
+const be16 = n => [(n >> 8) & 0xFF, n & 0xFF];
+
+/** One "8BIM" image resource with an empty name, padded to an even length. */
+function resource(id, data) {
+  const out = [0x38, 0x42, 0x49, 0x4D, ...be16(id), 0x00, 0x00, ...be32(data.length), ...data];
+  if (data.length % 2) out.push(0);
+  return out;
+}
+
+/** One IPTC dataset: 0x1C, record, dataset, length, bytes. */
+function dataset(rec, ds, bytes) {
+  return [0x1C, rec, ds, ...be16(bytes.length), ...bytes];
+}
+
+/**
+ * The APP13 Photoshop segment every Adobe export carries, measured from
+ * seven of them: a resolution-info resource (the export ppi, inches), the
+ * IPTC block (UTF-8 marker, record version 4, capture date and time with
+ * zone, and the digital-creation pair), the thumbnail resource (a 28-byte
+ * header then the very JPEG that sits in IFD1), and the MD5 of the IPTC
+ * block as IPTCDigest. Order and encodings as in the files.
+ */
+function buildPhotoshopApp13({ dpi, capture, offset, thumb, thumbWidth, thumbHeight }) {
+  const pad = n => String(n).padStart(2, '0');
+  const dateStr = `${capture.getFullYear()}${pad(capture.getMonth() + 1)}${pad(capture.getDate())}`;
+  const timeStr = `${pad(capture.getHours())}${pad(capture.getMinutes())}${pad(capture.getSeconds())}${(offset || '+00:00').replace(':', '')}`;
+  const ascii = s => Array.from(s, c => c.charCodeAt(0) & 0xFF);
+
+  const res = [];
+  res.push(...resource(0x03ED, [...be32(dpi << 16), 0, 1, 0, 1, ...be32(dpi << 16), 0, 1, 0, 1]));
+  const iptc = [
+    ...dataset(1, 90, [0x1B, 0x25, 0x47]),
+    ...dataset(2, 0, [0x00, 0x04]),
+    ...dataset(2, 55, ascii(dateStr)),
+    ...dataset(2, 60, ascii(timeStr)),
+    ...dataset(2, 62, ascii(dateStr)),
+    ...dataset(2, 63, ascii(timeStr)),
+  ];
+  res.push(...resource(0x0404, iptc));
+  if (thumb && thumb.length) {
+    const widthBytes = Math.floor((thumbWidth * 24 + 31) / 32) * 4;
+    const header = [...be32(1), ...be32(thumbWidth), ...be32(thumbHeight), ...be32(widthBytes),
+                    ...be32(widthBytes * thumbHeight), ...be32(thumb.length), ...be16(24), ...be16(1)];
+    res.push(...resource(0x040C, [...header, ...thumb]));
+  }
+  res.push(...resource(0x0425, Array.from(md5(Uint8Array.from(iptc)))));
+
+  const body = [...ascii('Photoshop 3.0\0'), ...res];
+  const len = body.length + 2;
+  return Uint8Array.from([0xFF, 0xED, ...be16(len), ...body]);
 }
 
 /**
@@ -3932,7 +4319,7 @@ function xmpSegment(packet) {
   return seg;
 }
 
-;return { EDITOR_QTABLE, pickEditor, ADOBE_APP14, editorIcc, buildXmpPacket, xmpSegment };
+;return { EDITOR_QTABLES, pickEditorQtable, THUMB_QTABLE, pickEditor, ADOBE_APP14, editorIcc, buildXmpPacket, buildPhotoshopApp13, xmpSegment };
 })();
 
 // ── js/helpers.js ─────────────────────────────────────────────────────
@@ -3942,28 +4329,20 @@ __modules["helpers"] = (function () {
  */
 
 const { requantize } = __modules["jpeg-requantize"];
-const { EDITOR_QTABLE, ADOBE_APP14, editorIcc, xmpSegment } = __modules["provenance"];
+const { pickEditorQtable, THUMB_QTABLE, ADOBE_APP14, editorIcc, xmpSegment } = __modules["provenance"];
+const { rnd, pick, randInt } = __modules["rng"];
+
+/** The exporter's sRGB ICC profile as a ready-to-insert APP2 segment. */
+function iccApp2Segment() {
+  return iccSegments(editorIcc())[0];
+}
 
 // ── Random & Math ────────────────────────────────────────────────
 
-const pick = a => a[Math.floor(Math.random() * a.length)];
-const randInt = (lo, hi) => Math.floor(Math.random() * (hi - lo + 1)) + lo;
+
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
-
-/** Cryptographically secure random float in [0, 1). */
-function cryptoRandFloat() {
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return buf[0] / (0xFFFFFFFF + 1);
-}
-
-/** Cryptographically secure random integer in [lo, hi]. */
-function cryptoRandInt(lo, hi) {
-  const range = hi - lo + 1;
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return lo + (buf[0] % range);
-}
+const cryptoRandFloat = rnd;
+const cryptoRandInt = randInt;
 
 // ── GPS Utilities ────────────────────────────────────────────────
 
@@ -3982,14 +4361,14 @@ function cryptoRandInt(lo, hi) {
  * photographed city's clock, not the machine's.
  */
 function jitterLocation(base) {
-  const lat = base.lat + (Math.random() - 0.5) * 0.1;
-  const lon = base.lon + (Math.random() - 0.5) * 0.1;
+  const lat = base.lat + (rnd() - 0.5) * 0.1;
+  const lon = base.lon + (rnd() - 0.5) * 0.1;
   return {
     city: base.city,
     tz: base.tz,
     lat: Number(clamp(lat, -89.99, 89.99).toFixed(6)),
     lon: Number(clamp(lon, -179.99, 179.99).toFixed(6)),
-    alt: Math.max(0, Math.round((base.alt ?? 0) + (Math.random() - 0.5) * 40)),
+    alt: Math.max(0, Math.round((base.alt ?? 0) + (rnd() - 0.5) * 40)),
   };
 }
 
@@ -4128,7 +4507,7 @@ function dataUrlToBlob(dataUrl) {
 
 function randomMaxEdge() {
   const edges = [2048, 2160, 2400, 2560, 2880, 3200];
-  return edges[Math.floor(Math.random() * edges.length)];
+  return edges[Math.floor(rnd() * edges.length)];
 }
 
 function getExportDimensions(width, height, maxEdge) {
@@ -4147,7 +4526,7 @@ let _gaussSpare = null;
 function gaussRand() {
   if (_gaussSpare !== null) { const v = _gaussSpare; _gaussSpare = null; return v; }
   let u, v, s;
-  do { u = Math.random() * 2 - 1; v = Math.random() * 2 - 1; s = u * u + v * v; }
+  do { u = rnd() * 2 - 1; v = rnd() * 2 - 1; s = u * u + v * v; }
   while (s >= 1 || s === 0);
   const mul = Math.sqrt(-2 * Math.log(s) / s);
   _gaussSpare = v * mul;
@@ -4171,18 +4550,25 @@ function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
   // Previous model used b = bBase * isoNorm² — at ISO 3200 that gave sigma ≈ 45,
   // which is a ±135 pixel range and reduces images to pure noise.
   let baseSigma;
-  if      (iso <= 200)  baseSigma = 0.7 + Math.random() * 0.5;  // 0.7–1.2
-  else if (iso <= 800)  baseSigma = 1.3 + Math.random() * 0.9;  // 1.3–2.2
-  else if (iso <= 3200) baseSigma = 2.0 + Math.random() * 1.5;  // 2.0–3.5
-  else                  baseSigma = 3.0 + Math.random() * 2.0;  // 3.0–5.0
+  if      (iso <= 200)  baseSigma = 0.7 + rnd() * 0.5;  // 0.7–1.2
+  else if (iso <= 800)  baseSigma = 1.3 + rnd() * 0.9;  // 1.3–2.2
+  else if (iso <= 3200) baseSigma = 2.0 + rnd() * 1.5;  // 2.0–3.5
+  else                  baseSigma = 3.0 + rnd() * 2.0;  // 3.0–5.0
 
   // Decompose into Poisson-Gaussian model: σ²(x) = a·x + b
   // The signal-dependent component gives the heteroscedastic structure that
   // ML forensic tools (Noiseprint++, TruFor) verify, while keeping total
-  // noise within the calibrated sigma range above.
+  // noise within the calibrated sigma range above. The shot-to-read split and
+  // the per-channel factors are drawn per image: a fixed split was itself a
+  // recipe that a classifier trained on this tool's output could learn.
   const sig2 = baseSigma * baseSigma;
-  const a    = 0.05 * sig2 / 128;   // ~5% signal-dependent (shot noise)
-  const b    = 0.95 * sig2;          // ~95% constant (read noise)
+  const shot = 0.03 + rnd() * 0.12;    // 3–15% signal-dependent
+  const a    = shot * sig2 / 128;
+  const b    = (1 - shot) * sig2;
+  const rbGain  = 1.1 + rnd() * 0.25;  // R/B shot noise relative to G
+  const gGain   = 0.75 + rnd() * 0.15;
+  const gRead   = 0.6 + rnd() * 0.25;
+  const chroma  = 0.1 + rnd() * 0.25;  // DSLR chroma noise fraction
 
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
@@ -4192,10 +4578,10 @@ function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
 
     if (cameraType === 'phone') {
       // Bayer CFA: 2 green, 1 red, 1 blue per 2×2 block.
-      // R/B have ~20% more shot noise than G (fewer photosites per unit area).
-      const sigmaR = Math.sqrt(a * 1.2 * r0 + b);
-      const sigmaG = Math.sqrt(a * 0.8 * g0 + b * 0.7);
-      const sigmaB = Math.sqrt(a * 1.2 * b0 + b);
+      // R/B have more shot noise than G (fewer photosites per unit area).
+      const sigmaR = Math.sqrt(a * rbGain * r0 + b);
+      const sigmaG = Math.sqrt(a * gGain * g0 + b * gRead);
+      const sigmaB = Math.sqrt(a * rbGain * b0 + b);
       d[i]     = clamp(Math.round(r0 + gaussRand() * sigmaR), 0, 255);
       d[i + 1] = clamp(Math.round(g0 + gaussRand() * sigmaG), 0, 255);
       d[i + 2] = clamp(Math.round(b0 + gaussRand() * sigmaB), 0, 255);
@@ -4204,7 +4590,7 @@ function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
       const luma  = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0;
       const sigma = Math.sqrt(a * luma + b);
       const lN    = gaussRand() * sigma;
-      const cN    = gaussRand() * sigma * 0.2;
+      const cN    = gaussRand() * sigma * chroma;
       d[i]     = clamp(Math.round(r0 + lN + cN), 0, 255);
       d[i + 1] = clamp(Math.round(g0 + lN),       0, 255);
       d[i + 2] = clamp(Math.round(b0 + lN - cN), 0, 255);
@@ -4244,8 +4630,8 @@ function applyCameraColorProfile(ctx, w, h, make) {
   const base = CAMERA_COLOR_PROFILES[make];
   if (!base) return;
 
-  const warmth   = base.warmth   + (Math.random() - 0.5) * 4;
-  const satScale = base.satScale + (Math.random() - 0.5) * 0.06;
+  const warmth   = base.warmth   + (rnd() - 0.5) * 4;
+  const satScale = base.satScale + (rnd() - 0.5) * 0.06;
   const contrast = base.contrast;
 
   const id = ctx.getImageData(0, 0, w, h);
@@ -4288,47 +4674,163 @@ function applyCameraColorProfile(ctx, w, h, make) {
  *   2. S-curve tone mapping  — histogram shape camera firmware curves produce
  *   3. Unsharp mask          — in-camera sharpening halo/ringing around edges
  */
+/**
+ * Separable box blur of the RGB channels, radius r, into a new buffer.
+ * Edges clamp. Used by the unsharp mask and the denoise pass.
+ */
+function boxBlurRGB(src, w, h, r) {
+  const tmp = new Float32Array(w * h * 3);
+  const out = new Uint8ClampedArray(src.length);
+  const n = 2 * r + 1;
+  // Horizontal
+  for (let y = 0; y < h; y++) {
+    for (let c = 0; c < 3; c++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += src[(y * w + clamp(k, 0, w - 1)) * 4 + c];
+      for (let x = 0; x < w; x++) {
+        tmp[(y * w + x) * 3 + c] = sum / n;
+        const add = src[(y * w + clamp(x + r + 1, 0, w - 1)) * 4 + c];
+        const sub = src[(y * w + clamp(x - r, 0, w - 1)) * 4 + c];
+        sum += add - sub;
+      }
+    }
+  }
+  // Vertical
+  for (let x = 0; x < w; x++) {
+    for (let c = 0; c < 3; c++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += tmp[(clamp(k, 0, h - 1) * w + x) * 3 + c];
+      for (let y = 0; y < h; y++) {
+        out[(y * w + x) * 4 + c] = sum / n;
+        const add = tmp[(clamp(y + r + 1, 0, h - 1) * w + x) * 3 + c];
+        const sub = tmp[(clamp(y - r, 0, h - 1) * w + x) * 3 + c];
+        sum += add - sub;
+      }
+    }
+  }
+  return out;
+}
+
 function applyISPSimulation(ctx, w, h) {
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
 
-  // ── 1. S-curve tone mapping (LUT) ────────────────────────────
+  // Every stage here is drawn per image, including whether it runs at all.
+  // Applying the same curve and the same 3x3 sharpen to every file was a
+  // recipe, and a recipe is what a detector trained on this tool would learn.
+
+  // ── 1. S-curve tone mapping (LUT), four images in five ──────
   // Camera firmware applies a characteristic S-shaped tone curve for contrast.
-  // The resulting histogram shape is a camera-authenticity marker. We use a
-  // properly anchored S-curve: lut[0]=0, lut[128]=128, lut[255]=255.
-  const cs = 0.3 + Math.random() * 0.4;           // curve strength 0.3–0.7
-  const hs = Math.sin(0.5 * Math.PI * cs) || 1;   // normaliser
-  const lut = new Uint8Array(256);
-  for (let i = 0; i < 256; i++) {
-    const curved = Math.sin((i / 255 - 0.5) * Math.PI * cs) / (2 * hs) + 0.5;
-    lut[i] = clamp(Math.round(curved * 255), 0, 255);
-  }
-  for (let i = 0; i < d.length; i += 4) {
-    d[i]     = lut[d[i]];
-    d[i + 1] = lut[d[i + 1]];
-    d[i + 2] = lut[d[i + 2]];
+  // Properly anchored: lut[0]=0, lut[128]=128, lut[255]=255.
+  if (rnd() < 0.8) {
+    const cs = 0.15 + rnd() * 0.55;                 // curve strength 0.15–0.7
+    const hs = Math.sin(0.5 * Math.PI * cs) || 1;   // normaliser
+    const lut = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) {
+      const curved = Math.sin((i / 255 - 0.5) * Math.PI * cs) / (2 * hs) + 0.5;
+      lut[i] = clamp(Math.round(curved * 255), 0, 255);
+    }
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]     = lut[d[i]];
+      d[i + 1] = lut[d[i + 1]];
+      d[i + 2] = lut[d[i + 2]];
+    }
   }
 
-  // ── 3. Unsharp mask sharpening ───────────────────────────────
-  // In-camera sharpening (USM) creates characteristic halo/ringing around
-  // edges — a statistical trace that forensic models are trained to see.
-  const sharpStr = 0.08 + Math.random() * 0.10;   // 0.08–0.18
-  const orig     = new Uint8ClampedArray(d);
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const p = (y * w + x) * 4;
+  // ── 2. Unsharp mask, three images in four, radius 1 or 2 px ──
+  // In-camera and editor sharpening creates characteristic halo/ringing
+  // around edges — a statistical trace that forensic models are trained to see.
+  if (rnd() < 0.75) {
+    const sharpStr = 0.05 + rnd() * 0.15;           // 0.05–0.20
+    const radius   = rnd() < 0.6 ? 1 : 2;
+    const orig     = new Uint8ClampedArray(d);
+    const blur     = boxBlurRGB(orig, w, h, radius);
+    for (let i = 0; i < d.length; i += 4) {
       for (let c = 0; c < 3; c++) {
-        const blur = (
-          orig[((y - 1) * w + (x - 1)) * 4 + c] + orig[((y - 1) * w + x) * 4 + c] + orig[((y - 1) * w + (x + 1)) * 4 + c] +
-          orig[(y * w + (x - 1)) * 4 + c]        + orig[(y * w + x) * 4 + c]        + orig[(y * w + (x + 1)) * 4 + c] +
-          orig[((y + 1) * w + (x - 1)) * 4 + c] + orig[((y + 1) * w + x) * 4 + c] + orig[((y + 1) * w + (x + 1)) * 4 + c]
-        ) / 9;
-        d[p + c] = clamp(Math.round(orig[p + c] + sharpStr * (orig[p + c] - blur)), 0, 255);
+        d[i + c] = clamp(Math.round(orig[i + c] + sharpStr * (orig[i + c] - blur[i + c])), 0, 255);
       }
     }
   }
 
+  ctx.putImageData(id, 0, 0);
+}
+
+/**
+ * Non-rigid warp: a smooth, random displacement field of about a pixel.
+ *
+ * This is the PRNU defence that the crop, rotation and resize alone are not.
+ * Those are one global affine transform, and a sensor-pattern match can be
+ * re-registered through it by searching over scale and rotation. A field that
+ * varies across the frame has no single inverse to search for: every block is
+ * misaligned by its own fraction of a pixel, and the pattern correlation,
+ * which is summed over the whole frame, collapses. The displacement is a sum
+ * of three low-frequency waves with random directions, wavelengths and
+ * phases, and a total amplitude under two pixels, so nothing is visible.
+ */
+function applyWarp(ctx, w, h) {
+  const id  = ctx.getImageData(0, 0, w, h);
+  const d   = id.data;
+  const src = new Uint8ClampedArray(d);
+
+  const amp = 0.6 + rnd() * 1.2;
+  const waves = [];
+  for (let k = 0; k < 3; k++) {
+    const wl = 120 + rnd() * 400;
+    const th = rnd() * Math.PI * 2;
+    const ux = Math.cos(th) / wl, uy = Math.sin(th) / wl;
+    const px = rnd() * Math.PI * 2, py = rnd() * Math.PI * 2;
+    // sin(X + Y + phase) split per axis so the inner loop has no trig.
+    const sx = new Float32Array(w), cx = new Float32Array(w);
+    const sy = new Float32Array(h), cy = new Float32Array(h);
+    for (let x = 0; x < w; x++) { const t = 2 * Math.PI * x * ux; sx[x] = Math.sin(t); cx[x] = Math.cos(t); }
+    for (let y = 0; y < h; y++) { const t = 2 * Math.PI * y * uy; sy[y] = Math.sin(t); cy[y] = Math.cos(t); }
+    waves.push({ sx, cx, sy, cy, px: [Math.sin(px), Math.cos(px)], py: [Math.sin(py), Math.cos(py)],
+                 ax: amp * (0.4 + rnd() * 0.6) / 3, ay: amp * (0.4 + rnd() * 0.6) / 3 });
+  }
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let dx = 0, dy = 0;
+      for (const wv of waves) {
+        // sin(a + b) with a = x-term, b = y-term, then + phase
+        const s = wv.sx[x] * wv.cy[y] + wv.cx[x] * wv.sy[y];
+        const c = wv.cx[x] * wv.cy[y] - wv.sx[x] * wv.sy[y];
+        dx += wv.ax * (s * wv.px[1] + c * wv.px[0]);
+        dy += wv.ay * (s * wv.py[1] + c * wv.py[0]);
+      }
+      const fx = clamp(x + dx, 0, w - 1), fy = clamp(y + dy, 0, h - 1);
+      const x0 = Math.floor(fx), y0 = Math.floor(fy);
+      const x1 = Math.min(x0 + 1, w - 1), y1 = Math.min(y0 + 1, h - 1);
+      const tx = fx - x0, ty = fy - y0;
+      const p00 = (y0 * w + x0) * 4, p10 = (y0 * w + x1) * 4, p01 = (y1 * w + x0) * 4, p11 = (y1 * w + x1) * 4;
+      const o = (y * w + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const top = src[p00 + c] + (src[p10 + c] - src[p00 + c]) * tx;
+        const bot = src[p01 + c] + (src[p11 + c] - src[p01 + c]) * tx;
+        d[o + c] = top + (bot - top) * ty;
+      }
+    }
+  }
+  ctx.putImageData(id, 0, 0);
+}
+
+/**
+ * Mild denoise before fresh noise is added: a partial blend toward a 3x3 box
+ * blur. The sensor's residual noise pattern lives in the finest detail; taking
+ * some of that off before the new, synthetic noise goes on means the final
+ * residual is dominated by noise that belongs to no camera. Kept light so
+ * texture survives; the sharpen stage restores edges.
+ */
+function applyDenoise(ctx, w, h) {
+  const strength = 0.25 + rnd() * 0.25;
+  const id   = ctx.getImageData(0, 0, w, h);
+  const d    = id.data;
+  const blur = boxBlurRGB(d, w, h, 1);
+  for (let i = 0; i < d.length; i += 4) {
+    d[i]     += (blur[i]     - d[i])     * strength;
+    d[i + 1] += (blur[i + 1] - d[i + 1]) * strength;
+    d[i + 2] += (blur[i + 2] - d[i + 2]) * strength;
+  }
   ctx.putImageData(id, 0, 0);
 }
 
@@ -4346,16 +4848,26 @@ function applyISPSimulation(ctx, w, h) {
 function applyLensOpticalEffects(ctx, w, h, cam = {}) {
   const cameraType = cam.type || 'phone';
 
+  // Neither effect is applied to every image: lens profiles and in-camera
+  // correction remove vignetting and lateral CA from a good share of real
+  // files, and a constant dose of each would be this tool's own signature.
+  const doVignette = rnd() < 0.7;
+  const doCA       = rnd() < 0.6;
+  if (!doVignette && !doCA) return;
+
   // Real lens vignetting: ~10–20% light falloff at corners for phones,
   // ~5–12% for DSLRs (better optics + usually partially corrected in-camera).
-  const vBase = cameraType === 'dslr'
-    ? 0.020 + Math.random() * 0.025  // ~3–6% corner darkening
-    : 0.030 + Math.random() * 0.030; // ~4–8% corner darkening
+  const vBase = !doVignette ? 0 : cameraType === 'dslr'
+    ? 0.015 + rnd() * 0.035  // ~2–7% corner darkening
+    : 0.020 + rnd() * 0.045; // ~3–9% corner darkening
 
   const diagonal = Math.sqrt(w * w + h * h);
-  const caMax    = cameraType === 'dslr'
-    ? (0.0002 + Math.random() * 0.0003) * diagonal   // subtle (~0.04–0.1% of diagonal)
-    : (0.0004 + Math.random() * 0.0004) * diagonal;  // more visible (~0.04–0.12%)
+  // Red outward is the common direction, but corrected and over-corrected
+  // lenses fringe the other way, so the sign is drawn too.
+  const caSign   = rnd() < 0.7 ? 1 : -1;
+  const caMax    = !doCA ? 0 : caSign * (cameraType === 'dslr'
+    ? (0.00015 + rnd() * 0.00035) * diagonal
+    : (0.0003  + rnd() * 0.0005)  * diagonal);
 
   const cx   = w / 2;
   const cy   = h / 2;
@@ -4384,7 +4896,7 @@ function applyLensOpticalEffects(ctx, w, h, cam = {}) {
       // Vignetting: polynomial approximation of cos⁴ radial falloff.
       const vign = Math.max(0, 1 - vBase * r * r - vBase * 0.4 * r * r * r * r);
 
-      if (dist > 0.5) {
+      if (caMax !== 0 && dist > 0.5) {
         // CA shift amount scales with r (zero at centre, caMax at corners).
         const shift  = caMax * r;
         const normDX = dx / dist;
@@ -4428,48 +4940,105 @@ function applyLensOpticalEffects(ctx, w, h, cam = {}) {
  * what a viewer assumes when no profile is present, and plenty of real camera
  * JPEGs carry none at all.
  */
-/**
- * Re-quantise a freshly encoded JPEG onto the exporter's tables.
- *
- * The quantization table is one of the strongest camera fingerprints a JPEG
- * carries, and the browser's says "browser". Overwriting the DQT bytes alone
- * would change the picture — the coefficients were quantised against the old
- * table — so the coefficients are rescaled onto the new one instead.
- *
- * Returns the input untouched when there is no table for that make, when the
- * file is not plain baseline JPEG, or on any error. A camera-matched table is
- * not worth a corrupted image.
- */
-function applyEditorQuantization(dataUrl) {
-  const table = EDITOR_QTABLE;
+function bytesToDataUrl(mime, out) {
+  // Chunked, because String.fromCharCode blows the stack on a whole image.
+  let s = '';
+  for (let i = 0; i < out.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+  }
+  return `data:${mime};base64,${btoa(s)}`;
+}
 
+function dataUrlToBytes(dataUrl) {
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-  if (!m) return dataUrl;
+  if (!m) return null;
+  const bin = atob(m[2]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return { mime: m[1], bytes };
+}
+
+/**
+ * Re-quantise a freshly encoded JPEG onto one of the exporter's measured
+ * quantization tables and write it in the exporter's pixel container: the
+ * browser's APP0 and ICC are dropped, the coefficients are rescaled onto the
+ * new tables (overwriting the DQT bytes alone would change the picture), a DRI
+ * segment and restart markers are added, Adobe's APP14 is placed before the
+ * frame header, and the Huffman tables are optimised the way the exporter's
+ * encoder optimises them. Returns `{ dataUrl, ok }`; ok is false when the
+ * input is not plain baseline JPEG, in which case the input is returned
+ * unchanged and the caller falls back.
+ */
+function requantizeToExport(dataUrl, table, opts) {
+  const parsed = dataUrlToBytes(dataUrl);
+  if (!parsed) return { dataUrl, ok: false };
   try {
-    const bin = atob(m[2]);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-    const out = requantize(bytes, table);
-    if (!out) return dataUrl;
-
-    // Chunked, because String.fromCharCode blows the stack on a whole image.
-    let s = '';
-    for (let i = 0; i < out.length; i += 0x8000) {
-      s += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
-    }
-    return `data:${m[1]};base64,${btoa(s)}`;
+    const out = requantize(parsed.bytes, table, opts);
+    if (!out) return { dataUrl, ok: false };
+    return { dataUrl: bytesToDataUrl(parsed.mime, out), ok: true };
   } catch (e) {
-    return dataUrl;
+    return { dataUrl, ok: false };
   }
 }
 
 /**
- * Every Pixel original measured writes JFIF version 1.02; Chrome writes 1.01.
- * Densities 1x1, no thumbnail, matching those files byte for byte.
+ * Encode a 256-long-edge thumbnail the way the exporter does: the standard
+ * (Annex K) quantization tables scaled to its thumbnail quality, a 32-MCU
+ * restart interval, Adobe's APP14 and the standard Huffman tables. Returns the
+ * raw bytes, a binary string for the IFD1 payload, and the dimensions. The
+ * same bytes go into both IFD1 and the Photoshop block, as the exports do.
  */
-const JFIF_APP0 = Uint8Array.from(
-  [0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x02, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+function makeAdobeThumbnail(dataUrl, longEdge = 256) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onerror = () => resolve(null);
+    img.onload = () => {
+      try {
+        const scale = longEdge / Math.max(img.naturalWidth, img.naturalHeight, 1);
+        const w = Math.max(1, Math.round(img.naturalWidth  * scale));
+        const h = Math.max(1, Math.round(img.naturalHeight * scale));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        const url = c.toDataURL('image/jpeg', 1.0);
+        const parsed = dataUrlToBytes(url);
+        if (!parsed) return resolve(null);
+        const out = requantize(parsed.bytes, THUMB_QTABLE,
+          { restartInterval: 32, optimizeHuffman: false, app14: ADOBE_APP14 });
+        if (!out || out.length > 63000) return resolve(null);
+        let bin = '';
+        for (let i = 0; i < out.length; i += 0x8000) bin += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+        resolve({ bytes: out, binary: bin, width: w, height: h });
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.src = dataUrl;
+  });
+}
+
+/**
+ * Insert metadata segments immediately after SOI, before the first marker the
+ * pixel JPEG carries (its DQT). Used to add the Exif, Photoshop, ICC and XMP
+ * segments to the exporter's pixel container in the order the exports show.
+ */
+function insertAfterSoi(dataUrl, segments) {
+  const parsed = dataUrlToBytes(dataUrl);
+  if (!parsed) return dataUrl;
+  const { mime, bytes } = parsed;
+  if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return dataUrl;
+  const add = segments.filter(Boolean);
+  const addLen = add.reduce((n, s) => n + s.length, 0);
+  const out = new Uint8Array(bytes.length + addLen);
+  let o = 0;
+  out.set([0xFF, 0xD8], o); o += 2;
+  for (const s of add) { out.set(s, o); o += s.length; }
+  out.set(bytes.subarray(2), o);
+  return bytesToDataUrl(mime, out);
+}
 
 /** Wrap an ICC profile into APP2 segments (chunked if it exceeds one segment). */
 function iccSegments(icc) {
@@ -4550,21 +5119,20 @@ function normaliseAppSegments(dataUrl, opts = {}) {
 /**
  * Core anti-forensic canvas pipeline.
  *
- * Ten layers defeat both device-correlation forensics and ML manipulation
- * detection (TruFor, ManTraNet, CAT-Net, Noiseprint++):
+ * The stages, in order. Every parameter is drawn per image and several stages
+ * run on only a share of images, so there is no fixed recipe to learn:
  *
- *   1. Proportional crop (≤1.2% per edge) — shifts PRNU grid alignment
- *   2. Bimodal rotation (±0.5°–2.0°) — sub-pixel interpolation destroys PRNU
- *   3. Random resize — prevents dimension-based clustering
+ *   1. Proportional crop (≤1.2% per edge) — shifts the sensor grid
+ *   2. Rotation (±0.3°–2.0°) on two images in three
+ *   3. Reshape to a frame the camera can produce, then size
+ *   3b. Non-rigid warp (sub-pixel to ~2 px) and a light denoise — the PRNU
+ *       defence; a global transform can be re-registered, a field cannot
  *   4. Camera colour science — brand-specific tone/saturation/contrast
- *   5. ISP pipeline simulation — demosaicing residuals + S-curve + unsharp mask
- *      (embeds statistical traces ML detectors expect from real cameras)
- *   6. Lens optical effects — vignetting (cos⁴) + chromatic aberration
- *      (every real lens produces both; their absence is a forensic red flag)
- *   7. Poisson-Gaussian noise — σ²(x)=a·x+b, heteroscedastic per real sensors
- *      (ML tools verify signal-dependent variance; uniform Gaussian is detectable)
- *   8. Rewrite the container as an editor export: its tables, profile and APP14
- *   9. Bimodal JPEG quality — wider range = more quantization table diversity
+ *   5. ISP simulation — S-curve (4 in 5) + unsharp mask (3 in 4, radius 1–2)
+ *   6. Lens optics — vignetting (7 in 10) + chromatic aberration (3 in 5,
+ *      either sign)
+ *   7. Poisson-Gaussian noise — σ²(x)=a·x+b with a drawn shot/read split
+ *   8. Encode, re-quantise onto the exporter's tables, write its container
  */
 /**
  * Reshape the source rectangle to a frame the camera could actually produce.
@@ -4618,6 +5186,24 @@ function snapToCameraFrame(x, y, w, h, cam) {
   return { x: nx, y: ny, w: nw, h: nh, out };
 }
 
+/**
+ * Encode the finished canvas as the exporter's pixel container: a measured
+ * Adobe quantization table (drawn per image), the DRI and restart markers the
+ * exporter writes, Adobe's APP14 before the frame header, and optimised
+ * Huffman tables. No metadata is added here; the caller inserts Exif, the
+ * Photoshop block, the ICC profile and the XMP packet for a randomized file,
+ * or nothing for a stripped one. Falls back to dropping the browser markers
+ * and adding APP14 if the re-encoder cannot handle the frame.
+ */
+function encodeExportPixels(ctx, width, height) {
+  const mcusX = Math.ceil(width / 8);   // 4:4:4, so the MCU is 8px; DRI = MCUs per row
+  const url = ctx.canvas.toDataURL('image/jpeg', 1.0);
+  const r = requantizeToExport(url, pickEditorQtable(),
+    { restartInterval: mcusX, optimizeHuffman: true, app14: ADOBE_APP14 });
+  if (r.ok) return r.dataUrl;
+  return normaliseAppSegments(url, { app14: ADOBE_APP14 });   // fallback: at least drop APP0/ICC
+}
+
 function antiForensicRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
   const cameraMake = cam.make || '';
@@ -4635,13 +5221,6 @@ function antiForensicRender(img, cam = {}) {
   const srcW    = img.naturalWidth  - cropL - cropR;
   const srcH    = img.naturalHeight - cropT - cropB;
 
-  // The container the export carries. A stripped file keeps only what
-  // `exiftool -all=` would leave on a Camera Raw export: the APP14 marker,
-  // which ExifTool does not count as metadata; no profile, no packet.
-  const container = cam.strip
-    ? { app14: ADOBE_APP14 }
-    : { icc: editorIcc(), app14: ADOBE_APP14, xmp: cam.xmpSegment || null };
-
   if (srcW < 100 || srcH < 100) {
     const c   = document.createElement('canvas');
     c.width   = img.naturalWidth;
@@ -4652,10 +5231,7 @@ function antiForensicRender(img, cam = {}) {
     applyISPSimulation(ctx, c.width, c.height);
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
-    let dataUrl = c.toDataURL('image/jpeg', 1.0);
-    dataUrl = applyEditorQuantization(dataUrl);
-    dataUrl = normaliseAppSegments(dataUrl, container);
-    return { dataUrl, width: c.width, height: c.height };
+    return { dataUrl: encodeExportPixels(ctx, c.width, c.height), width: c.width, height: c.height };
   }
 
   // 3. Reshape to a frame the camera can produce, then size the output.
@@ -4674,11 +5250,11 @@ function antiForensicRender(img, cam = {}) {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  // 2. Bimodal rotation: 50% small (0.5–1.0°), 50% large (1.0–2.0°), random sign
-  const sign     = Math.random() < 0.5 ? 1 : -1;
-  const angleDeg = sign * (Math.random() < 0.5
-    ? 0.5 + Math.random() * 0.5    // 0.5–1.0°
-    : 1.0 + Math.random() * 1.0);  // 1.0–2.0°
+  // 2. Rotation on about two images in three, 0.3–2.0° either way. Rotating
+  // every image was a tell twice over: a tilted horizon on each, and one more
+  // constant in the recipe. The warp below carries the PRNU defence on the
+  // images that are not rotated.
+  const angleDeg = rnd() < 0.65 ? (rnd() < 0.5 ? 1 : -1) * (0.3 + rnd() * 1.7) : 0;
   const angle = angleDeg * (Math.PI / 180);
 
   // Aspect-ratio-aware scale so rotated image covers all four canvas corners.
@@ -4695,6 +5271,11 @@ function antiForensicRender(img, cam = {}) {
   ctx.translate(-size.width / 2, -size.height / 2);
 
   ctx.drawImage(img, frame.x, frame.y, frame.w, frame.h, 0, 0, size.width, size.height);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // 3b. Non-rigid warp and a light denoise: the sensor-pattern defence.
+  applyWarp(ctx, size.width, size.height);
+  applyDenoise(ctx, size.width, size.height);
 
   // 4. Camera colour science
   applyCameraColorProfile(ctx, size.width, size.height, cameraMake);
@@ -4708,16 +5289,11 @@ function antiForensicRender(img, cam = {}) {
   // 7. Poisson-Gaussian noise (signal-dependent, ISO-matched)
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
-  // 8+9. Encode, re-quantise onto the exporter's tables, write its container.
-  // Quality 1.0 specifically: it is the only setting at which the browser emits
-  // 4:4:4 chroma, which is what an editor export uses. Everything lower is
-  // 4:2:0 and would contradict the story the file tells. It is also the
-  // cleanest source for re-quantisation, being near-lossless.
-  let dataUrl = c.toDataURL('image/jpeg', 1.0);
-  dataUrl = applyEditorQuantization(dataUrl);
-  dataUrl = normaliseAppSegments(dataUrl, container);
-
-  return { dataUrl, width: size.width, height: size.height };
+  // 8. Encode as the exporter's pixel container. Quality 1.0 specifically: it
+  // is the only setting at which the browser emits 4:4:4 chroma, which is what
+  // an editor export uses. Everything lower is 4:2:0 and would contradict the
+  // story the file tells. It is also the cleanest source for re-quantisation.
+  return { dataUrl: encodeExportPixels(ctx, size.width, size.height), width: size.width, height: size.height };
 }
 
 /**
@@ -4764,10 +5340,10 @@ function escapeHtml(value) {
 
 function makeId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();
-  return `img_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return `img_${Date.now()}_${rnd().toString(36).slice(2, 10)}`;
 }
 
-;return { pick, randInt, clamp, cryptoRandFloat, cryptoRandInt, jitterLocation, wallClockToUtc, tzOffsetString, fmtDate, fmtGpsDate, gpsTimeStamp, sunElevation, decToDMS, dmsToDec, dataUrlToBlob, randomMaxEdge, getExportDimensions, addPixelNoise, applyCameraColorProfile, applyISPSimulation, applyLensOpticalEffects, normaliseAppSegments, stripViaCanvas, fmtBytes, fromRat, cleanExifStr, escapeHtml, makeId };
+;return { iccApp2Segment, clamp, cryptoRandFloat, cryptoRandInt, jitterLocation, wallClockToUtc, tzOffsetString, fmtDate, fmtGpsDate, gpsTimeStamp, sunElevation, decToDMS, dmsToDec, dataUrlToBlob, randomMaxEdge, getExportDimensions, addPixelNoise, applyCameraColorProfile, applyISPSimulation, applyWarp, applyDenoise, applyLensOpticalEffects, makeAdobeThumbnail, insertAfterSoi, normaliseAppSegments, stripViaCanvas, fmtBytes, fromRat, cleanExifStr, escapeHtml, makeId, rnd, pick, randInt };
 })();
 
 // ── js/exif-writer.js ─────────────────────────────────────────────────
@@ -4791,28 +5367,36 @@ __modules["exif-writer"] = (function () {
  * piexifjs's version as a fallback; `dumpExif` throws rather than emit a block
  * it cannot vouch for.
  *
- * Big-endian ("MM") throughout, matching piexifjs, with all offsets measured
- * from the TIFF header.
+ * Byte order is a parameter. Measured Adobe exports (Lightroom and Camera
+ * Raw) write little-endian ("II"); the writer defaults to that, with
+ * big-endian ("MM") available. All offsets are measured from the TIFF header.
  */
 
 const TYPE = { Byte: 1, Ascii: 2, Short: 3, Long: 4, Rational: 5, Undefined: 7, SLong: 9, SRational: 10 };
-const TYPE_SIZE = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 };
 
-const u8  = n => String.fromCharCode(n & 0xFF);
-const u16 = n => String.fromCharCode((n >> 8) & 0xFF, n & 0xFF);
-const u32 = n => String.fromCharCode((n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF);
-const s32 = n => u32(n < 0 ? n + 0x100000000 : n);
+/** Integer encoders for one byte order. */
+function encoders(littleEndian) {
+  const u8  = n => String.fromCharCode(n & 0xFF);
+  const u16 = littleEndian
+    ? n => String.fromCharCode(n & 0xFF, (n >> 8) & 0xFF)
+    : n => String.fromCharCode((n >> 8) & 0xFF, n & 0xFF);
+  const u32 = littleEndian
+    ? n => String.fromCharCode(n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF)
+    : n => String.fromCharCode((n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF);
+  const s32 = n => u32(n < 0 ? n + 0x100000000 : n);
+  return { u8, u16, u32, s32 };
+}
 
 const asList = v => (Array.isArray(v) ? v : [v]);
 /** Rationals arrive either as one [num, den] pair or as a list of pairs. */
 const asPairs = v => (Array.isArray(v) && Array.isArray(v[0]) ? v : [v]);
 
 /** Serialise one tag value, returning { type, count, bytes }. */
-function encodeValue(typeName, value) {
+function encodeValue(E, typeName, value) {
   switch (typeName) {
     case 'Byte': {
       const a = asList(value);
-      return { type: TYPE.Byte, count: a.length, bytes: a.map(u8).join('') };
+      return { type: TYPE.Byte, count: a.length, bytes: a.map(E.u8).join('') };
     }
     case 'Ascii': {
       const s = String(value);
@@ -4820,26 +5404,26 @@ function encodeValue(typeName, value) {
     }
     case 'Short': {
       const a = asList(value);
-      return { type: TYPE.Short, count: a.length, bytes: a.map(u16).join('') };
+      return { type: TYPE.Short, count: a.length, bytes: a.map(E.u16).join('') };
     }
     case 'Long': {
       const a = asList(value);
-      return { type: TYPE.Long, count: a.length, bytes: a.map(u32).join('') };
+      return { type: TYPE.Long, count: a.length, bytes: a.map(E.u32).join('') };
     }
     case 'SLong': {
       const a = asList(value);
-      return { type: TYPE.SLong, count: a.length, bytes: a.map(s32).join('') };
+      return { type: TYPE.SLong, count: a.length, bytes: a.map(E.s32).join('') };
     }
     case 'Rational': {
       const p = asPairs(value);
-      return { type: TYPE.Rational, count: p.length, bytes: p.map(([n, d]) => u32(n) + u32(d)).join('') };
+      return { type: TYPE.Rational, count: p.length, bytes: p.map(([n, d]) => E.u32(n) + E.u32(d)).join('') };
     }
     case 'SRational': {
       const p = asPairs(value);
-      return { type: TYPE.SRational, count: p.length, bytes: p.map(([n, d]) => s32(n) + s32(d)).join('') };
+      return { type: TYPE.SRational, count: p.length, bytes: p.map(([n, d]) => E.s32(n) + E.s32(d)).join('') };
     }
     case 'Undefined': {
-      const s = typeof value === 'string' ? value : asList(value).map(u8).join('');
+      const s = typeof value === 'string' ? value : asList(value).map(E.u8).join('');
       return { type: TYPE.Undefined, count: s.length, bytes: s };
     }
     default:
@@ -4854,17 +5438,25 @@ function encodeValue(typeName, value) {
  * offset/length. They describe a layout that no longer applies once the block
  * is rebuilt, and a dictionary that came back from `piexif.load` still carries
  * them, so keeping them produced duplicate tags and stale offsets.
+ *
+ * A value may be given as `{ type: 'Long', value: 4080 }` to override the
+ * table's type for that tag: Apple writes ExifImageWidth as a LONG where the
+ * table says SHORT, and Adobe carries that through.
  */
-function collect(dict, table, exclude) {
+function collect(E, dict, table, exclude) {
   const out = [];
   for (const key of Object.keys(dict || {})) {
     const tag = Number(key);
     if (exclude && exclude.has(tag)) continue;
     const meta = table[tag];
     if (!meta) continue;                       // unknown tag: skip rather than guess
-    const v = dict[key];
+    let v = dict[key];
     if (v === null || v === undefined) continue;
-    out.push({ tag, ...encodeValue(meta.type, v) });
+    let typeName = meta.type;
+    if (v && typeof v === 'object' && !Array.isArray(v) && 'type' in v && 'value' in v) {
+      typeName = v.type; v = v.value;
+    }
+    out.push({ tag, ...encodeValue(E, typeName, v) });
   }
   return out.sort((a, b) => a.tag - b.tag);
 }
@@ -4881,23 +5473,23 @@ const valuesSize = entries =>
  * offset of the following directory (0 when there is none) — the four bytes
  * piexifjs leaves out on sub-IFDs.
  */
-function writeIfd(entries, valuesAt, nextIfd) {
-  let dir = u16(entries.length);
+function writeIfd(E, entries, valuesAt, nextIfd) {
+  let dir = E.u16(entries.length);
   let values = '';
   let cursor = valuesAt;
 
   for (const e of entries) {
-    dir += u16(e.tag) + u16(e.type) + u32(e.count);
+    dir += E.u16(e.tag) + E.u16(e.type) + E.u32(e.count);
     if (e.bytes.length <= 4) {
       dir += e.bytes + '\0'.repeat(4 - e.bytes.length);
     } else {
-      dir += u32(cursor);
+      dir += E.u32(cursor);
       values += e.bytes;
       if (e.bytes.length % 2) values += '\0';   // keep the next value word-aligned
       cursor += pad2(e.bytes.length);
     }
   }
-  dir += u32(nextIfd);
+  dir += E.u32(nextIfd);
   return dir + values;
 }
 
@@ -4912,9 +5504,12 @@ const THUMB_LENGTH = 0x0202;
  * ("Exif\0\0" + TIFF block).
  *
  * `px` supplies the tag tables, so the two stay in step — including the
- * OffsetTime tags registered onto them at runtime.
+ * OffsetTime tags registered onto them at runtime. `opts.littleEndian`
+ * (default true) selects the byte order.
  */
-function dumpExif(dict, px) {
+function dumpExif(dict, px, opts = {}) {
+  const littleEndian = opts.littleEndian !== false;
+  const E = encoders(littleEndian);
   const T = px.TAGS;
   const tableFor = (key, fallback) => T[key] || T[fallback] || {};
 
@@ -4922,24 +5517,24 @@ function dumpExif(dict, px) {
   const structuralE = new Set([PTR_INTEROP]);
   const structural1 = new Set([THUMB_OFFSET, THUMB_LENGTH]);
 
-  const zeroth  = collect(dict['0th'],     tableFor('0th', 'Image'),       structural0);
-  const exif    = collect(dict['Exif'],    tableFor('Exif', 'Exif'),       structuralE);
-  const gps     = collect(dict['GPS'],     tableFor('GPS', 'GPS'),         null);
-  const interop = collect(dict['Interop'], tableFor('Interop', 'Interop'), null);
-  const first   = collect(dict['1st'],     tableFor('1st', 'Image'),       structural1);
+  const zeroth  = collect(E, dict['0th'],     tableFor('0th', 'Image'),       structural0);
+  const exif    = collect(E, dict['Exif'],    tableFor('Exif', 'Exif'),       structuralE);
+  const gps     = collect(E, dict['GPS'],     tableFor('GPS', 'GPS'),         null);
+  const interop = collect(E, dict['Interop'], tableFor('Interop', 'Interop'), null);
+  const first   = collect(E, dict['1st'],     tableFor('1st', 'Image'),       structural1);
 
   const thumbnail = typeof dict.thumbnail === 'string' && dict.thumbnail.length ? dict.thumbnail : null;
   if (thumbnail && thumbnail.length > 63000) throw new Error('exif-writer: thumbnail over 64kB');
 
   // Pointer entries are four-byte Longs, so they sit inside the directory and
   // do not disturb the value areas. Values are patched once offsets are known.
-  const ptr = (tag) => ({ tag, type: TYPE.Long, count: 1, bytes: u32(0) });
+  const ptr = (tag) => ({ tag, type: TYPE.Long, count: 1, bytes: E.u32(0) });
   if (exif.length)    zeroth.push(ptr(PTR_EXIF));
   if (gps.length)     zeroth.push(ptr(PTR_GPS));
   if (interop.length) exif.push(ptr(PTR_INTEROP));
   if (thumbnail) {
-    first.push({ tag: THUMB_OFFSET, type: TYPE.Long, count: 1, bytes: u32(0) });
-    first.push({ tag: THUMB_LENGTH, type: TYPE.Long, count: 1, bytes: u32(thumbnail.length) });
+    first.push({ tag: THUMB_OFFSET, type: TYPE.Long, count: 1, bytes: E.u32(0) });
+    first.push({ tag: THUMB_LENGTH, type: TYPE.Long, count: 1, bytes: E.u32(thumbnail.length) });
   }
   zeroth.sort((a, b) => a.tag - b.tag);
   exif.sort((a, b) => a.tag - b.tag);
@@ -4962,21 +5557,21 @@ function dumpExif(dict, px) {
 
   const patch = (entries, tag, value) => {
     const e = entries.find(x => x.tag === tag);
-    if (e) e.bytes = u32(value);
+    if (e) e.bytes = E.u32(value);
   };
   if (at.exif)    patch(zeroth, PTR_EXIF, at.exif.dir);
   if (at.gps)     patch(zeroth, PTR_GPS, at.gps.dir);
   if (at.interop) patch(exif, PTR_INTEROP, at.interop.dir);
   if (thumbnail)  patch(first, THUMB_OFFSET, thumbAt);
 
-  const header = 'MM\0*' + u32(8);
+  const header = (littleEndian ? 'II' : 'MM') + E.u16(42) + E.u32(8);
   let body = '';
   // IFD0 points at IFD1 when there is a thumbnail directory; sub-IFDs terminate.
-  body += writeIfd(zeroth, at.zeroth.values, at.first ? at.first.dir : 0);
-  if (at.exif)    body += writeIfd(exif,    at.exif.values, 0);
-  if (at.interop) body += writeIfd(interop, at.interop.values, 0);
-  if (at.gps)     body += writeIfd(gps,     at.gps.values, 0);
-  if (at.first)   body += writeIfd(first,   at.first.values, 0);
+  body += writeIfd(E, zeroth, at.zeroth.values, at.first ? at.first.dir : 0);
+  if (at.exif)    body += writeIfd(E, exif,    at.exif.values, 0);
+  if (at.interop) body += writeIfd(E, interop, at.interop.values, 0);
+  if (at.gps)     body += writeIfd(E, gps,     at.gps.values, 0);
+  if (at.first)   body += writeIfd(E, first,   at.first.values, 0);
 
   return 'Exif\0\0' + header + body + (thumbnail || '');
 }
@@ -4986,13 +5581,13 @@ function dumpExif(dict, px) {
  * it, and falling back to piexifjs if anything is off. A metadata block that
  * validates a little better is not worth a file nobody can read.
  */
-function dumpExifSafe(dict, px) {
+function dumpExifSafe(dict, px, opts = {}) {
   try {
-    const bytes = dumpExif(dict, px);
+    const bytes = dumpExif(dict, px, opts);
     // Cheap structural checks only. The real gate is downstream: the pipeline
     // already runs readBackExifStrict on the finished file and fails loudly if
     // the metadata cannot be parsed back out.
-    if (!bytes.startsWith('Exif\0\0MM\0*')) throw new Error('bad TIFF header');
+    if (!/^Exif\0\0(II\*\0|MM\0\*)/.test(bytes)) throw new Error('bad TIFF header');
     if (bytes.length < 16 || bytes.length > 0xFFFD) throw new Error(`implausible length ${bytes.length}`);
     for (let i = 0; i < bytes.length; i++) {
       if (bytes.charCodeAt(i) > 0xFF) throw new Error(`non-byte value at ${i}`);
@@ -5039,382 +5634,302 @@ const ICONS = {
 // ── js/data.js ────────────────────────────────────────────────────────
 __modules["data"] = (function () {
 /**
- * data.js — Static databases for camera profiles, US locations, and lens models.
+ * data.js — Camera, location and lens databases.
  *
- * Every string here is what the real device writes into EXIF, not the marketing
- * name. Those differ more than you would expect, and the mismatches are trivial
- * for an analyst to spot:
+ * Every value here was read out of real files on Wikimedia Commons on
+ * 2026-10-16 (ExifTool 13.59): two originals per phone model, one per camera
+ * body, and seven Adobe exports (Camera Raw 16.3/16.4/16.5, Lightroom 7.1.2
+ * and 6.5, Lightroom Classic 13.4 and 14.0.1). Where a secondary phone lens
+ * was not among the samples its figures are marked `approx`.
  *
- *   Samsung writes Make as lowercase "samsung".
- *   Nikon writes Make as "NIKON CORPORATION" and Model as "NIKON Z 9", with a space.
- *   Sony writes Make as "SONY" in caps, and Software as "<model> v<firmware>".
- *   Apple writes Software as a bare version string, "17.4.1", with no "iOS" prefix.
- *   Android phones write Software as a build fingerprint, not a UI version.
+ * The strings are what the device writes, not the marketing name, and the two
+ * differ more than you would expect: Samsung's current firmware writes
+ * "Galaxy S24 Ultra" as the Model while older firmware writes "SM-G991B";
+ * OnePlus writes "OnePlus 12" and no Software at all; Xiaomi writes the
+ * device code "23127PN0CG"; Nikon writes "NIKON Z 6_2" for the Z 6II.
  *
- * Sources for the field formats are noted in README.md.
+ * Per model:
+ *   writer      — which firmware family's encodings apply (see exif.js).
+ *   exifVersion — as written; Samsung and OnePlus still write 0220, Xiaomi 0230.
+ *   offset      — which OffsetTime tags the firmware writes: 'all' (three),
+ *                 'two' (OffsetTime + OffsetTimeOriginal), 'orig', or 'none'.
+ *   subsec      — SubSecTime digits, or 0 when the firmware writes none.
+ *   raw         — for bodies, the raw file the export is converted from.
+ *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution.
  */
 
-const { pick } = __modules["helpers"];
-
-// ── Camera Database ──────────────────────────────────────────────
-//
-// Phones declare `lenses`, because on a phone the focal length and the aperture
-// are properties of one fixed lens — an iPhone cannot shoot its 77mm telephoto
-// at f/1.78. Picking focal and aperture independently produced combinations no
-// such phone can physically produce.
-//
-//   equiv — 35mm-equivalent focal length, the marketing figure, written to
-//           FocalLengthIn35mmFilm
-//   phys  — the actual focal length of the lens in mm, written to FocalLength.
-//           A phone lens is a few mm; writing the equivalent here was the single
-//           clearest tell in the generated EXIF.
-//   f     — that lens's fixed aperture
-//
-// Main-camera `phys` values come from published EXIF samples (iPhone 24mm/6.86mm,
-// Samsung 24mm/6.3mm, OnePlus 24mm/4.1mm — crop factors 3.5, 3.8 and 5.9).
-// Ultrawide and telephoto values are derived from those bodies' lens-class crop
-// factors (~8.3 ultrawide, ~8.5 tele) and are representative rather than
-// per-model exact.
-//
-// Bodies declare `focals` (actual lens mm) plus `crop`, so FocalLengthIn35mmFilm
-// is derived: an APS-C body must report 23mm actual and 35mm equivalent, never
-// the same number twice.
-//
-// Per-model firmware facts, all of which an editor export preserves:
-//
-//   exifVersion — the ExifVersion that firmware writes. Samsung and the
-//                 Qualcomm-based Android makers still write 0220; Apple has
-//                 written 0232 since iOS 13; bodies vary by release year.
-//   flash       — whether the body has a built-in flash. Without one the Flash
-//                 tag can only ever say "did not fire".
-//   raw         — the MIME type Camera Raw names in its xmpMM:History when it
-//                 converts this camera's raw file. Phones that cannot shoot
-//                 raw natively are exported from a JPEG instead.
-//   offsetTime  — whether the firmware writes the OffsetTime* tags. They were
-//                 introduced in Exif 2.31, so a 0220 writer (Samsung, OnePlus,
-//                 Xiaomi) cannot carry them without failing validation, and
-//                 the 5D Mark IV and D850 predate them.
-//   lensTags    — overrides the make-level lens-tag set for one model.
+const { pick, rnd } = __modules["helpers"];
 
 // Frame shapes each body can actually produce. A generated photo whose aspect
-// ratio matches no mode the camera offers is the loudest tell in the file: no
-// Pixel has ever produced a 0.34 aspect frame. Phones offer 4:3, 16:9 and 1:1
-// in both orientations; the bodies here are all 3:2.
+// ratio matches no mode the camera offers is the loudest tell in the file.
 const ASPECTS_PHONE = [4/3, 3/4, 16/9, 9/16, 1];
 const ASPECTS_DSLR  = [3/2, 2/3];
 
-const DNG = 'image/x-adobe-dng';
-const JPG = 'image/jpeg';
+// Apple lens specification rationals, exact as the phones write them (the
+// float32 values 2.22 and 1.78 come out as 1551800/699009 and 1244236/699009).
+const APPLE_LENSINFO_15 = [[1551800, 699009], [9, 1], [1244236, 699009], [14, 5]];
+const APPLE_LENSINFO_13 = [[299253, 190607], [9, 1], [3, 2], [14, 5]];
+const APPLE_LENSINFO_12 = [[1625285, 1048571], [21, 5], [8, 5], [12, 5]];
+const APPLE_LENSINFO_11 = [[807365, 524263], [17, 4], [9, 5], [12, 5]];
 
 const CAMERAS = [
-  // ── Apple ──
-  { make:"Apple", model:"iPhone 15 Pro", sw:"17.4.1", type:"phone", aspects:ASPECTS_PHONE, lensWord:"triple",
-    exifVersion:"0232", flash:true, raw:DNG, offsetTime:true,
-    lenses:[{equiv:13,phys:2.22,f:2.2},{equiv:24,phys:6.86,f:1.78},{equiv:48,phys:6.86,f:1.78},{equiv:77,phys:9.0,f:2.8}],
+  // ── Apple: HostComputer, SubjectArea, CompositeImage, continued-fraction rationals ──
+  { make:"Apple", model:"iPhone 15 Pro", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+    exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
+    lensInfo:APPLE_LENSINFO_15,
+    lenses:[
+      { equiv:13, phys:2.22,  f:2.2,  fRat:[11, 5],            focalRat:[111, 50],       model:"iPhone 15 Pro back triple camera 2.22mm f/2.2" },
+      { equiv:24, phys:6.765, f:1.78, fRat:[1244236, 699009], focalRat:[251773, 37217], model:"iPhone 15 Pro back triple camera 6.765mm f/1.78" },
+      { equiv:48, phys:6.765, f:1.78, fRat:[1244236, 699009], focalRat:[251773, 37217], model:"iPhone 15 Pro back triple camera 6.765mm f/1.78" },
+      { equiv:77, phys:9,     f:2.8,  fRat:[14, 5],            focalRat:[9, 1],          model:"iPhone 15 Pro back triple camera 9mm f/2.8" },
+    ],
     isos:[25,32,40,50,64,80,100,125,160,200,250,400,640,800,1000,1600,2500,3200],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4]] },
+    shutters:[[1,4000],[1,2000],[1,1215],[1,1000],[1,500],[1,364],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15],[1,8],[1,4]] },
 
-  { make:"Apple", model:"iPhone 14 Pro Max", sw:"16.7.8", type:"phone", aspects:ASPECTS_PHONE, lensWord:"triple",
-    exifVersion:"0232", flash:true, raw:DNG, offsetTime:true,
-    lenses:[{equiv:13,phys:2.22,f:2.2},{equiv:24,phys:6.86,f:1.78},{equiv:48,phys:6.86,f:1.78},{equiv:77,phys:9.0,f:2.8}],
-    isos:[25,32,50,64,100,125,200,400,640,1600,2500],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
+  { make:"Apple", model:"iPhone 14 Pro Max", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+    exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
+    lensInfo:APPLE_LENSINFO_15,
+    lenses:[
+      { equiv:13, phys:2.22, f:2.2,  fRat:[11, 5], focalRat:[111, 50], model:"iPhone 14 Pro Max back triple camera 2.22mm f/2.2" },
+      { equiv:24, phys:6.86, f:1.78, fRat:[89, 50], focalRat:[343, 50], model:"iPhone 14 Pro Max back triple camera 6.86mm f/1.78" },
+      { equiv:48, phys:6.86, f:1.78, fRat:[89, 50], focalRat:[343, 50], model:"iPhone 14 Pro Max back triple camera 6.86mm f/1.78" },
+      { equiv:77, phys:9,    f:2.8,  fRat:[14, 5], focalRat:[9, 1],    model:"iPhone 14 Pro Max back triple camera 9mm f/2.8" },
+    ],
+    isos:[25,32,50,64,80,100,125,200,400,640,1600,2500],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,364],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15],[1,8]] },
 
-  { make:"Apple", model:"iPhone 13 Pro", sw:"15.8.3", type:"phone", aspects:ASPECTS_PHONE, lensWord:"triple",
-    exifVersion:"0232", flash:true, raw:DNG, offsetTime:true,
-    lenses:[{equiv:13,phys:1.57,f:1.8},{equiv:26,phys:5.7,f:1.5},{equiv:77,phys:9.0,f:2.8}],
-    isos:[25,50,100,200,400,800,1600,2000],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
+  { make:"Apple", model:"iPhone 13 Pro", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+    exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:[35, 1],
+    lensInfo:APPLE_LENSINFO_13,
+    lenses:[
+      { equiv:13, phys:1.57, f:1.8, fRat:[9, 5], focalRat:[157, 100], model:"iPhone 13 Pro back triple camera 1.57mm f/1.8" },
+      { equiv:26, phys:5.7,  f:1.5, fRat:[3, 2], focalRat:[57, 10],   model:"iPhone 13 Pro back triple camera 5.7mm f/1.5" },
+      { equiv:77, phys:9,    f:2.8, fRat:[14, 5], focalRat:[9, 1],     model:"iPhone 13 Pro back triple camera 9mm f/2.8" },
+    ],
+    isos:[32,40,50,64,80,100,125,200,400,800,1600,2000],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15]] },
 
-  // The non-Pro iPhones have no ProRAW, so their exports start from the JPEG.
-  { make:"Apple", model:"iPhone 12", sw:"14.8.1", type:"phone", aspects:ASPECTS_PHONE, lensWord:"dual",
-    exifVersion:"0232", flash:true, raw:JPG, offsetTime:true,
-    lenses:[{equiv:13,phys:1.55,f:2.4},{equiv:26,phys:4.2,f:1.6}],
-    isos:[25,50,100,200,400,800,1600],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
+  { make:"Apple", model:"iPhone 12", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+    exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
+    lensInfo:APPLE_LENSINFO_12,
+    lenses:[
+      { equiv:13, phys:1.55, f:2.4, fRat:[12, 5], focalRat:[31, 20], model:"iPhone 12 back dual wide camera 1.55mm f/2.4" },
+      { equiv:26, phys:4.2,  f:1.6, fRat:[8, 5],  focalRat:[21, 5],  model:"iPhone 12 back dual wide camera 4.2mm f/1.6" },
+    ],
+    isos:[32,40,50,64,80,100,125,200,400,640,800,1600],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15]] },
 
-  { make:"Apple", model:"iPhone 11", sw:"14.8.1", type:"phone", aspects:ASPECTS_PHONE, lensWord:"dual",
-    exifVersion:"0232", flash:true, raw:JPG, offsetTime:true,
-    lenses:[{equiv:13,phys:1.54,f:2.4},{equiv:26,phys:4.25,f:1.8}],
-    isos:[25,50,100,200,400,800,1600],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
+  { make:"Apple", model:"iPhone 11", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+    exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'M', hpos:'cf',
+    lensInfo:APPLE_LENSINFO_11,
+    lenses:[
+      { equiv:13, phys:1.54, f:2.4, fRat:[12, 5], focalRat:[77, 50], model:"iPhone 11 back dual wide camera 1.54mm f/2.4" },
+      { equiv:26, phys:4.25, f:1.8, fRat:[9, 5],  focalRat:[17, 4],  model:"iPhone 11 back dual wide camera 4.25mm f/1.8" },
+    ],
+    isos:[32,40,50,64,80,100,125,200,400,640,800,1600],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15]] },
 
-  // ── Samsung — Make is lowercase, Software is the firmware build ──
-  { make:"samsung", model:"SM-S928B", sw:"S928BXXU1AWIM", type:"phone", aspects:ASPECTS_PHONE,
-    exifVersion:"0220", flash:true, raw:DNG, offsetTime:false,
-    lenses:[{equiv:13,phys:2.2,f:2.2},{equiv:24,phys:6.3,f:1.7},{equiv:67,phys:7.9,f:2.4},{equiv:111,phys:13.0,f:3.4}],
-    isos:[50,100,200,400,800,1600,3200],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
+  // ── Samsung Snapdragon S-series: marketing-name Model on current firmware, ImageUniqueID per sensor ──
+  { make:"samsung", model:"Galaxy S24 Ultra", sw:"S928BXXU4BYCG", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+    exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:false,
+    lenses:[
+      { equiv:13,  phys:2.2,  f:2.2, focalRat:[220, 100],  fRat:[220, 100], apex:[227, 100], id:"H12XSQE01PM", approx:true },
+      { equiv:23,  phys:6.3,  f:1.7, focalRat:[630, 100],  fRat:[170, 100], apex:[153, 100], id:"HK0XLQE00SM" },
+      { equiv:67,  phys:7.9,  f:2.4, focalRat:[790, 100],  fRat:[240, 100], apex:[253, 100], id:"H50XSQE00SM", approx:true },
+      { equiv:111, phys:13.0, f:3.4, focalRat:[1300, 100], fRat:[340, 100], apex:[353, 100], id:"HK0XLQE00VM", approx:true },
+    ],
+    isos:[25,32,40,50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200],
+    shutters:[[1,5874],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15],[1,10]] },
 
-  { make:"samsung", model:"SM-S916B", sw:"S916BXXU7EXA1", type:"phone", aspects:ASPECTS_PHONE,
-    exifVersion:"0220", flash:true, raw:DNG, offsetTime:false,
-    lenses:[{equiv:13,phys:2.2,f:2.2},{equiv:24,phys:6.4,f:1.8},{equiv:70,phys:8.2,f:2.4}],
-    isos:[50,100,200,400,800,1600,3200],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
+  { make:"samsung", model:"Galaxy S23+", sw:"S916BXXS7CXK6", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+    exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:false,
+    lenses:[
+      { equiv:13, phys:2.2, f:2.2, focalRat:[220, 100], fRat:[220, 100], apex:[227, 100], id:"F12XSQE01PM", approx:true },
+      { equiv:23, phys:5.4, f:1.8, focalRat:[540, 100], fRat:[180, 100], apex:[169, 100], id:"F50XLPE00SM" },
+      { equiv:70, phys:8.2, f:2.4, focalRat:[820, 100], fRat:[240, 100], apex:[253, 100], id:"F50XSQE00SM", approx:true },
+    ],
+    isos:[25,32,40,50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200],
+    shutters:[[1,5874],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15]] },
 
-  { make:"samsung", model:"SM-A546B", sw:"A546BXXS4EXD2", type:"phone", aspects:ASPECTS_PHONE,
-    exifVersion:"0220", flash:true, raw:JPG, offsetTime:false,
-    lenses:[{equiv:13,phys:1.9,f:2.2},{equiv:26,phys:4.7,f:1.8}],
-    isos:[50,100,200,400,800,1600],
-    shutters:[[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
+  { make:"samsung", model:"SM-G991B", sw:"G991BXXS9FWL9", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+    exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:true,
+    lenses:[
+      { equiv:13, phys:1.8, f:2.2, focalRat:[180, 100], fRat:[220, 100], apex:[227, 100], id:"R12LLMF05VM", approx:true },
+      { equiv:26, phys:5.4, f:1.8, focalRat:[540, 100], fRat:[180, 100], apex:[169, 100], id:"R12LLMF05VM" },
+      { equiv:70, phys:7.6, f:2.0, focalRat:[760, 100], fRat:[200, 100], apex:[200, 100], id:"R50LLMF05VM", approx:true },
+    ],
+    isos:[25,32,40,50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200],
+    shutters:[[1,6480],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15]] },
 
-  { make:"samsung", model:"SM-G991B", sw:"G991BXXU8FXD1", type:"phone", aspects:ASPECTS_PHONE,
-    exifVersion:"0220", flash:true, raw:DNG, offsetTime:false,
-    lenses:[{equiv:13,phys:1.8,f:2.2},{equiv:26,phys:5.4,f:1.8},{equiv:70,phys:7.6,f:2.0}],
-    isos:[50,100,200,400,800,1600,3200],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
+  // Exynos A54: a different writer (Android ExifInterface): 4-digit SubSecTime, no OffsetTime,
+  // no ImageUniqueID, Contrast/Saturation/Sharpness, LightSource, GPSVersionID present.
+  { make:"samsung", model:"SM-A546B", sw:"A546BXXSHEZA3", type:"phone", writer:"samsungA", aspects:ASPECTS_PHONE,
+    exifVersion:"0220", offset:'none', subsec:4, flash:true, altitude:true,
+    lenses:[
+      { equiv:13, phys:1.9,  f:2.2, focalRat:[190, 100], fRat:[220, 100], apex:[220, 100], approx:true },
+      { equiv:23, phys:5.54, f:1.8, focalRat:[554, 100], fRat:[180, 100], apex:[170, 100] },
+    ],
+    isos:[25,32,40,50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,602],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15]] },
 
-  // ── Google — Software is the HDR+ pipeline build, not the Android version ──
-  { make:"Google", model:"Pixel 8 Pro", sw:"HDR+ 1.0.540104767zd", type:"phone", aspects:ASPECTS_PHONE, modes:[[4080,3072]],
-    exifVersion:"0232", flash:true, raw:DNG, offsetTime:true,
-    lenses:[{equiv:13,phys:1.9,f:1.95},{equiv:25,phys:6.9,f:1.68},{equiv:113,phys:12.5,f:2.8}],
-    isos:[50,100,200,400,800,1600,3200],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]] },
+  // ── Google: fixed-denominator rationals throughout, GPSVersionID first, CustomRendered 1 ──
+  { make:"Google", model:"Pixel 8 Pro", sw:"HDR+ 1.0.695519190zm", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4080,3072]],
+    exifVersion:"0232", offset:'all', subsec:3, flash:true,
+    lenses:[
+      { equiv:13,  phys:1.95, f:1.95, focalRat:[1950, 1000],  fRat:[195, 100], apex:[193, 100], model:"Pixel 8 Pro back camera 1.95mm f/1.95", approx:true },
+      { equiv:24,  phys:6.9,  f:1.68, focalRat:[6900, 1000],  fRat:[168, 100], apex:[150, 100], model:"Pixel 8 Pro back camera 6.9mm f/1.68" },
+      { equiv:113, phys:12.5, f:2.8,  focalRat:[12500, 1000], fRat:[280, 100], apex:[297, 100], model:"Pixel 8 Pro back camera 12.5mm f/2.8", approx:true },
+    ],
+    isos:[21,33,42,53,66,84,100,133,168,211,266,336,423,533,672,846,1066,1343,1692,2132,2686,3384],
+    shutters:[[1,4000],[1,2000],[1,1300],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,30],[1,15]] },
 
-  { make:"Google", model:"Pixel 7a", sw:"HDR+ 1.0.485286103zd", type:"phone", aspects:ASPECTS_PHONE, modes:[[4624,3472]],
-    exifVersion:"0232", flash:true, raw:DNG, offsetTime:true,
-    lenses:[{equiv:13,phys:1.8,f:2.2},{equiv:25,phys:5.9,f:1.89}],
-    isos:[50,100,200,400,800,1600,3200],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]] },
+  { make:"Google", model:"Pixel 7a", sw:"HDR+ 1.0.748116481zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4624,3472]],
+    exifVersion:"0232", offset:'all', subsec:3, flash:true,
+    lenses:[
+      { equiv:14, phys:1.835, f:2.2,  focalRat:[1835, 1000], fRat:[220, 100], apex:[228, 100], model:"Pixel 7a back camera 1.835mm f/2.2" },
+      { equiv:25, phys:5.43,  f:1.89, focalRat:[5430, 1000], fRat:[189, 100], apex:[184, 100], model:"Pixel 7a back camera 5.43mm f/1.89" },
+    ],
+    isos:[21,33,43,53,66,84,100,133,168,211,266,336,423,533,672,846,1066,1343,1692,2132,2686,3384],
+    shutters:[[1,4000],[1,2000],[1,1300],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,30]] },
 
-  { make:"Google", model:"Pixel 6a", sw:"HDR+ 1.0.420988201zd", type:"phone", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
-    exifVersion:"0232", flash:true, raw:DNG, offsetTime:true,
-    lenses:[{equiv:13,phys:1.8,f:2.2},{equiv:24,phys:4.4,f:1.85}],
-    isos:[50,100,200,400,800,1600,3200],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]] },
+  { make:"Google", model:"Pixel 6a", sw:"HDR+ 1.0.641377693zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
+    exifVersion:"0232", offset:'all', subsec:3, flash:true,
+    lenses:[
+      { equiv:13, phys:1.8,  f:2.2,  focalRat:[1800, 1000], fRat:[220, 100], apex:[228, 100], model:"Pixel 6a back camera 1.8mm f/2.2", approx:true },
+      { equiv:27, phys:4.38, f:1.73, focalRat:[4380, 1000], fRat:[173, 100], apex:[158, 100], model:"Pixel 6a back camera 4.38mm f/1.73" },
+    ],
+    isos:[21,33,43,53,66,84,100,133,168,211,266,336,423,533,672,846,1066,1343,1692,2132,2686],
+    shutters:[[1,4000],[1,2000],[1,1300],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,30]] },
 
-  // ── OnePlus / Xiaomi — Android build fingerprints ──
-  { make:"OnePlus", model:"CPH2583", sw:"CPH2583-user 14 UKQ1.230924.001 release-keys", type:"phone", aspects:ASPECTS_PHONE,
-    exifVersion:"0220", flash:true, raw:DNG, offsetTime:false,
-    lenses:[{equiv:14,phys:2.2,f:2.2},{equiv:23,phys:6.1,f:1.6},{equiv:73,phys:8.6,f:2.6}],
-    isos:[64,100,200,400,800,1600,3200,6400],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
+  // ── OnePlus: Model "OnePlus 12", no Software, OffsetTimeOriginal only, SensingMethod 1, DigitalZoomRatio /10000 ──
+  { make:"OnePlus", model:"OnePlus 12", type:"phone", writer:"oneplus", aspects:ASPECTS_PHONE,
+    exifVersion:"0220", offset:'orig', subsec:3, flash:true,
+    lenses:[
+      { equiv:14, phys:2.2,  f:2.2, focalRat:[2200, 1000], fRat:[22, 10], apex:[227, 100], model:"OnePlus 12 back camera 2.2mm f/2.2", approx:true },
+      { equiv:23, phys:6.06, f:1.6, focalRat:[6060, 1000], fRat:[16, 10], apex:[135, 100], model:"OnePlus 12 back camera 6.06mm f/1.6" },
+      { equiv:73, phys:8.6,  f:2.6, focalRat:[8600, 1000], fRat:[26, 10], apex:[276, 100], model:"OnePlus 12 back camera 8.6mm f/2.6", approx:true },
+    ],
+    isos:[50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200,4000,5000,6400],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,795],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15],[1,10],[1,8]] },
 
-  { make:"Xiaomi", model:"2312GS7BD", sw:"2312GS7BD-user 14 UKQ1.230804.001 release-keys", type:"phone", aspects:ASPECTS_PHONE,
-    exifVersion:"0220", flash:true, raw:DNG, offsetTime:false,
-    lenses:[{equiv:14,phys:2.2,f:2.2},{equiv:24,phys:8.7,f:1.42},{equiv:75,phys:8.8,f:2.0}],
-    isos:[50,100,200,400,800,1600,3200,6400],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]] },
+  // ── Xiaomi: Model is the device code, ExifVersion 0230, ISOSpeed with SensitivityType 3, LightSource 21, no LensModel ──
+  { make:"Xiaomi", model:"23127PN0CG", type:"phone", writer:"xiaomi", aspects:ASPECTS_PHONE,
+    exifVersion:"0230", offset:'two', subsec:3, flash:true,
+    lenses:[
+      { equiv:14, phys:2.2,  f:2.2, focalRat:[2200, 1000], fRat:[220, 100], apex:[227, 100], approx:true },
+      { equiv:23, phys:6.55, f:1.6, focalRat:[6550, 1000], fRat:[160, 100], apex:[135, 100] },
+      { equiv:75, phys:8.8,  f:2.0, focalRat:[8800, 1000], fRat:[200, 100], apex:[200, 100], approx:true },
+    ],
+    isos:[50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200,4000,5000,6400],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,329],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15],[1,10],[1,8]] },
 
-  // ── Canon — Make "Canon", Software "Firmware Version x.y.z" ──
-  { make:"Canon", model:"Canon EOS R5", sw:"Firmware Version 1.8.2", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
-    exifVersion:"0231", flash:false, raw:'image/x-canon-cr3', offsetTime:true,
+  // ── Canon: no Software, APEX over 65536, LensInfo with 0/1 apertures, 12-digit serials ──
+  { make:"Canon", model:"Canon EOS R5", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
+    exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.8.2",
+    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
+    sensor:{ px:[8192, 5464], inch:[1419, 947] },
     apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[100,125,160,200,250,320,400,640,800,1600,3200,6400,12800,25600,51200],
-    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4],[1,2],[1,1],[2,1],[4,1]],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,30],[1,15],[1,8],[1,4],[1,2],[1,1],[2,1],[4,1]],
     focals:[24,35,50,85,100,135,200] },
 
-  { make:"Canon", model:"Canon EOS 5D Mark IV", sw:"Firmware Version 1.3.3", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['EF'],
-    exifVersion:"0230", flash:false, raw:'image/x-canon-cr2', offsetTime:false,
+  { make:"Canon", model:"Canon EOS 5D Mark IV", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['EF'],
+    exifVersion:"0230", offset:'none', subsec:2, flash:false, firmware:"1.3.3",
+    raw:{ mime:'image/x-canon-cr2', ext:'CR2', prefix:'IMG_' },
+    sensor:{ px:[6720, 4480], inch:[1419, 947] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
-    isos:[100,200,400,800,1600,3200,6400,12800,25600],
-    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4]],
+    isos:[100,200,400,800,1600,2500,3200,6400,12800,25600],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,200],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"Canon", model:"Canon EOS 90D", sw:"Firmware Version 1.1.1", type:"dslr", aspects:ASPECTS_DSLR, crop:1.6, mounts:['EF','EF-S'],
-    exifVersion:"0231", flash:true, raw:'image/x-canon-cr3', offsetTime:true,
+  { make:"Canon", model:"Canon EOS 90D", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.6, mounts:['EF','EF-S'],
+    exifVersion:"0231", offset:'all', subsec:2, flash:true, firmware:"1.1.1",
+    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
+    sensor:{ px:[6960, 4640], inch:[877, 585] },
     apertures:[1.8,2.0,2.8,4.0,5.6,8.0,11],
-    isos:[100,200,400,800,1600,3200,6400,12800,25600],
+    isos:[100,200,320,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
     focals:[18,24,35,50,85,100] },
 
-  // ── Nikon — Make "NIKON CORPORATION", Model has a space, Software "Ver.NN.NN" ──
-  { make:"NIKON CORPORATION", model:"NIKON Z 9", sw:"Ver.04.00", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
-    exifVersion:"0232", flash:false, raw:'image/x-nikon-nef', offsetTime:true,
+  // ── Nikon: exposure compensation in sixths, FocalPlane over 32768 per cm, CFAPattern, GainControl, 7-digit serials ──
+  { make:"NIKON CORPORATION", model:"NIKON Z 9", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
+    exifVersion:"0232", offset:'all', subsec:2, flash:false,
+    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
+    sensor:{ px:[8256, 5504], cm:[3.59, 2.39] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
-    isos:[64,100,200,400,800,1600,3200,6400,12800,25600,51200],
-    shutters:[[1,32000],[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]],
+    isos:[64,100,200,400,800,1000,1600,3200,6400,12800,25600,51200],
+    shutters:[[1,32000],[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,160],[1,125],[1,60],[1,30],[1,15],[1,8]],
     focals:[24,35,50,85,105,200,400] },
 
-  // F-mount glass reports through the MakerNote only, so the EXIF carries no
-  // lens tags; Camera Raw names the lens in XMP in its own "24.0-70.0 mm" form.
-  { make:"NIKON CORPORATION", model:"NIKON D850", sw:"Ver.01.10", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['F'],
-    exifVersion:"0231", flash:false, raw:'image/x-nikon-nef', offsetTime:false, lensTags:[],
+  { make:"NIKON CORPORATION", model:"NIKON D850", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['F'],
+    exifVersion:"0231", offset:'none', subsec:2, flash:false,
+    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
+    sensor:{ px:[8256, 5504], cm:[3.59, 2.39] },
     apertures:[1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[64,100,200,400,800,1600,3200,6400,12800,25600],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"NIKON CORPORATION", model:"NIKON Z 6II", sw:"Ver.01.40", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
-    exifVersion:"0231", flash:false, raw:'image/x-nikon-nef', offsetTime:true,
+  // The camera writes "NIKON Z 6_2"; Commons categorises it as "Z 6 II".
+  { make:"NIKON CORPORATION", model:"NIKON Z 6_2", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
+    exifVersion:"0231", offset:'all', subsec:2, flash:false,
+    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
+    sensor:{ px:[6048, 4024], cm:[3.59, 2.39] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[24,35,50,85,105] },
 
-  // ── Sony — Make "SONY", Software "<model> v<firmware>" ──
-  { make:"SONY", model:"ILCE-7M4", sw:"ILCE-7M4 v2.01", type:"dslr", aspects:ASPECTS_DSLR, modes:[[4608,3072]], crop:1.0, mounts:['E'],
-    exifVersion:"0231", flash:false, raw:'image/x-sony-arw', offsetTime:true,
-    apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
-    isos:[50,100,200,400,800,1600,3200,6400,12800,25600,51200],
-    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15],[1,8]],
+  // ── Sony: BrightnessValue over 2560, MaxApertureValue over 256, compensation in tenths, no serial in EXIF ──
+  { make:"SONY", model:"ILCE-7M4", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, modes:[[4608,3072]], crop:1.0, mounts:['E'],
+    exifVersion:"0232", offset:'all', subsec:3, flash:false,
+    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
+    sensor:{ px:[7008, 4672], cm:[3.56, 2.37] },
+    apertures:[1.4,1.8,2.0,2.8,4.0,5.6,6.3,8.0,11],
+    isos:[50,100,200,400,800,1000,1250,1600,3200,6400,12800,25600,51200],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,160],[1,125],[1,60],[1,30],[1,15],[1,8]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"SONY", model:"ILCE-7RM5", sw:"ILCE-7RM5 v1.00", type:"dslr", aspects:ASPECTS_DSLR, crop:1.0, mounts:['E'],
-    exifVersion:"0231", flash:false, raw:'image/x-sony-arw', offsetTime:true,
-    apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
-    isos:[100,200,400,800,1600,3200,6400,12800,25600,51200],
-    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
+  { make:"SONY", model:"ILCE-7RM5", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, crop:1.0, mounts:['E'],
+    exifVersion:"0232", offset:'all', subsec:3, flash:false,
+    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
+    sensor:{ px:[9504, 6336], cm:[3.57, 2.38] },
+    apertures:[1.4,1.8,2.0,2.2,2.8,4.0,5.6,8.0,11],
+    isos:[100,200,400,640,800,1600,3200,6400,12800,25600,51200],
+    shutters:[[1,8000],[1,5000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
     focals:[24,35,50,85,135] },
 
-  // ── Fujifilm — APS-C, Software "Digital Camera <model> Ver<n.nn>" ──
-  { make:"FUJIFILM", model:"X-T5", sw:"Digital Camera X-T5 Ver4.10", type:"dslr", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
-    exifVersion:"0232", flash:false, raw:'image/x-fuji-raf', offsetTime:true,
+  // ── Fujifilm: everything over 100, SensitivityType 1 without an index, serials like 3B008051 ──
+  { make:"FUJIFILM", model:"X-T5", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
+    exifVersion:"0232", offset:'all', subsec:0, flash:false,
+    raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
+    sensor:{ px:[7728, 5152], perCm:3289 },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
-    isos:[125,160,200,400,800,1600,3200,6400,12800,25600,51200],
-    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
-    focals:[18,23,35,56,90] },
+    isos:[125,160,200,400,800,1000,1600,3200,6400,12800,25600,51200],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,400],[1,250],[1,125],[1,60],[1,34],[1,30],[1,15]],
+    focals:[16,18,23,35,56,90] },
 
-  { make:"FUJIFILM", model:"X100VI", sw:"Digital Camera X100VI Ver1.10", type:"dslr", aspects:ASPECTS_DSLR, crop:1.5, mounts:[], fixedLens:true,
-    exifVersion:"0232", flash:true, raw:'image/x-fuji-raf', offsetTime:true, lensTags:['make','info'],
+  { make:"FUJIFILM", model:"X100VI", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:[], fixedLens:true,
+    exifVersion:"0232", offset:'all', subsec:2, flash:true,
+    raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
+    sensor:{ px:[7728, 5152], perCm:3289 },
     apertures:[2.0,2.8,4.0,5.6,8.0,11],
-    isos:[125,200,400,800,1600,3200,6400,12800,25600],
-    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30]],
+    isos:[125,200,400,800,1000,1600,3200,6400,12800,25600],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,340],[1,250],[1,125],[1,60],[1,34],[1,30]],
     focals:[23] },
 ];
-
-// ── Per-make EXIF profiles ───────────────────────────────────────
-//
-// Which optional tags each make's firmware writes, and how it encodes the
-// values it does write. An editor export carries the camera's tags through
-// unchanged, so a file claiming a Samsung has to carry Samsung's tag set, not
-// a generic one. Writing every tag for every make, or drawing their presence
-// at random, was the next-loudest tell after the aspect ratio.
-//
-//   metering    — MeteringMode values the firmware uses. Samsung and Pixel
-//                 write centre-weighted (2); Apple and the bodies write
-//                 multi-segment (5), bodies also offer centre and spot.
-//   flashOff    — Flash values written when the flash did not fire. Nikon
-//                 writes 0 ("No Flash"), most others 16 ("Off, Did not
-//                 fire"), Apple either 16 or 24 ("Auto, Did not fire").
-//   flashFired  — the value for a fired built-in flash.
-//   subsec      — which SubSecTime tags are written and at what width.
-//                 Apple: Original and Digitized, three digits. Android: all
-//                 three, three digits. Canon and Nikon: all three, two digits.
-//                 Sony and Fujifilm: none.
-//   bias        — how ExposureCompensation is encoded. Phones write 0/1.
-//                 Canon and Fujifilm reduce thirds, Nikon writes sixths
-//                 unreduced ("-2/6"), Sony writes tenths.
-//   apex        — rational style for ShutterSpeedValue and ApertureValue.
-//                 Apple writes arbitrary-denominator rationals produced from
-//                 floats; Nikon and Sony write /1000000; Canon snaps to
-//                 eighth-stops; the Android makers and Fujifilm write /100.
-//   fnumber     — denominator of FNumber. Apple reduces (89/50); the other
-//                 phones write /100; bodies write /10.
-//   maxAperture — denominator of MaxApertureValue, or null when not written.
-//   brightness  — BrightnessValue encoding, or null when not written.
-//   lensTags    — which of LensMake, LensModel, LensSpecification are written.
-//   gps         — GPSVersionID (the Exif spec requires it, and the validator
-//                 checks: 2.2.0.0 on the Android makers; 2.3.0.0 on the bodies
-//                 and on Apple, whose GPSHPositioningError is a 2.3 tag), plus
-//                 whether the firmware adds GPSMapDatum, GPSStatus, or Apple's
-//                 speed/heading set.
-//   tags        — fixed-presence tags: sensing (SensingMethod 2), sceneType,
-//                 fileSource, customRendered (value or null), colorAdj
-//                 (Contrast/Saturation/Sharpness = 0), digitalZoom (1/1),
-//                 focalEquiv (FocalLengthIn35mmFormat; Canon never writes
-//                 it), lightSource (0), gainControl, subjectDistance (0),
-//                 cfa (Nikon's CFAPattern), sensitivity (SensitivityType +
-//                 RecommendedExposureIndex, CIPA 2.3 bodies).
-
-const EXIF_PROFILES = {
-  'Apple': {
-    metering:[5], flashOff:[16,24], flashFired:25, subsec:'od3', bias:'zero',
-    apex:'odd', fnumber:'reduced', maxAperture:null, brightness:'odd',
-    lensTags:['make','model','info'],
-    gps:{ version:[2,3,0,0], mapDatum:false, status:false, apple:true },
-    tags:{ sensing:true, sceneType:true, fileSource:false, customRendered:null, colorAdj:false,
-           digitalZoom:false, focalEquiv:true, lightSource:false, gainControl:false,
-           subjectDistance:false, cfa:false, sensitivity:null },
-  },
-  'samsung': {
-    metering:[2], flashOff:[0], flashFired:1, subsec:'all3', bias:'zero',
-    apex:'centi', fnumber:100, maxAperture:100, brightness:'centi',
-    lensTags:[],
-    gps:{ version:[2,2,0,0], mapDatum:false, status:false, apple:false },
-    tags:{ sensing:false, sceneType:true, fileSource:false, customRendered:null, colorAdj:true,
-           digitalZoom:false, focalEquiv:true, lightSource:false, gainControl:false,
-           subjectDistance:false, cfa:false, sensitivity:null },
-  },
-  'Google': {
-    metering:[2], flashOff:[16], flashFired:1, subsec:'all3', bias:'zero',
-    apex:'centi', fnumber:100, maxAperture:100, brightness:'centi',
-    lensTags:['make','model'],
-    gps:{ version:[2,2,0,0], mapDatum:false, status:false, apple:false },
-    tags:{ sensing:true, sceneType:true, fileSource:false, customRendered:1, colorAdj:true,
-           digitalZoom:false, focalEquiv:true, lightSource:false, gainControl:false,
-           subjectDistance:false, cfa:false, sensitivity:null },
-  },
-  'OnePlus': {
-    metering:[2], flashOff:[16], flashFired:1, subsec:'all3', bias:'zero',
-    apex:'centi', fnumber:100, maxAperture:100, brightness:null,
-    lensTags:[],
-    gps:{ version:[2,2,0,0], mapDatum:false, status:false, apple:false },
-    tags:{ sensing:true, sceneType:false, fileSource:false, customRendered:null, colorAdj:false,
-           digitalZoom:false, focalEquiv:true, lightSource:false, gainControl:false,
-           subjectDistance:false, cfa:false, sensitivity:null },
-  },
-  'Xiaomi': {
-    metering:[2], flashOff:[16], flashFired:1, subsec:'all3', bias:'zero',
-    apex:'centi', fnumber:100, maxAperture:100, brightness:null,
-    lensTags:[],
-    gps:{ version:[2,2,0,0], mapDatum:false, status:false, apple:false },
-    tags:{ sensing:true, sceneType:false, fileSource:false, customRendered:null, colorAdj:false,
-           digitalZoom:false, focalEquiv:true, lightSource:false, gainControl:false,
-           subjectDistance:false, cfa:false, sensitivity:null },
-  },
-  'Canon': {
-    metering:[5,5,5,2,3], flashOff:[16], flashFired:25, subsec:'all2', bias:'thirds',
-    apex:'eighths', fnumber:10, maxAperture:null, brightness:null,
-    lensTags:['model','info'],
-    gps:{ version:[2,3,0,0], mapDatum:true, status:true, apple:false },
-    tags:{ sensing:false, sceneType:false, fileSource:false, customRendered:0, colorAdj:false,
-           digitalZoom:false, focalEquiv:false, lightSource:false, gainControl:false,
-           subjectDistance:false, cfa:false, sensitivity:2 },
-  },
-  'NIKON CORPORATION': {
-    metering:[5,5,5,2,3], flashOff:[0], flashFired:9, subsec:'all2', bias:'sixths',
-    apex:'micro', fnumber:10, maxAperture:10, brightness:null,
-    lensTags:['model'],
-    gps:{ version:[2,3,0,0], mapDatum:true, status:false, apple:false },
-    tags:{ sensing:true, sceneType:true, fileSource:true, customRendered:0, colorAdj:true,
-           digitalZoom:true, focalEquiv:true, lightSource:true, gainControl:true,
-           subjectDistance:true, cfa:true, sensitivity:2 },
-  },
-  'SONY': {
-    metering:[5,5,5,2,3], flashOff:[16], flashFired:9, subsec:null, bias:'tenths',
-    apex:'micro', fnumber:10, maxAperture:100, brightness:'centi',
-    lensTags:['model','info'],
-    gps:{ version:[2,3,0,0], mapDatum:false, status:false, apple:false },
-    tags:{ sensing:true, sceneType:true, fileSource:true, customRendered:0, colorAdj:true,
-           digitalZoom:true, focalEquiv:true, lightSource:true, gainControl:false,
-           subjectDistance:false, cfa:false, sensitivity:2 },
-  },
-  'FUJIFILM': {
-    metering:[5,5,5,2,3], flashOff:[16], flashFired:9, subsec:null, bias:'hundredths',
-    apex:'centi', fnumber:10, maxAperture:100, brightness:'centi',
-    lensTags:['make','model','info'],
-    gps:{ version:[2,3,0,0], mapDatum:false, status:false, apple:false },
-    tags:{ sensing:true, sceneType:true, fileSource:true, customRendered:0, colorAdj:true,
-           digitalZoom:false, focalEquiv:true, lightSource:false, gainControl:false,
-           subjectDistance:true, cfa:false, sensitivity:1 },
-  },
-};
 
 // ── Location Database ────────────────────────────────────────────
 //
 // United States only, by design: every generated photo must geolocate inside
 // the US. International cities were removed rather than filtered at pick time,
-// so there is no code path that can select one. They are in git history if
-// they are ever wanted back.
+// so there is no code path that can select one.
 //
 // lon is always negative here (western hemisphere).
 // alt: ground elevation in metres. A GPS altitude unrelated to the terrain at
-//      the coordinates is a cheap consistency check to fail — a Denver photo
-//      tagged 143 m rather than ~1600 m does not survive one.
+//      the coordinates is a cheap consistency check to fail.
 // tz:  IANA zone. GPSTimeStamp is UTC, so it must be derived from the capture
-//      time using the zone of the *photographed city*. Deriving it from the
-//      machine's own clock leaked the real timezone of whoever ran the tool.
+//      time using the zone of the *photographed city*.
 
 const LOCATIONS = [
   // Northeast
@@ -5487,14 +6002,10 @@ const LOCATIONS = [
 // Real lens models per manufacturer, with the focal range each covers so the
 // chosen lens can actually reach the chosen focal length, and the widest
 // aperture it opens to so the chosen f-number is one the lens can produce.
-// `tele` is the maximum aperture at the long end of a variable zoom, for
-// LensSpecification; it equals `wide` on primes and constant-aperture zooms.
+// `tele` is the maximum aperture at the long end of a variable zoom.
+// `adobe` is the name Camera Raw writes for an F-mount Nikon lens, whose
+// identity reaches it through the raw file's MakerNote rather than a string.
 
-// `mount` matters: an RF lens does not fit an EF body and a Z lens does not fit
-// an F body, so pairing a 5D Mark IV with an RF zoom, or a D850 with a NIKKOR Z,
-// describes a camera that cannot be assembled. Bodies list the mounts they
-// accept — R5 and the Z bodies include the older mount because the first-party
-// adapters are near-universal, and EF-S is APS-C only.
 const DSLR_LENSES = {
   'Canon': [
     { model: 'RF24-70mm F2.8 L IS USM',             range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'RF' },
@@ -5503,6 +6014,7 @@ const DSLR_LENSES = {
     { model: 'RF24-105mm F4 L IS USM',              range: [24, 105],  wide: 4.0, tele: 4.0, mount: 'RF' },
     { model: 'RF35mm F1.8 MACRO IS STM',            range: [35, 35],   wide: 1.8, tele: 1.8, mount: 'RF' },
     { model: 'RF100-400mm F5.6-8 IS USM',           range: [100, 400], wide: 5.6, tele: 8.0, mount: 'RF' },
+    { model: 'RF100-500mm F4.5-7.1 L IS USM',       range: [100, 500], wide: 4.5, tele: 7.1, mount: 'RF' },
     { model: 'EF24-70mm f/2.8L II USM',             range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'EF' },
     { model: 'EF50mm f/1.8 STM',                    range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'EF' },
     { model: 'EF85mm f/1.4L IS USM',                range: [85, 85],   wide: 1.4, tele: 1.4, mount: 'EF' },
@@ -5516,30 +6028,34 @@ const DSLR_LENSES = {
   ],
   'NIKON CORPORATION': [
     { model: 'NIKKOR Z 24-70mm f/2.8 S',            range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'Z' },
+    { model: 'NIKKOR Z 24-120mm f/4 S',             range: [24, 120],  wide: 4.0, tele: 4.0, mount: 'Z' },
     { model: 'NIKKOR Z 50mm f/1.8 S',               range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'Z' },
     { model: 'NIKKOR Z 85mm f/1.8 S',               range: [85, 85],   wide: 1.8, tele: 1.8, mount: 'Z' },
     { model: 'NIKKOR Z 70-200mm f/2.8 VR S',        range: [70, 200],  wide: 2.8, tele: 2.8, mount: 'Z' },
     { model: 'NIKKOR Z 24-200mm f/4-6.3 VR',        range: [24, 200],  wide: 4.0, tele: 6.3, mount: 'Z' },
     { model: 'NIKKOR Z 35mm f/1.8 S',               range: [35, 35],   wide: 1.8, tele: 1.8, mount: 'Z' },
     { model: 'NIKKOR Z 100-400mm f/4.5-5.6 VR S',   range: [100, 400], wide: 4.5, tele: 5.6, mount: 'Z' },
-    { model: 'AF-S NIKKOR 24-70mm f/2.8E ED VR',    range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'F' },
-    { model: 'AF-S NIKKOR 50mm f/1.8G',             range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'F' },
-    { model: 'AF-S NIKKOR 85mm f/1.8G',             range: [85, 85],   wide: 1.8, tele: 1.8, mount: 'F' },
-    { model: 'AF-S NIKKOR 70-200mm f/2.8E FL ED VR',range: [70, 200],  wide: 2.8, tele: 2.8, mount: 'F' },
-    { model: 'AF-S NIKKOR 35mm f/1.8G ED',          range: [35, 35],   wide: 1.8, tele: 1.8, mount: 'F' },
-    { model: 'AF-S NIKKOR 105mm f/1.4E ED',         range: [105, 105], wide: 1.4, tele: 1.4, mount: 'F' },
-    { model: 'AF-S NIKKOR 200-500mm f/5.6E ED VR',  range: [200, 500], wide: 5.6, tele: 5.6, mount: 'F' },
+    { model: 'AF-S NIKKOR 24-70mm f/2.8E ED VR',    range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'F', adobe: 'VR 24-70mm f/2.8E' },
+    { model: 'AF-S NIKKOR 50mm f/1.8G',             range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'F', adobe: '50mm f/1.8G' },
+    { model: 'AF-S NIKKOR 85mm f/1.8G',             range: [85, 85],   wide: 1.8, tele: 1.8, mount: 'F', adobe: '85mm f/1.8G' },
+    { model: 'AF-S NIKKOR 70-200mm f/2.8E FL ED VR',range: [70, 200],  wide: 2.8, tele: 2.8, mount: 'F', adobe: 'VR 70-200mm f/2.8E' },
+    { model: 'AF-S NIKKOR 35mm f/1.8G ED',          range: [35, 35],   wide: 1.8, tele: 1.8, mount: 'F', adobe: '35mm f/1.8G' },
+    { model: 'AF-S NIKKOR 105mm f/1.4E ED',         range: [105, 105], wide: 1.4, tele: 1.4, mount: 'F', adobe: '105mm f/1.4E' },
+    { model: 'AF-S NIKKOR 200-500mm f/5.6E ED VR',  range: [200, 500], wide: 5.6, tele: 5.6, mount: 'F', adobe: 'VR 200-500mm f/5.6E' },
   ],
   'SONY': [
     { model: 'FE 24-70mm F2.8 GM II',               range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'E' },
+    { model: 'FE 24-240mm F3.5-6.3 OSS',            range: [24, 240],  wide: 3.5, tele: 6.3, mount: 'E' },
     { model: 'FE 50mm F1.8',                        range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'E' },
     { model: 'FE 85mm F1.4 GM',                     range: [85, 85],   wide: 1.4, tele: 1.4, mount: 'E' },
     { model: 'FE 70-200mm F2.8 GM OSS II',          range: [70, 200],  wide: 2.8, tele: 2.8, mount: 'E' },
+    { model: 'FE 70-200mm F2.8 GM OSS',             range: [70, 200],  wide: 2.8, tele: 2.8, mount: 'E' },
     { model: 'FE 135mm F1.8 GM',                    range: [135, 135], wide: 1.8, tele: 1.8, mount: 'E' },
     { model: 'FE 35mm F1.4 GM',                     range: [35, 35],   wide: 1.4, tele: 1.4, mount: 'E' },
     { model: 'FE 24-105mm F4 G OSS',                range: [24, 105],  wide: 4.0, tele: 4.0, mount: 'E' },
   ],
   'FUJIFILM': [
+    { model: 'XF16-80mmF4 R OIS WR',                range: [16, 80],   wide: 4.0, tele: 4.0, mount: 'X' },
     { model: 'XF23mmF2 R WR',                       range: [23, 23],   wide: 2.0, tele: 2.0, mount: 'X' },
     { model: 'XF35mmF1.4 R',                        range: [35, 35],   wide: 1.4, tele: 1.4, mount: 'X' },
     { model: 'XF56mmF1.2 R',                        range: [56, 56],   wide: 1.2, tele: 1.2, mount: 'X' },
@@ -5552,111 +6068,83 @@ const DSLR_LENSES = {
 /**
  * Choose focal length, aperture and lens as one consistent set.
  *
- * Order matters. Picking the aperture first and then hunting for a lens left no
- * good option when nothing matched — the old fallback handed back any lens that
- * reached the focal length, which is how an f/4 zoom ended up reporting f/1.2.
- * Choosing the lens first and then drawing only from the f-numbers it can open
- * to makes that combination unrepresentable.
- *
- * The returned `lens` carries `make`, `model` and `spec` ([minFocal, maxFocal,
- * wideF, teleF], the LensSpecification values) — any of which may be null when
- * that firmware does not report it. The export names the lens in XMP in
- * `auxLens`, which for Nikon F glass is Adobe's own "24.0-70.0 mm f/2.8" form,
- * since the camera's EXIF never carried a name to preserve.
+ * Phones: one of the phone's fixed lenses, carrying its own measured
+ * rationals and model string. Bodies: with a kit (a batch persona's bag of
+ * lenses) the lens comes first and the focal length is one that lens reaches;
+ * without one, the focal length is drawn and any mountable lens that covers
+ * it is chosen; only f-numbers the lens opens to are offered.
  */
-function pickOptics(cam) {
+function pickOptics(cam, kit = null) {
   if (cam.type === 'phone') {
     const l = pick(cam.lenses);
-    return { focalPhys: l.phys, focalEquiv: l.equiv, aperture: l.f,
-             lens: phoneLens(cam, l) };
+    return { focalPhys: l.phys, focalEquiv: l.equiv, aperture: l.f, lens: l };
   }
 
-  const focalPhys  = pick(cam.focals);
-  const focalEquiv = Math.round(focalPhys * (cam.crop || 1));
-
   if (cam.fixedLens) {
+    const focalPhys  = pick(cam.focals);
+    const focalEquiv = Math.round(focalPhys * (cam.crop || 1));
     const aperture = pick(cam.apertures);
     const wide = Math.min(...cam.apertures);
     return { focalPhys, focalEquiv, aperture,
-             lens: { make: cam.make, model: null, spec: [focalPhys, focalPhys, wide, wide],
-                     auxLens: `${cam.model} ${focalPhys}mm f/${wide}` } };
+             lens: { model: null, range: [focalPhys, focalPhys], wide, tele: wide, mount: null } };
   }
 
-  const covering = (DSLR_LENSES[cam.make] || []).filter(l =>
-    (cam.mounts || []).includes(l.mount) && focalPhys >= l.range[0] && focalPhys <= l.range[1]);
-  const chosen = covering.length ? pick(covering) : null;
-
+  let chosen, focalPhys;
+  if (kit && kit.length) {
+    chosen = pick(kit);
+    const reach = cam.focals.filter(f => f >= chosen.range[0] && f <= chosen.range[1]);
+    focalPhys = reach.length ? pick(reach) : chosen.range[0];
+  } else {
+    focalPhys = pick(cam.focals);
+    const covering = (DSLR_LENSES[cam.make] || []).filter(l =>
+      (cam.mounts || []).includes(l.mount) && focalPhys >= l.range[0] && focalPhys <= l.range[1]);
+    chosen = covering.length ? pick(covering) : null;
+  }
+  const focalEquiv = Math.round(focalPhys * (cam.crop || 1));
   const openable = chosen ? cam.apertures.filter(a => a >= chosen.wide - 0.01) : cam.apertures;
   const aperture = openable.length ? pick(openable) : (chosen ? chosen.wide : pick(cam.apertures));
-
-  if (!chosen) return { focalPhys, focalEquiv, aperture, lens: { make: null, model: null, spec: null, auxLens: null } };
-
-  const spec = [chosen.range[0], chosen.range[1], chosen.wide, chosen.tele];
-  const auxLens = chosen.mount === 'F' ? adobeLensName(chosen) : chosen.model;
-  return { focalPhys, focalEquiv, aperture,
-           lens: { make: cam.make, model: chosen.model, spec, auxLens } };
-}
-
-/** Adobe's generic lens description, "24.0-70.0 mm f/2.8" or "50.0 mm f/1.8". */
-function adobeLensName(l) {
-  const f1 = l.range[0].toFixed(1), f2 = l.range[1].toFixed(1);
-  const focal = l.range[0] === l.range[1] ? `${f1} mm` : `${f1}-${f2} mm`;
-  const ap = l.wide === l.tele ? `f/${l.wide}` : `f/${l.wide}-${l.tele}`;
-  return `${focal} ${ap}`;
+  return { focalPhys, focalEquiv, aperture, lens: chosen };
 }
 
 /**
- * Phones report the phone itself as the lens, in the manufacturer's own
- * wording. Apple names the camera cluster and quotes the physical focal
- * length; its LensSpecification spans every lens on the back. Google names
- * the module. Samsung, OnePlus and Xiaomi write no lens tags at all.
+ * A photographer's bag: one to three lenses that fit the body. A batch of
+ * photos from one trip is shot on a kit, not on a different lens per frame
+ * drawn from the whole catalogue.
  */
-function phoneLens(cam, l) {
-  const f = Number(l.f.toFixed(2));
-  if (cam.make === 'Apple') {
-    const phys = cam.lenses.map(x => x.phys), fs = cam.lenses.map(x => x.f);
-    const model = `${cam.model} back ${cam.lensWord} camera ${l.phys}mm f/${f}`;
-    return { make: 'Apple', model, auxLens: model,
-             spec: [Math.min(...phys), Math.max(...phys), Math.min(...fs), Math.max(...fs)] };
-  }
-  if (cam.make === 'Google') {
-    const model = `${cam.model} back camera ${l.phys}mm f/${f}`;
-    return { make: 'Google', model, auxLens: model, spec: null };
-  }
-  return { make: null, model: null, auxLens: null, spec: null };
+function pickKit(cam) {
+  if (cam.type === 'phone' || cam.fixedLens) return null;
+  const pool = (DSLR_LENSES[cam.make] || []).filter(l => (cam.mounts || []).includes(l.mount));
+  if (!pool.length) return null;
+  const n = Math.min(pool.length, pick([1, 2, 2, 3]));
+  const rest = [...pool], kit = [];
+  while (kit.length < n) kit.push(rest.splice(Math.floor(rnd() * rest.length), 1)[0]);
+  return kit;
 }
 
-;return { CAMERAS, EXIF_PROFILES, LOCATIONS, DSLR_LENSES, pickOptics };
+;return { CAMERAS, LOCATIONS, DSLR_LENSES, pickOptics, pickKit };
 })();
 
 // ── js/exif.js ────────────────────────────────────────────────────────
 __modules["exif"] = (function () {
 /**
- * exif.js — EXIF metadata generation, parsing, and display.
+ * exif.js — Metadata generation, parsing, and display.
  *
- * Handles:
- * - Generating realistic fake EXIF data (generateFake)
- * - Reading/verifying EXIF from processed images (readBackExifStrict)
- * - Parsing EXIF from uploaded files (parseFileExif)
- * - Converting piexif internal format to display-friendly objects
- * - Formatting and rendering metadata for the UI
+ * generateFake() builds the metadata of a photo exported from Adobe Camera
+ * Raw (camera bodies, from a raw file) or Adobe Lightroom (phones, from a
+ * JPEG). The tag values that survive an export are written in the exact form
+ * each camera's firmware uses, read from real sample files; the tags Adobe
+ * drops or rewrites are dropped or rewritten the way the measured exports do.
  */
 
-// Vendored: a bare module import from a CDN cannot carry an integrity hash,
-// so a compromised CDN could run anything it liked against the user's photos,
-// and every load handed the CDN the user's IP address and referrer.
 const exifr = ((window.exifr && window.exifr.default) || window.exifr);
 const { ICONS } = __modules["icons"];
-const { pick, randInt, clamp, cryptoRandInt, jitterLocation, fmtDate, fmtGpsDate, gpsTimeStamp, wallClockToUtc, tzOffsetString, sunElevation, dmsToDec, dataUrlToBlob, fromRat, cleanExifStr, escapeHtml } = __modules["helpers"];
-const { CAMERAS, LOCATIONS, EXIF_PROFILES, pickOptics } = __modules["data"];
+const { pick, randInt, clamp, cryptoRandInt, jitterLocation, fmtDate, fmtGpsDate, wallClockToUtc, tzOffsetString, sunElevation, dmsToDec, dataUrlToBlob, fromRat, cleanExifStr, escapeHtml } = __modules["helpers"];
+const { CAMERAS, LOCATIONS, pickOptics, pickKit } = __modules["data"];
 const { pickEditor } = __modules["provenance"];
+const { rnd } = __modules["rng"];
 
 // ── EXIF Parsing ─────────────────────────────────────────────────
 
-/**
- * Parse EXIF metadata from a File object using the exifr library.
- * Returns a flat object of EXIF fields, or {} if parsing fails.
- */
 async function parseFileExif(file) {
   try {
     const raw = await exifr.parse(file, { all: true, gps: true, tiff: true, exif: true, iptc: true });
@@ -5666,24 +6154,18 @@ async function parseFileExif(file) {
   }
 }
 
-/**
- * Convert piexif's internal IFD structure to a flat display-friendly object.
- * Maps numeric tag IDs to human-readable field names with decoded values.
- */
 function piexifToDisplay(pxData) {
   const px = window.piexif;
   const z = pxData?.["0th"]  || {};
   const e = pxData?.["Exif"] || {};
   const g = pxData?.["GPS"]  || {};
   const out = {};
-
   const set = (key, val) => {
     if (val == null) return;
     if (typeof val === 'number' && Number.isNaN(val)) return;
     out[key] = val;
   };
 
-  // 0th IFD (main image info)
   set('Make',        cleanExifStr(z[px.ImageIFD.Make]));
   set('Model',       cleanExifStr(z[px.ImageIFD.Model]));
   set('Software',    cleanExifStr(z[px.ImageIFD.Software]));
@@ -5692,7 +6174,6 @@ function piexifToDisplay(pxData) {
   set('YResolution', fromRat(z[px.ImageIFD.YResolution]));
   set('Orientation', z[px.ImageIFD.Orientation]);
 
-  // Exif IFD (capture settings)
   set('ExposureTime',           fromRat(e[px.ExifIFD.ExposureTime]));
   set('FNumber',                fromRat(e[px.ExifIFD.FNumber]));
   set('ISO',                    e[px.ExifIFD.ISOSpeedRatings]);
@@ -5713,7 +6194,6 @@ function piexifToDisplay(pxData) {
   set('PixelXDimension',        e[px.ExifIFD.PixelXDimension]);
   set('PixelYDimension',        e[px.ExifIFD.PixelYDimension]);
 
-  // GPS IFD
   const latRef = cleanExifStr(g[px.GPSIFD.GPSLatitudeRef]);
   const lonRef = cleanExifStr(g[px.GPSIFD.GPSLongitudeRef]);
   set('GPSLatitude',  dmsToDec(g[px.GPSIFD.GPSLatitude], latRef));
@@ -5724,15 +6204,9 @@ function piexifToDisplay(pxData) {
   return out;
 }
 
-/**
- * Verify that EXIF was correctly written to a data URL.
- * Tries exifr first (more robust), falls back to piexif readback.
- * Returns { blob, exif, parser, warning }.
- */
 async function readBackExifStrict(dataUrl) {
   const blob = dataUrlToBlob(dataUrl);
   let exifrErr = null;
-
   try {
     const parsed = await exifr.parse(blob, { all: true, gps: true, tiff: true, exif: true });
     if (parsed && Object.keys(parsed).length) {
@@ -5742,29 +6216,178 @@ async function readBackExifStrict(dataUrl) {
   } catch (e) {
     exifrErr = e;
   }
-
-  // Fallback: try piexif's own readback
   try {
     const parsed = piexifToDisplay(window.piexif.load(dataUrl));
     if (Object.keys(parsed).length) {
-      return {
-        blob,
-        exif: parsed,
-        parser: 'piexif',
-        warning: `EXIF was written, but exifr readback failed (${exifrErr?.message || 'unknown error'}).`,
-      };
+      return { blob, exif: parsed, parser: 'piexif',
+               warning: `EXIF was written, but exifr readback failed (${exifrErr?.message || 'unknown error'}).` };
     }
   } catch (e) {
     const exifrMsg = exifrErr?.message || 'unknown exifr error';
     throw new Error(`Metadata verification failed (exifr: ${exifrMsg}; piexif: ${e.message})`);
   }
-
   throw new Error(`Metadata verification failed (${exifrErr?.message || 'no readable EXIF found'})`);
 }
 
-// ── Fake EXIF Generation ─────────────────────────────────────────
+// ── Rational encoders ────────────────────────────────────────────
 
-/** Scene brightness bands in EV at ISO 100. */
+const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+const reduce = (n, d) => { const g = gcd(Math.abs(n), d) || 1; return [n / g, d / g]; };
+const ratFixed = (v, den) => [Math.round(v * den), den];
+
+/**
+ * Apple's rationals are the continued-fraction convergent of the float32
+ * value, taken at the first convergent that agrees to about nine digits:
+ * f/1.78 becomes 1244236/699009, a 6.765 mm focal length 251773/37217.
+ */
+function ratFloat32(v) {
+  const f = Math.fround(v);
+  if (f === 0) return [0, 1];
+  const neg = f < 0;
+  let a = Math.abs(f);
+  let h0 = 0, h1 = 1, k0 = 1, k1 = 0;
+  for (let i = 0; i < 40; i++) {
+    const ai = Math.floor(a);
+    [h0, h1] = [h1, ai * h1 + h0];
+    [k0, k1] = [k1, ai * k1 + k0];
+    if (k1 > 100000000) break;
+    if (Math.abs(h1 / k1 - Math.abs(f)) <= 1e-9 * Math.abs(f)) break;
+    if (a - ai === 0) break;
+    a = 1 / (a - ai);
+  }
+  return [neg ? -h1 : h1, k1];
+}
+
+/** APEX shutter/aperture value, as Adobe rewrites it on export: N/1000000, or N/1 when integral. */
+function apexMicro(v) {
+  const r = Math.round(v);
+  if (Math.abs(v - r) < 1e-9) return [r, 1];
+  return [Math.round(v * 1000000), 1000000];
+}
+
+/** Lens specification rationals, "24/1 70/1 28/10 28/10" in the EXIF and XMP. */
+function specRat(v) {
+  if (Number.isInteger(v)) return [v, 1];
+  if (Math.abs(v * 10 - Math.round(v * 10)) < 1e-9) return [Math.round(v * 10), 10];
+  return [Math.round(v * 100), 100];
+}
+function lensInfoString(spec) {
+  return spec.map(([n, d]) => `${n}/${d}`).join(' ');
+}
+
+/** GPS coordinate in the form the exporter writes: degrees, decimal minutes over 1e7, zero seconds. */
+function adobeGps(abs) {
+  const d = Math.floor(abs);
+  const m = (abs - d) * 60;
+  return [[d, 1], [Math.round(m * 1e7), 1e7], [0, 1]];
+}
+
+// ── Per-firmware encodings ───────────────────────────────────────
+//
+// What each camera writes, and how, among the tags that survive an Adobe
+// export. Keyed by the `writer` field in data.js. Bodies (canon/nikon/sony/
+// fuji) export from a raw file through Camera Raw and keep the FocalPlane and
+// sensor-origin tags; phones export from a JPEG through Lightroom and do not.
+
+const WRITERS = {
+  apple: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 1, brightness: 'cf', maxAperture: null, sensitivity: null,
+    flashOff: [16], flashFired: 25, metering: [5],
+    lensTags: ['make', 'model', 'info'], lensMake: 'Apple',
+    gpsVersion: null, dirRef: 'T',
+    extras: { focalEquiv: true, digitalZoom: 'zoom', sensing: true, sceneType: true },
+  },
+  google: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 6, brightness: 100, maxAperture: 100, sensitivity: null,
+    flashOff: [16], flashFired: 1, metering: [2],
+    lensTags: ['make', 'model'], lensMake: 'Google',
+    gpsVersion: [2, 2, 0, 0], dirRef: 'M',
+    extras: { focalEquiv: true, digitalZoom: 'always', customRendered: 1, sensing: true, sceneType: true,
+              contrast: true, subjectDistanceRange: true },
+  },
+  samsung: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 100, brightness: 100, maxAperture: 'apex', sensitivity: null,
+    flashOff: [0], flashFired: 1, metering: [2],
+    lensTags: [], gpsVersion: [2, 2, 0, 0], dirRef: 'M',
+    extras: { focalEquiv: true, digitalZoom: 'always' },
+  },
+  samsungA: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 10, brightness: 100, maxAperture: 'apex', sensitivity: null,
+    flashOff: [0], flashFired: 1, metering: [2],
+    lensTags: [], gpsVersion: [2, 2, 0, 0], dirRef: 'M',
+    extras: { focalEquiv: true, digitalZoom: 'always', customRendered: 0, sensing: true, sceneType: true,
+              contrast: true },
+  },
+  oneplus: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 6, brightness: 100, maxAperture: 'apex', sensitivity: null,
+    flashOff: [16], flashFired: 1, metering: [2],
+    lensTags: ['model'], lensMake: null,
+    gpsVersion: null, dirRef: 'M',
+    extras: { focalEquiv: true, digitalZoom: 'always', sensing1: true, sceneType: true },
+  },
+  xiaomi: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 6, brightness: 100, maxAperture: 'apex', sensitivity: 3,
+    flashOff: [16], flashFired: 1, metering: [2],
+    lensTags: [], gpsVersion: null, dirRef: 'M',
+    extras: { focalEquiv: true, sensing1: true, sceneType: true, lightSource: 21 },
+  },
+  canon: {
+    kind: 'body',
+    fnumber: 10, focal: 1,
+    expComp: 1, brightness: null, maxAperture: 'adobe100', sensitivity: 2,
+    flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
+    lensTags: ['info', 'model', 'serial'], lensMake: null, lensInfoApertureZero: true,
+    gpsVersion: [2, 3, 0, 0], serial: 12,
+    extras: { focalPlane: true, customRendered: 0, serialNumber: true, status: true, mapDatum: true },
+  },
+  nikon: {
+    kind: 'body',
+    fnumber: 100, focal: 10,
+    expComp: 6, brightness: null, maxAperture: null, sensitivity: 2,
+    flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
+    lensTags: ['info', 'model', 'make', 'serial'], lensMake: 'NIKON', lensAdobe: true,
+    gpsVersion: [2, 3, 0, 0], serial: 7,
+    extras: { focalPlane: true, focalPlaneUnit: 3, sensing: true, fileSource: true, sceneType: true,
+              cfa: true, customRendered: 1, focalEquiv: true, gainControl: true, contrast: true,
+              subjectDistanceRange: true, serialNumber: true },
+  },
+  sony: {
+    kind: 'body',
+    fnumber: 10, focal: 10,
+    expComp: 10, brightness: 2560, maxAperture: 256, sensitivity: 2,
+    flashOff: [16], flashFired: 9, metering: [5, 5, 5, 2, 3],
+    lensTags: ['info', 'model'], lensMake: null,
+    gpsVersion: [2, 3, 0, 0],
+    extras: { focalPlane: true, focalPlaneUnit: 3, fileSource: true, sceneType: true, customRendered: 0,
+              focalEquiv: true, digitalZoom: 'always', contrast: true, lightSource: 0 },
+  },
+  fuji: {
+    kind: 'body',
+    fnumber: 100, focal: 100,
+    expComp: 100, brightness: 100, maxAperture: 100, sensitivity: 1,
+    flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
+    lensTags: ['info', 'model', 'make', 'serial'], lensMake: 'FUJIFILM',
+    gpsVersion: [2, 3, 0, 0], serial: 8,
+    extras: { focalPlane: true, focalPlaneUnit: 3, sensing: true, fileSource: true, sceneType: true,
+              customRendered: 0, focalEquiv: true, sharpness: true, subjectDistanceRange: true,
+              serialNumber: true, lightSource: 0 },
+  },
+};
+
+// ── Exposure ─────────────────────────────────────────────────────
+
 const SCENES = {
   daylight: { evMin: 13, evMax: 16, dark: false },
   overcast: { evMin: 10, evMax: 13, dark: false },
@@ -5775,20 +6398,12 @@ const SCENES = {
 
 function weightedPick(weights) {
   const entries = Object.entries(weights);
-  let r = Math.random() * entries.reduce((n, [, w]) => n + w, 0);
+  let r = rnd() * entries.reduce((n, [, w]) => n + w, 0);
   for (const [k, w] of entries) { r -= w; if (r <= 0) return k; }
   return entries[0][0];
 }
 
-/**
- * Choose the scene from where the sun actually was.
- *
- * Brightness used to be drawn independently of the clock, so one night-time
- * frame in three claimed full daylight. The sun's elevation at the claimed
- * place and time is a one-line computation for anyone checking, so the scene
- * follows it: high sun is mostly daylight, twilight is mostly interiors, and
- * after dark there is no daylight at all.
- */
+/** The scene follows the sun's elevation at the claimed place and time. */
 function pickScene(sunEl) {
   let w;
   if      (sunEl > 25) w = { daylight: 55, overcast: 25, indoor: 20 };
@@ -5799,7 +6414,6 @@ function pickScene(sunEl) {
   return { name, ...SCENES[name] };
 }
 
-/** When people take pictures: hardly at all before dawn, mostly through the day and evening. */
 const HOUR_WEIGHTS = [1, 1, 1, 1, 1, 1, 2, 4, 6, 8, 8, 8, 9, 9, 9, 9, 9, 9, 8, 7, 5, 4, 2, 1.5];
 function pickHour() {
   return Number(weightedPick(Object.fromEntries(HOUR_WEIGHTS.map((w, i) => [i, w]))));
@@ -5808,126 +6422,21 @@ function pickHour() {
 const HOUR = 36e5, DAY = 864e5;
 
 /**
- * Capture and export instants.
- *
- * Both are wall-clock readings in the photographed city; the zone is applied
- * when they are converted. The capture is drawn from the two years before an
- * anchor that itself sits a random one to ninety days in the past, so the
- * latest date in a batch no longer says when the tool was run. The export
- * follows the capture by hours to weeks, during waking hours, as a real one
- * does — the earlier version wrote capture and export as the same second.
- */
-function pickDates(originalDate) {
-  const anchor = Date.now() - randInt(1, 90) * DAY - Math.floor(Math.random() * DAY);
-  let capture;
-  if (originalDate instanceof Date && !isNaN(originalDate)) {
-    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
-                       pickHour(), randInt(0, 59), randInt(0, 59));
-  } else {
-    capture = new Date(anchor - randInt(2, 700 * 24) * HOUR);
-    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
-  }
-  let exportAt = new Date(Math.min(anchor, capture.getTime() + randInt(2, 45 * 24) * HOUR));
-  exportAt.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
-  if (exportAt.getTime() <= capture.getTime() + HOUR) {
-    exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
-  }
-  return { capture, exportAt };
-}
-
-// ── Rational encodings ──
-//
-// Each firmware serialises its rationals its own way, and an editor export
-// carries those strings through. Writing every value as n/100 for all nine
-// makes was a signature of this writer.
-const gcd = (a, b) => (b ? gcd(b, a % b) : a);
-const reduce = (n, d) => { const g = gcd(Math.abs(n), d) || 1; return [n / g, d / g]; };
-const ratFixed   = (v, den) => [Math.round(v * den), den];
-const ratReduced = (v, den) => reduce(Math.round(v * den), den);
-const ratOdd     = v => { const den = randInt(1000, 9999); return [Math.round(v * den), den]; };
-const ratEighths = v => reduce(Math.round(v * 8), 8);
-
-function apexRat(style, v) {
-  switch (style) {
-    case 'odd':     return ratOdd(v);
-    case 'micro':   return ratFixed(v, 1000000);
-    case 'eighths': return ratEighths(v);
-    default:        return ratFixed(v, 100);
-  }
-}
-
-function biasRat(style, stops) {
-  switch (style) {
-    case 'thirds':     return reduce(Math.round(stops * 3), 3);
-    case 'sixths':     return [Math.round(stops * 6), 6];
-    case 'tenths':     return [Math.round(stops * 10), 10];
-    case 'hundredths': return [Math.round(stops * 100), 100];
-    default:           return [0, 1];
-  }
-}
-
-/**
- * A lens focal or f-number as LensSpecification carries it: 24/1, 28/10,
- * 178/100 — the same form the XMP aux:LensInfo string uses, so the two copies
- * of the value in the file agree byte for byte.
- */
-const specRat = v => (Number.isInteger(v) ? [v, 1]
-  : Math.abs(v * 10 - Math.round(v * 10)) < 1e-9 ? [Math.round(v * 10), 10]
-  : [Math.round(v * 100), 100]);
-
-/**
- * Coordinates as Adobe writes them: degrees, decimal minutes to four places,
- * and a zero seconds field. XMP stores GPS as "DDD,MM.mmmmN", and when the
- * exporter reconciles that back into the EXIF block the seconds come out as
- * 0/1 whatever precision the camera used. It is the one encoding that is the
- * same for every make here, because the exporter wrote it, not the camera.
- */
-function adobeDegMin(abs) {
-  const d = Math.floor(abs);
-  const m = Math.round((abs - d) * 60 * 10000);
-  return [[d, 1], [m, 10000], [0, 1]];
-}
-
-/**
- * Solve a physically consistent shutter/ISO pair for a scene and aperture.
- *
- * Exposure is not three free variables. They are tied together by
- *
- *     N² / t  =  (ISO / 100) · 2^EV
- *
- * so picking shutter, aperture and ISO independently produced frames no scene
- * could have produced — ISO 51200 at 1/4000s and f/1.4 describes somewhere
- * darker than a sealed room, and anyone who computes EV back out of the EXIF
- * sees it at a glance.
- *
- * Real cameras resolve it the way this does: hold the aperture, raise ISO only
- * as far as the shutter requires, then land on a speed from the fixed ladder.
- * The rounding left over from that snap is kept, because a real camera's EXIF
- * does not come out algebraically perfect either.
- *
- * Checked against a published OnePlus 5 frame — ISO 500, f/1.7, 1/100, which
- * is EV 5.85. Fed that scene and aperture, this returns ISO 400 at 1/125.
+ * Solve a physically consistent shutter/ISO pair for a scene and aperture:
+ * N²/t = (ISO/100)·2^EV. Picking the three independently produced frames no
+ * scene could have produced.
  */
 function solveExposure(cam, aperture, ev, focalEquiv) {
   const isos = [...cam.isos].sort((a, b) => a - b);
   const seconds = s => s[0] / s[1];
-
-  // Slowest shutter still expected to come out sharp. Phones stabilise hard and
-  // target around 1/60; bodies follow roughly the 1/focal reciprocal rule.
   const slowest = cam.type === 'phone'
     ? 1 / 60
     : clamp(1 / Math.max(focalEquiv, 1), 1 / 250, 1 / 30);
-
   const required = iso => 100 * aperture * aperture / (iso * Math.pow(2, ev));
-
-  // Lowest ISO that keeps the shutter short enough; if none does, the sensor is
-  // maxed out and the exposure simply runs long, as it would at night.
   let iso = isos[isos.length - 1];
   for (const candidate of isos) {
     if (required(candidate) <= slowest) { iso = candidate; break; }
   }
-
-  // Snap to the nearest rung in stops, not in seconds.
   const want = required(iso);
   let shutter = cam.shutters[0];
   let bestErr = Infinity;
@@ -5938,47 +6447,89 @@ function solveExposure(cam, aperture, ev, focalEquiv) {
   return { shutter, iso };
 }
 
-/**
- * The brightest and darkest scenes this body can actually meter at a given
- * aperture — base ISO with its fastest shutter at one end, maximum ISO with its
- * slowest at the other.
- *
- * Scenes are clamped into this range before solving. Without it, an f/1.42
- * phone handed full midday sun needed 1/16000s, its shutter stopped at 1/4000,
- * and the written triplet came out two stops away from the scene it claimed.
- * Real hardware cannot record what it cannot expose, so neither should this.
- */
 function cameraEvRange(cam, aperture) {
-  const secs   = cam.shutters.map(s => s[0] / s[1]);
-  const evAt   = (t, iso) => Math.log2(aperture * aperture / t) - Math.log2(iso / 100);
-  return [
-    evAt(Math.max(...secs), Math.max(...cam.isos)),
-    evAt(Math.min(...secs), Math.min(...cam.isos)),
-  ];
+  const secs = cam.shutters.map(s => s[0] / s[1]);
+  const evAt = (t, iso) => Math.log2(aperture * aperture / t) - Math.log2(iso / 100);
+  return [evAt(Math.max(...secs), Math.max(...cam.isos)), evAt(Math.min(...secs), Math.min(...cam.isos))];
+}
+
+function apexBrightness(aperture, exposureSec, iso) {
+  return 2 * Math.log2(aperture) - Math.log2(exposureSec) - Math.log2(iso / 3.125);
+}
+
+// ── Dates and personas ───────────────────────────────────────────
+
+function pickDates(originalDate) {
+  const anchor = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
+  let capture;
+  if (originalDate instanceof Date && !isNaN(originalDate)) {
+    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
+                       pickHour(), randInt(0, 59), randInt(0, 59));
+  } else {
+    capture = new Date(anchor - randInt(2, 700 * 24) * HOUR);
+    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
+  }
+  let exportAt = new Date(Math.min(anchor, capture.getTime() + randInt(2, 45 * 24) * HOUR));
+  exportAt.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
+  if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
+  return { capture, exportAt };
 }
 
 /**
- * Pad ASCII values to an even byte count before writing.
- *
- * TIFF wants every value to start on a word boundary. piexifjs concatenates
- * value data without padding, so one odd-length string — "17.4.1" and its
- * terminator come to 7 bytes — pushes everything after it onto odd offsets, and
- * `exiftool -validate` then reports a string of "Odd offset for ..." warnings on
- * every file the tool produces. That is a deterministic signature of the writer,
- * which is exactly what this project exists to avoid.
- *
- * piexifjs appends the NUL terminator itself, so a value is even overall when
- * the string length is odd. Real encoders pad the same way, and every reader
- * strips trailing NULs, so nothing downstream sees a difference.
- *
- * Only Ascii-typed tags are touched: Undefined tags such as ExifVersion are
- * fixed-width and must not grow. So are a handful of Ascii ones — GPSDateStamp
- * is specified as exactly 11 bytes, and padding it to 12 trades one validation
- * warning for another.
+ * A persona for a batch: one body, one bag of lenses, one city, one trip of a
+ * few days, one export session. Each photo still draws its own lens from the
+ * kit, its own spot in the city, its own moment in the trip, its own exposure.
  */
-const FIXED_LENGTH_ASCII = new Set([
-  `GPS:${0x001d}`,   // GPSDateStamp, "YYYY:MM:DD\0"
-]);
+function makePersona() {
+  const cam    = pick(CAMERAS);
+  const city   = pick(LOCATIONS);
+  const editor = pickEditor(cam.type === 'dslr' ? 'acr' : 'lr');
+  const kit    = pickKit(cam);
+  const anchor    = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
+  const tripStart = anchor - randInt(2 * 24, 700 * 24) * HOUR;
+  const tripEnd   = tripStart + randInt(0, 6) * DAY;
+  let session = new Date(Math.min(anchor, tripEnd + randInt(2, 45 * 24) * HOUR));
+  session.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
+  if (session.getTime() <= tripEnd + DAY) session = new Date(tripEnd + DAY + randInt(2, 8) * HOUR);
+  return { cam, city, editor, kit, tripStart, tripEnd, session, exported: 0 };
+}
+
+function personaDates(persona, originalDate) {
+  let capture;
+  if (originalDate instanceof Date && !isNaN(originalDate)) {
+    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
+                       pickHour(), randInt(0, 59), randInt(0, 59));
+  } else {
+    capture = new Date(persona.tripStart + Math.floor(rnd() * (persona.tripEnd - persona.tripStart + DAY)));
+    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
+  }
+  persona.exported += randInt(4, 40);
+  let exportAt = new Date(persona.session.getTime() + persona.exported * 1000);
+  if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
+  return { capture, exportAt };
+}
+
+// ── Tag registration ─────────────────────────────────────────────
+
+const TAG_OFFSET_TIME           = 0x9010;
+const TAG_OFFSET_TIME_ORIGINAL  = 0x9011;
+const TAG_OFFSET_TIME_DIGITIZED = 0x9012;
+const TAG_SERIAL_NUMBER         = 0xa431;
+const TAG_LENS_SERIAL           = 0xa435;
+
+/** Register the handful of tags piexifjs 1.0.6 does not know, so exif-writer can serialise them. */
+function registerTags(px) {
+  const E = px?.TAGS?.Exif;
+  if (!E) return;
+  const add = (tag, name, type) => { if (!E[tag]) E[tag] = { name, type }; };
+  add(TAG_OFFSET_TIME, 'OffsetTime', 'Ascii');
+  add(TAG_OFFSET_TIME_ORIGINAL, 'OffsetTimeOriginal', 'Ascii');
+  add(TAG_OFFSET_TIME_DIGITIZED, 'OffsetTimeDigitized', 'Ascii');
+  add(TAG_SERIAL_NUMBER, 'BodySerialNumber', 'Ascii');
+  add(TAG_LENS_SERIAL, 'LensSerialNumber', 'Ascii');
+}
+
+const FIXED_LENGTH_ASCII = new Set([`GPS:${0x001d}`]);
 
 function alignAsciiValues(p, px) {
   for (const [ifdKey, fallback] of [['0th', 'Image'], ['Exif', 'Exif'], ['GPS', 'GPS'],
@@ -5995,251 +6546,267 @@ function alignAsciiValues(p, px) {
   }
 }
 
-/** APEX brightness: Bv = Av + Tv - Sv. Wrong here would be its own tell. */
-function apexBrightness(aperture, exposureSec, iso) {
-  const av = 2 * Math.log2(aperture);
-  const tv = -Math.log2(exposureSec);
-  const sv = Math.log2(iso / 3.125);
-  return av + tv - sv;
-}
+// ── Serial-number generators (shape matches the measured samples) ──
 
-// piexifjs 1.0.6 predates the OffsetTime tags, so its writer rejects them
-// unless they are registered. Every current phone writes OffsetTimeOriginal,
-// and its absence next to a GPS timestamp is conspicuous.
-const TAG_OFFSET_TIME            = 0x9010;
-const TAG_OFFSET_TIME_ORIGINAL   = 0x9011;
-const TAG_OFFSET_TIME_DIGITIZED  = 0x9012;
-
-function registerOffsetTimeTags(px) {
-  const tags = px?.TAGS?.Exif;
-  if (!tags) return false;
-  if (!tags[TAG_OFFSET_TIME])           tags[TAG_OFFSET_TIME]           = { name: 'OffsetTime',          type: 'Ascii' };
-  if (!tags[TAG_OFFSET_TIME_ORIGINAL])  tags[TAG_OFFSET_TIME_ORIGINAL]  = { name: 'OffsetTimeOriginal',  type: 'Ascii' };
-  if (!tags[TAG_OFFSET_TIME_DIGITIZED]) tags[TAG_OFFSET_TIME_DIGITIZED] = { name: 'OffsetTimeDigitized', type: 'Ascii' };
-  return true;
+const digits = n => Array.from({ length: n }, () => '0123456789'[Math.floor(rnd() * 10)]).join('');
+function serialFor(writer) {
+  if (writer.serial === 12) return digits(12);        // Canon
+  if (writer.serial === 7)  return digits(7);         // Nikon
+  if (writer.serial === 8)  return (0x30000000 + Math.floor(rnd() * 0x0fffffff)).toString(16).toUpperCase(); // Fuji
+  return null;
 }
+const hex = n => Array.from({ length: n }, () => '0123456789abcdef'[Math.floor(rnd() * 16)]).join('');
+
+// ── Fake metadata generation ─────────────────────────────────────
 
 /**
- * Generate a complete set of realistic fake EXIF metadata.
- *
- * Picks a camera, a US location, a lens, a capture time and the scene the
- * sun allows at that time, solves a consistent exposure, and writes the tag
- * set that camera's firmware writes — in the encodings it uses — as it would
- * survive a Camera Raw export. The export's own fields (Software, the resolution,
- * the export date in ModifyDate, the Interoperability IFD) are the editor's.
- *
- * Returns { display, piexif, cam, loc, lens, editor, capture, exportAt, ... }.
+ * Build the metadata of one exported photo. Returns the display object, the
+ * piexif write object, and the context the container (XMP, APP13) needs.
  */
 function generateFake(options = {}) {
   const px = window.piexif;
-  const cam = pick(CAMERAS);
-  const prof = EXIF_PROFILES[cam.make];
-  const loc = jitterLocation(pick(LOCATIONS));
-  const editor = pickEditor();
+  registerTags(px);
+  const persona = options.persona || null;
+  const cam = persona ? persona.cam : pick(CAMERAS);
+  const w   = WRITERS[cam.writer];
+  const loc = jitterLocation(persona ? persona.city : pick(LOCATIONS));
+  const isBody = w.kind === 'body';
+  const editor = persona ? persona.editor : pickEditor(isBody ? 'acr' : 'lr');
 
-  // Focal length, aperture and lens are chosen together so they describe a
-  // camera that can be assembled and a lens that can take the shot.
-  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
+  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam, persona ? persona.kit : null);
 
-  const { capture, exportAt } = pickDates(options.originalDate);
+  const { capture, exportAt } = persona ? personaDates(persona, options.originalDate) : pickDates(options.originalDate);
   const utc          = wallClockToUtc(capture, loc.tz);
   const exportUtc    = wallClockToUtc(exportAt, loc.tz);
   const offsetString = tzOffsetString(utc, loc.tz);
   const exportOffset = tzOffsetString(exportUtc, loc.tz);
 
-  // ── Exposure: the sun fixes the scene; one scene drives shutter, ISO and flash.
   const scene = pickScene(sunElevation(loc.lat, loc.lon, utc));
-  const flashFired = !!cam.flash && scene.dark && Math.random() < (cam.type === 'phone' ? 0.3 : 0.25);
-  // A fired flash lights the subject, so the frame is metered several stops
-  // brighter than the ambient scene.
-  const rawEv = scene.evMin + Math.random() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
+  const flashFired = !!cam.flash && scene.dark && rnd() < (cam.type === 'phone' ? 0.3 : 0.25);
+  const rawEv = scene.evMin + rnd() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
   const [evLo, evHi] = cameraEvRange(cam, aperture);
   const ev = clamp(rawEv, evLo, evHi);
-
   const { shutter, iso } = solveExposure(cam, aperture, ev, focalEquiv);
   const exposureSec = shutter[0] / shutter[1];
 
-  const flash           = flashFired ? prof.flashFired : pick(prof.flashOff);
-  const meteringMode    = pick(prof.metering);
+  const flash           = flashFired ? w.flashFired : pick(w.flashOff);
+  const meteringMode    = pick(w.metering);
   const exposureProgram = cam.type === 'phone' ? 2 : pick([1, 2, 3, 3, 3, 4]);
   const exposureMode    = exposureProgram === 1 ? 1 : 0;
   const whiteBalance    = cam.type === 'phone' ? 0 : pick([0, 0, 0, 1]);
   const sceneCapture    = scene.name === 'night' ? 3 : 0;
   const biasStops       = cam.type === 'phone' ? 0 : pick([0, 0, 0, 1 / 3, -1 / 3, 2 / 3, -2 / 3, 1, -1]);
-  const subsec = !prof.subsec ? null
-    : prof.subsec.endsWith('3') ? String(cryptoRandInt(0, 999)).padStart(3, '0')
-    : String(cryptoRandInt(0, 99)).padStart(2, '0');
-  // The exporter's resolution, not the camera's: Camera Raw defaults to 240.
-  const dpi = pick([240, 240, 240, 300, 72]);
+  const subsec = cam.subsec ? String(cryptoRandInt(0, Math.pow(10, cam.subsec) - 1)).padStart(cam.subsec, '0') : null;
+  const colorSpace = rnd() < 0.9 ? 1 : 65535;
+  const dpi = editor.dpi;
 
-  const widestAperture = cam.type === 'phone'
-    ? Math.min(...cam.lenses.map(l => l.f))
-    : Math.min(...cam.apertures);
   const tv = -Math.log2(exposureSec);
   const av = 2 * Math.log2(aperture);
   const bv = apexBrightness(aperture, exposureSec, iso);
+  const widest = cam.type === 'phone' ? Math.min(...cam.lenses.map(l => l.f)) : Math.min(...cam.apertures);
+  const latRef = loc.lat >= 0 ? 'N' : 'S';
+  const lonRef = loc.lon >= 0 ? 'E' : 'W';
 
-  const latRef = loc.lat >= 0 ? "N" : "S";
-  const lonRef = loc.lon >= 0 ? "E" : "W";
+  // Lens figures: phones carry the measured per-lens rationals; bodies compute
+  // from the aperture in the firmware's own denominator.
+  const fnumberRat = w.fnumber === 'lens'
+    ? lens.fRat
+    : reduce(Math.round(aperture * w.fnumber), w.fnumber);
+  const focalRat = w.focal === 'lens'
+    ? lens.focalRat
+    : (w.focal === 1 ? [focalPhys, 1] : reduce(Math.round(focalPhys * w.focal), w.focal));
 
-  // ── Display object
+  // Lens specification and names.
+  let lensSpec = null, lensModel = null, lensMake = null, auxLens = null, adobeLens = null;
+  if (cam.type === 'phone') {
+    lensModel = lens.model;
+    if (w.lensTags.includes('make')) lensMake = w.lensMake;
+    lensSpec = cam.lensInfo || null;
+    auxLens = lens.model;
+  } else if (cam.fixedLens) {
+    lensSpec = [specRat(focalPhys), specRat(focalPhys), specRat(widest), specRat(widest)];
+    auxLens = `${cam.model.split(' ').pop()} ${focalPhys}mm f/${widest}`;
+  } else if (lens) {
+    lensModel = lens.model;
+    if (w.lensTags.includes('make')) lensMake = w.lensMake;
+    const apZero = w.lensInfoApertureZero;
+    lensSpec = [specRat(lens.range[0]), specRat(lens.range[1]),
+                apZero ? [0, 1] : specRat(lens.wide), apZero ? [0, 1] : specRat(lens.tele)];
+    // Nikon F-mount glass reaches Camera Raw only through the raw's MakerNote,
+    // so its EXIF LensModel is dropped and XMP names it in Adobe's own form.
+    if (w.lensAdobe && lens.mount === 'F' && lens.adobe) { auxLens = lens.adobe; lensModel = lens.adobe; }
+    else auxLens = lens.model;
+  }
+
+  const serialNumber = w.extras.serialNumber ? serialFor(w) : null;
+  const lensSerial = (w.lensTags.includes('serial') && !cam.fixedLens && lens) ? hex(10).toUpperCase() : null;
+
+  // ── Display object (UI) ──
   const display = {
     Make: cam.make, Model: cam.model, Software: editor.software,
-    LensMake: lens.make, LensModel: lens.model,
+    LensMake: lensMake, LensModel: lensModel,
     DateTimeOriginal: capture, DateTime: exportAt, SubSecTimeOriginal: subsec,
-    OffsetTimeOriginal: cam.offsetTime ? offsetString : null,
+    OffsetTimeOriginal: cam.offset !== 'none' ? offsetString : null,
     ExposureTime: exposureSec, FNumber: aperture, ISO: iso,
-    FocalLength: focalPhys, FocalLengthIn35mmFormat: prof.tags.focalEquiv ? focalEquiv : null,
+    FocalLength: focalPhys, FocalLengthIn35mmFormat: w.extras.focalEquiv ? focalEquiv : null,
     Flash: flash, MeteringMode: meteringMode,
     ExposureProgram: exposureProgram, ExposureMode: exposureMode,
     WhiteBalance: whiteBalance, SceneCaptureType: sceneCapture,
-    SensingMethod: prof.tags.sensing ? 2 : null,
-    Orientation: 1, ColorSpace: 1,
+    SensingMethod: (w.extras.sensing ? 2 : (w.extras.sensing1 ? 1 : null)),
+    Orientation: 1, ColorSpace: colorSpace,
     XResolution: dpi, YResolution: dpi,
     GPSLatitude: loc.lat, GPSLongitude: loc.lon, GPSAltitude: loc.alt,
   };
 
-  // ── Piexif write object
+  // ── Piexif write object (the Adobe export's EXIF) ──
   const I = px.ImageIFD, E = px.ExifIFD, G = px.GPSIFD;
   const captureStr = fmtDate(capture);
   const exportStr  = fmtDate(exportAt);
   const p = { "0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {} };
 
+  // IFD0: the exporter drops Orientation, YCbCrPositioning and empty
+  // Artist/Copyright. ModifyDate is the export time.
   p["0th"][I.Make]           = cam.make;
   p["0th"][I.Model]          = cam.model;
-  p["0th"][I.Orientation]    = 1;
   p["0th"][I.XResolution]    = [dpi, 1];
   p["0th"][I.YResolution]    = [dpi, 1];
   p["0th"][I.ResolutionUnit] = 2;
-  p["0th"][I.Software]       = editor.software;   // the exporter, not the camera
-  p["0th"][I.DateTime]       = exportStr;         // when the export was written
-  // Required for JPEG by the Exif spec; `exiftool -validate` reports its
-  // absence, and a camera file that fails validation is its own signal.
-  p["0th"][I.YCbCrPositioning] = 1;
+  p["0th"][I.Software]       = editor.software;
+  p["0th"][I.DateTime]       = exportStr;
 
   p["Exif"][E.ExposureTime]    = shutter;
-  p["Exif"][E.FNumber]         = prof.fnumber === 'reduced' ? ratReduced(aperture, 100) : ratFixed(aperture, prof.fnumber);
+  p["Exif"][E.FNumber]         = fnumberRat;
   p["Exif"][E.ExposureProgram] = exposureProgram;
   p["Exif"][E.ISOSpeedRatings] = iso;
-  if (prof.tags.sensitivity) {
-    p["Exif"][E.SensitivityType] = prof.tags.sensitivity;
-    if (prof.tags.sensitivity === 1 && E.StandardOutputSensitivity) p["Exif"][E.StandardOutputSensitivity] = iso;
+  if (w.sensitivity) {
+    p["Exif"][E.SensitivityType] = w.sensitivity;
+    if (w.sensitivity === 1) { if (E.StandardOutputSensitivity) p["Exif"][E.StandardOutputSensitivity] = iso; }
     else p["Exif"][E.RecommendedExposureIndex] = iso;
   }
   p["Exif"][E.ExifVersion]       = cam.exifVersion;
   p["Exif"][E.DateTimeOriginal]  = captureStr;
   p["Exif"][E.DateTimeDigitized] = captureStr;
-  if (cam.offsetTime && offsetString && registerOffsetTimeTags(px)) {
-    p["Exif"][TAG_OFFSET_TIME]           = exportOffset || offsetString;
-    p["Exif"][TAG_OFFSET_TIME_ORIGINAL]  = offsetString;
-    p["Exif"][TAG_OFFSET_TIME_DIGITIZED] = offsetString;
+  if (cam.offset !== 'none' && offsetString) {
+    p["Exif"][TAG_OFFSET_TIME_ORIGINAL] = offsetString;
+    if (cam.offset === 'all' || cam.offset === 'two') p["Exif"][TAG_OFFSET_TIME] = exportOffset || offsetString;
+    if (cam.offset === 'all') p["Exif"][TAG_OFFSET_TIME_DIGITIZED] = offsetString;
   }
-  p["Exif"][E.ComponentsConfiguration] = "\x01\x02\x03\x00";
-  // APEX values, derived from the solved exposure so they agree with it.
-  p["Exif"][E.ShutterSpeedValue] = apexRat(prof.apex, tv);
-  p["Exif"][E.ApertureValue]     = apexRat(prof.apex, av);
-  if (prof.brightness) p["Exif"][E.BrightnessValue] = prof.brightness === 'odd' ? ratOdd(bv) : ratFixed(bv, 100);
-  p["Exif"][E.ExposureBiasValue] = biasRat(prof.bias, biasStops);
-  if (prof.maxAperture) p["Exif"][E.MaxApertureValue] = ratFixed(2 * Math.log2(widestAperture), prof.maxAperture);
+  // ShutterSpeedValue and ApertureValue: Adobe rewrites both as N/1000000.
+  p["Exif"][E.ShutterSpeedValue] = apexMicro(tv);
+  p["Exif"][E.ApertureValue]     = apexMicro(av);
+  if (w.brightness === 'cf')       p["Exif"][E.BrightnessValue] = ratFloat32(bv);
+  else if (w.brightness === 2560)  p["Exif"][E.BrightnessValue] = [Math.round(bv * 2560), 2560];
+  else if (w.brightness)           p["Exif"][E.BrightnessValue] = ratFixed(bv, w.brightness);
+  p["Exif"][E.ExposureBiasValue] = w.expComp === 1 ? reduce(Math.round(biasStops * 3), 3) : [Math.round(biasStops * w.expComp), w.expComp];
+  if (w.maxAperture === 'apex')          p["Exif"][E.MaxApertureValue] = fnumberRat === lens.fRat ? lens.apex : ratFixed(2 * Math.log2(widest), 100);
+  else if (w.maxAperture === 'adobe100') p["Exif"][E.MaxApertureValue] = ratFixed(2 * Math.log2(lens ? lens.wide : widest), 100);
+  else if (w.maxAperture === 256)        p["Exif"][E.MaxApertureValue] = [Math.round(2 * Math.log2(widest) * 256), 256];
+  else if (w.maxAperture)                p["Exif"][E.MaxApertureValue] = ratFixed(2 * Math.log2(widest), w.maxAperture);
   p["Exif"][E.MeteringMode] = meteringMode;
-  if (prof.tags.lightSource) p["Exif"][E.LightSource] = 0;
+  if (w.extras.lightSource != null) p["Exif"][E.LightSource] = w.extras.lightSource;
   p["Exif"][E.Flash] = flash;
-  // FocalLength is the real lens, FocalLengthIn35mmFilm the equivalent. On a
-  // phone these differ by the sensor crop; writing the equivalent into both
-  // claimed a 26mm lens inside a handset.
-  p["Exif"][E.FocalLength] = cam.type === 'phone'
-    ? (prof.fnumber === 'reduced' ? ratReduced(focalPhys, 100) : ratFixed(focalPhys, 100))
-    : [focalPhys, 1];
+  p["Exif"][E.FocalLength] = focalRat;
   if (subsec) {
-    if (prof.subsec !== 'od3') p["Exif"][E.SubSecTime] = subsec;
     p["Exif"][E.SubSecTimeOriginal]  = subsec;
     p["Exif"][E.SubSecTimeDigitized] = subsec;
   }
-  p["Exif"][E.FlashpixVersion] = "0100";
-  p["Exif"][E.ColorSpace]      = 1;       // the export is sRGB whatever the camera shot
-  // PixelXDimension / PixelYDimension set later after canvas render
-  if (prof.tags.sensing)    p["Exif"][E.SensingMethod] = 2;
-  if (prof.tags.fileSource) p["Exif"][E.FileSource]    = "\x03";
-  if (prof.tags.sceneType)  p["Exif"][E.SceneType]     = "\x01";
-  if (prof.tags.cfa)        p["Exif"][E.CFAPattern]    = "\x00\x02\x00\x02\x00\x01\x01\x02";
-  if (prof.tags.customRendered != null) p["Exif"][E.CustomRendered] = prof.tags.customRendered;
+  p["Exif"][E.ColorSpace] = colorSpace;
+  if (w.extras.focalPlane && cam.sensor) {
+    const s = cam.sensor;
+    if (s.inch) {
+      p["Exif"][E.FocalPlaneXResolution] = [s.px[0] * 1000, s.inch[0]];
+      p["Exif"][E.FocalPlaneYResolution] = [s.px[1] * 1000, s.inch[1]];
+      p["Exif"][E.FocalPlaneResolutionUnit] = 2;
+    } else if (s.cm) {
+      p["Exif"][E.FocalPlaneXResolution] = reduce(Math.round(s.px[0] / s.cm[0] * 32768), 32768);
+      p["Exif"][E.FocalPlaneYResolution] = reduce(Math.round(s.px[1] / s.cm[1] * 32768), 32768);
+      p["Exif"][E.FocalPlaneResolutionUnit] = 3;
+    } else if (s.perCm) {
+      p["Exif"][E.FocalPlaneXResolution] = [s.perCm, 1];
+      p["Exif"][E.FocalPlaneYResolution] = [s.perCm, 1];
+      p["Exif"][E.FocalPlaneResolutionUnit] = 3;
+    }
+  }
+  if (w.extras.sensing)  p["Exif"][E.SensingMethod] = 2;
+  if (w.extras.sensing1) p["Exif"][E.SensingMethod] = 1;
+  if (w.extras.fileSource) p["Exif"][E.FileSource] = "\x03";
+  if (w.extras.sceneType)  p["Exif"][E.SceneType]  = "\x01";
+  if (w.extras.cfa)        p["Exif"][E.CFAPattern] = "\x00\x02\x00\x02\x00\x01\x01\x02";
+  if (w.extras.customRendered != null) p["Exif"][E.CustomRendered] = w.extras.customRendered;
   p["Exif"][E.ExposureMode] = exposureMode;
   p["Exif"][E.WhiteBalance] = whiteBalance;
-  if (prof.tags.digitalZoom) p["Exif"][E.DigitalZoomRatio] = [1, 1];
-  if (prof.tags.focalEquiv)  p["Exif"][E.FocalLengthIn35mmFilm] = focalEquiv;
+  if (w.extras.digitalZoom === 'always') p["Exif"][E.DigitalZoomRatio] = [1, 1];
+  else if (w.extras.digitalZoom === 'zoom' && rnd() < 0.25) p["Exif"][E.DigitalZoomRatio] = ratFloat32(1 + rnd());
+  if (w.extras.focalEquiv) p["Exif"][E.FocalLengthIn35mmFilm] = focalEquiv;
   p["Exif"][E.SceneCaptureType] = sceneCapture;
-  if (prof.tags.gainControl) p["Exif"][E.GainControl] = iso < 400 ? 0 : iso < 1600 ? 1 : 2;
-  if (prof.tags.colorAdj) {
-    p["Exif"][E.Contrast]   = 0;
-    p["Exif"][E.Saturation] = 0;
-    p["Exif"][E.Sharpness]  = 0;
-  }
-  if (prof.tags.subjectDistance) p["Exif"][E.SubjectDistanceRange] = 0;
+  if (w.extras.gainControl) p["Exif"][E.GainControl] = iso < 400 ? 0 : iso < 1600 ? 1 : 2;
+  if (w.extras.contrast) { p["Exif"][E.Contrast] = 0; p["Exif"][E.Saturation] = 0; p["Exif"][E.Sharpness] = 0; }
+  else if (w.extras.sharpness) p["Exif"][E.Sharpness] = 0;
+  if (w.extras.subjectDistanceRange) p["Exif"][E.SubjectDistanceRange] = 0;
+  if (w.extras.serialNumber && serialNumber) p["Exif"][TAG_SERIAL_NUMBER] = serialNumber;
+  if (w.lensTags.includes('info') && lensSpec)   p["Exif"][E.LensSpecification] = lensSpec;
+  if (w.lensTags.includes('make') && lensMake)   p["Exif"][E.LensMake] = lensMake;
+  if (w.lensTags.includes('model') && lensModel) p["Exif"][E.LensModel] = lensModel;
+  if (lensSerial) p["Exif"][TAG_LENS_SERIAL] = lensSerial;
 
-  // Lens tags: only the ones this firmware writes. Canon leaves the apertures
-  // in its LensSpecification as 0/0.
-  const lensTags = cam.lensTags || prof.lensTags;
-  if (lensTags.includes('make')  && lens.make)  p["Exif"][E.LensMake]  = lens.make;
-  if (lensTags.includes('model') && lens.model) p["Exif"][E.LensModel] = lens.model;
-  if (lensTags.includes('info')  && lens.spec) {
-    const [f1, f2, a1, a2] = lens.spec;
-    p["Exif"][E.LensSpecification] = cam.make === 'Canon'
-      ? [specRat(f1), specRat(f2), [0, 0], [0, 0]]
-      : [specRat(f1), specRat(f2), specRat(a1), specRat(a2)];
-  }
-
-  // No MakerNote. An editor export does not carry one — every Camera Raw
-  // export sampled had zero MakerNote tags — so writing one would contradict
-  // the Software field rather than add realism.
-
-  // The exporter writes an Interoperability IFD on every sRGB JPEG.
-  p["Interop"][px.InteropIFD.InteroperabilityIndex]   = "R98";
-  p["Interop"][px.InteropIFD.InteroperabilityVersion] = "0100";
-
-  // ── GPS, in the exporter's coordinate encoding and the camera's tag set.
-  if (prof.gps.version) p["GPS"][G.GPSVersionID] = prof.gps.version;
+  // GPS, in the exporter's coordinate encoding. The exporter normalises
+  // GPSVersionID: Camera Raw writes 2.3.0.0, Lightroom 2.2.0.0 (measured).
+  p["GPS"][G.GPSVersionID] = isBody ? [2, 3, 0, 0] : [2, 2, 0, 0];
   p["GPS"][G.GPSLatitudeRef]  = latRef;
-  p["GPS"][G.GPSLatitude]     = adobeDegMin(Math.abs(loc.lat));
+  p["GPS"][G.GPSLatitude]     = adobeGps(Math.abs(loc.lat));
   p["GPS"][G.GPSLongitudeRef] = lonRef;
-  p["GPS"][G.GPSLongitude]    = adobeDegMin(Math.abs(loc.lon));
+  p["GPS"][G.GPSLongitude]    = adobeGps(Math.abs(loc.lon));
   p["GPS"][G.GPSAltitudeRef]  = 0;
-  p["GPS"][G.GPSAltitude]     = prof.gps.apple ? ratOdd(loc.alt + Math.random()) : [loc.alt, 1];
-  // UTC, converted from the capture time through the city's own zone.
-  p["GPS"][G.GPSTimeStamp]    = gpsTimeStamp(utc);
-  if (prof.gps.status) p["GPS"][G.GPSStatus] = "A";
-  if (prof.gps.apple) {
-    // iOS logs motion and heading with every frame.
-    const heading = Math.random() * 360;
-    p["GPS"][G.GPSSpeedRef]         = "K";
-    p["GPS"][G.GPSSpeed]            = Math.random() < 0.6 ? [0, 1] : ratOdd(0.3 + Math.random() * 4);
-    p["GPS"][G.GPSImgDirectionRef]  = "T";
-    p["GPS"][G.GPSImgDirection]     = ratOdd(heading);
-    p["GPS"][G.GPSDestBearingRef]   = "T";
-    p["GPS"][G.GPSDestBearing]      = ratOdd(heading);
-    p["GPS"][G.GPSHPositioningError] = [randInt(4, 35), 1];
-  }
-  if (prof.gps.mapDatum) p["GPS"][G.GPSMapDatum] = "WGS-84";
+  p["GPS"][G.GPSAltitude]     = [Math.round(loc.alt * 100), 100];
+  p["GPS"][G.GPSTimeStamp]    = [[utc.getUTCHours(), 1], [utc.getUTCMinutes(), 1], [utc.getUTCSeconds(), 1]];
+  if (w.extras.status)   p["GPS"][G.GPSStatus]   = "A";
+  if (w.extras.mapDatum) p["GPS"][G.GPSMapDatum] = "WGS-84";
   p["GPS"][G.GPSDateStamp] = fmtGpsDate(utc);
 
   alignAsciiValues(p, px);
 
-  return { display, piexif: p, cam, loc, iso, lens, editor,
-           capture, exportAt, offset: offsetString, exportOffset, subsec,
-           scene: scene.name, ev: Number(ev.toFixed(2)) };
+  // The lens description the XMP carries, and the aux block for a raw export.
+  const lensMeta = {
+    model: lensModel, auxLens,
+    lensInfo: lensSpec ? lensInfoString(lensSpec) : null,
+  };
+  const source = isBody
+    ? { raw: true, mime: cam.raw.mime, fileName: `${rawFileStem(cam)}.${cam.raw.ext}`,
+        cameraProfile: pick(['Adobe Color', 'Camera Standard', 'Camera Standard']) }
+    : { raw: false, fileName: options.sourceName || `${phoneStem(cam, capture, subsec)}.jpg` };
+  const aux = isBody ? {
+    serialNumber, lensSerial,
+    firmware: cam.firmware || null,
+    focusDistance: rnd() < 0.5 ? `${randInt(5, 900)}/10` : '4294967295/1',
+    corrected: cam.writer === 'canon' || cam.writer === 'sony',
+  } : {};
+
+  return {
+    display, piexif: p, cam, loc, iso, lens, editor,
+    capture, exportAt, offset: offsetString, exportOffset, subsec,
+    scene: scene.name, ev: Number(ev.toFixed(2)),
+    lensMeta, source, aux,
+  };
+}
+
+/** A camera-raw-style file stem, like "4E4A0122" or "DSC_1234". */
+function rawFileStem(cam) {
+  if (cam.writer === 'canon') return hex(4).toUpperCase() + digits(4);
+  return `${cam.raw.prefix}${digits(4)}`;
+}
+/** A phone's original JPEG stem, matching its own naming. */
+function phoneStem(cam, d, subsec) {
+  const p = n => String(n).padStart(2, '0');
+  const ymd = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+  const hms = `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  if (cam.make === 'Apple')   return `IMG_${digits(4)}`;
+  if (cam.make === 'Google')  return `PXL_${ymd}_${hms}${subsec || '000'}`;
+  if (cam.make === 'samsung') return `${ymd}_${hms}`;
+  return `IMG_${ymd}_${hms}`;
 }
 
 // ── Metadata Display ─────────────────────────────────────────────
 
-/**
- * Which EXIF fields to show in each UI section.
- *
- * Two parsers feed this: exifr (normal path) and piexifToDisplay (fallback).
- * They name several tags differently, so both spellings are listed — a given
- * object only ever carries one of each pair, so no row is duplicated.
- *   0x0132 DateTime        -> exifr: ModifyDate
- *   0xA002 PixelXDimension -> exifr: ExifImageWidth
- *   0xA003 PixelYDimension -> exifr: ExifImageHeight
- */
 const SECTIONS = [
   { key: 'device',  title: 'Device',          fields: ['Make','Model','Software','LensMake','LensModel'] },
   { key: 'capture', title: 'Capture Settings', fields: ['DateTimeOriginal','DateTime','ModifyDate','OffsetTimeOriginal','SubSecTimeOriginal','ExposureTime','FNumber','ISO','FocalLength','FocalLengthIn35mmFormat','Flash','MeteringMode','ExposureProgram','ExposureMode','WhiteBalance','SceneCaptureType','SensingMethod'] },
@@ -6247,7 +6814,6 @@ const SECTIONS = [
   { key: 'image',   title: 'Image',            fields: ['PixelXDimension','PixelYDimension','ExifImageWidth','ExifImageHeight','ImageWidth','ImageHeight','Orientation','ColorSpace','XResolution','YResolution'] },
 ];
 
-/** Human-readable labels for EXIF field keys. */
 const LABELS = {
   Make:'Camera Make', Model:'Camera Model', Software:'Software',
   LensMake:'Lens Make', LensModel:'Lens Model',
@@ -6265,7 +6831,6 @@ const LABELS = {
   ColorSpace:'Color Space', XResolution:'X Resolution', YResolution:'Y Resolution',
 };
 
-// Lookup maps for numeric EXIF codes → human-readable strings
 const FLASH_MAP   = { 0:'No flash', 1:'Flash fired', 9:'Flash fired', 16:'Flash off', 24:'Flash off', 25:'Flash fired', 31:'Flash fired + red-eye' };
 const METER_MAP   = { 1:'Average', 2:'Center-weighted', 3:'Spot', 4:'Multi-spot', 5:'Multi-segment', 6:'Partial' };
 const PROG_MAP    = { 0:'Not defined', 1:'Manual', 2:'Auto', 3:'Aperture priority', 4:'Shutter priority', 5:'Creative', 6:'Action', 7:'Portrait', 8:'Landscape' };
@@ -6276,20 +6841,10 @@ const EXPMODE_MAP = { 0:'Auto', 1:'Manual', 2:'Auto bracket' };
 const SCENE_MAP   = { 0:'Standard', 1:'Landscape', 2:'Portrait', 3:'Night' };
 const SENSING_MAP = { 1:'Not defined', 2:'One-chip color area', 3:'Two-chip color area', 4:'Three-chip color area', 5:'Color sequential area', 7:'Trilinear', 8:'Color sequential linear' };
 
-/**
- * Look up a numeric EXIF code in one of the maps above.
- *
- * exifr parsed with { all: true } already translates many of these tags to
- * readable strings ("Pattern", "Flash did not fire, auto mode"). Feeding those
- * to a numeric map misses, and the miss fallback used to prepend its prefix —
- * which is where "Mode Pattern" and "Code Flash did not fire, auto mode" came
- * from. Anything already a string is passed straight through.
- */
 function mapCode(map, v, prefix = '') {
   return typeof v === 'number' ? (map[v] ?? `${prefix}${v}`) : String(v);
 }
 
-/** Format a raw EXIF value for display based on its field key. */
 function fmtVal(key, v) {
   if (v == null) return null;
   switch (key) {
@@ -6330,18 +6885,12 @@ function fmtVal(key, v) {
   }
 }
 
-/**
- * Render an EXIF object as sectioned HTML for the metadata panel.
- * Returns { html, count } where count is the number of displayed fields.
- */
 function renderMeta(exifObj, isFake = false) {
   if (!exifObj || Object.keys(exifObj).length === 0) {
     return { html: `<div class="no-meta"><div class="no-meta-icon">${ICONS.camera}</div><p>No EXIF metadata found in this image.</p></div>`, count: 0 };
   }
-
   let html = '';
   let count = 0;
-
   for (const sec of SECTIONS) {
     const rows = [];
     for (const field of sec.fields) {
@@ -6349,10 +6898,6 @@ function renderMeta(exifObj, isFake = false) {
       const disp = fmtVal(field, raw);
       if (!disp) continue;
       count++;
-
-      // A "Map" link next to the latitude, for generated coordinates only.
-      // The original image's coordinates are the user's real position, and a
-      // link would send them to a map provider on click, so none is offered.
       let extra = '';
       if (field === 'GPSLatitude' && isFake) {
         const lat = exifObj.GPSLatitude, lon = exifObj.GPSLongitude;
@@ -6365,9 +6910,6 @@ function renderMeta(exifObj, isFake = false) {
         };
         let latDec = toDec(lat);
         let lonDec = toDec(lon);
-        // Only a ref flips the sign. Without one, the value is already signed
-        // (both exifr and piexifToDisplay return signed decimals) — assuming a
-        // hemisphere here would send eastern coordinates to the wrong side.
         if (latDec != null && latRef === 'S') latDec = -Math.abs(latDec);
         if (lonDec != null && lonRef === 'W') lonDec = -Math.abs(lonDec);
         if (latDec != null && lonDec != null) {
@@ -6375,14 +6917,11 @@ function renderMeta(exifObj, isFake = false) {
           extra = `<a class="gps-link" href="https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=14/${la}/${lo}" target="_blank" rel="noopener noreferrer">Map</a>`;
         }
       }
-
-      // disp comes from EXIF in an untrusted image and lands in innerHTML.
       rows.push(`<div class="meta-row">
         <span class="meta-key">${escapeHtml(LABELS[field] || field)}</span>
         <span class="meta-val${isFake ? ' is-new' : ''}">${escapeHtml(disp)}${extra}</span>
       </div>`);
     }
-
     if (rows.length) {
       html += `<div class="meta-section">
         <div class="meta-section-title">${sec.title}</div>
@@ -6390,15 +6929,13 @@ function renderMeta(exifObj, isFake = false) {
       </div>`;
     }
   }
-
   if (!html) {
     return { html: `<div class="no-meta"><div class="no-meta-icon">${ICONS.camera}</div><p>No recognized EXIF fields found.</p></div>`, count: 0 };
   }
-
   return { html, count };
 }
 
-;return { parseFileExif, piexifToDisplay, readBackExifStrict, generateFake, SECTIONS, LABELS, fmtVal, renderMeta };
+;return { parseFileExif, piexifToDisplay, readBackExifStrict, makePersona, generateFake, SECTIONS, LABELS, fmtVal, renderMeta };
 })();
 
 // ── js/ui.js ──────────────────────────────────────────────────────────
@@ -6410,11 +6947,21 @@ __modules["ui"] = (function () {
  * for randomizing, stripping, and downloading processed JPEGs.
  */
 
-const { fmtBytes, escapeHtml, makeId, cryptoRandInt, dataUrlToBlob, stripViaCanvas } = __modules["helpers"];
+const { fmtBytes, escapeHtml, makeId, cryptoRandInt, dataUrlToBlob, stripViaCanvas, makeAdobeThumbnail, insertAfterSoi, iccApp2Segment } = __modules["helpers"];
 const { dumpExifSafe } = __modules["exif-writer"];
-const { buildXmpPacket, xmpSegment } = __modules["provenance"];
-const { generateFake, readBackExifStrict, parseFileExif, renderMeta } = __modules["exif"];
+const { buildXmpPacket, xmpSegment, buildPhotoshopApp13 } = __modules["provenance"];
+const { generateFake, makePersona, readBackExifStrict, parseFileExif, renderMeta } = __modules["exif"];
 const { ICONS } = __modules["icons"];
+
+/** Wrap a serialised TIFF block ("Exif\0\0" + data) as an APP1 segment. */
+function exifApp1Segment(tiffStr) {
+  const len = tiffStr.length + 2;
+  const seg = new Uint8Array(2 + len);
+  seg[0] = 0xFF; seg[1] = 0xE1;
+  seg[2] = (len >> 8) & 0xFF; seg[3] = len & 0xFF;
+  for (let i = 0; i < tiffStr.length; i++) seg[4 + i] = tiffStr.charCodeAt(i) & 0xFF;
+  return seg;
+}
 
 const S = {
   items: [],
@@ -6479,7 +7026,9 @@ function getOutputName(item) {
   const mm = p(d.getMinutes());
   const ss = p(d.getSeconds());
   const ms = String(item?.fakeSubSec ?? cryptoRandInt(0, 999)).padStart(3, '0');
-  const seq = cryptoRandInt(1000, 9999);
+  // Frame counters run in capture order across a batch (assigned after a
+  // batch run); a single image gets a random one.
+  const seq = item?.fakeSeq ?? cryptoRandInt(1000, 9999);
 
   // Matches the EXIF Make, which is the manufacturer's own spelling —
   // "samsung" lowercase, "NIKON CORPORATION", "SONY".
@@ -6709,7 +7258,7 @@ function downloadBlob(blob, name) {
 }
 
 async function processRandomizeItem(item, options = {}) {
-  const { deferRender = false } = options;
+  const { deferRender = false, persona = null } = options;
   item.processing = true;
   item.error = null;
   if (!deferRender) renderCurrentItem();
@@ -6726,43 +7275,43 @@ async function processRandomizeItem(item, options = {}) {
       }
     }
 
-    const fake = generateFake({ originalDate });
-    // The XMP packet rides along with the render, because the container is
-    // written there and it has to carry the same dates and lens as the EXIF.
-    const camWithIso = {
-      ...fake.cam,
-      iso: fake.display.ISO,
-      xmpSegment: xmpSegment(buildXmpPacket({
-        capture: fake.capture,
-        exportAt: fake.exportAt,
-        offsetCapture: fake.offset,
-        offsetExport: fake.exportOffset,
-        subsec: fake.subsec,
-        make: fake.cam.make,
-        model: fake.cam.model,
-        lens: fake.lens,
-        editor: fake.editor,
-        raw: fake.cam.raw,
-        scene: fake.scene,
-      })),
-    };
-    const canvasResult = await stripViaCanvas(item.previewUrl, camWithIso);
+    const fake = generateFake({ originalDate, persona, sourceName: item.file.name });
+    // Render the exporter's pixel container (DQT, DRI, APP14, SOF0, DHT, SOS).
+    const canvasResult = await stripViaCanvas(item.previewUrl, { ...fake.cam, iso: fake.display.ISO });
     const cleanJpeg = canvasResult.dataUrl;
 
     const px = window.piexif;
-    fake.piexif.Exif[px.ExifIFD.PixelXDimension] = canvasResult.width;
-    fake.piexif.Exif[px.ExifIFD.PixelYDimension] = canvasResult.height;
     fake.display.PixelXDimension = canvasResult.width;
     fake.display.PixelYDimension = canvasResult.height;
 
-    // No IFD1 thumbnail. Camera Raw and Lightroom exports do not embed one,
-    // and the one this tool used to write was encoded by the browser: it
-    // carried Chrome's JFIF header and an ICC profile whose copyright string
-    // read "Google Inc. 2016", inside every file, one `exiftool -b
-    // -ThumbnailImage` away. The GPS block is written once, by generateFake,
-    // rather than re-read and re-written in a second pass.
-    const bytes = dumpExifSafe(fake.piexif, px);
-    const modDataUrl = px.insert(bytes, cleanJpeg);
+    // An Adobe-encoded thumbnail, the same bytes in IFD1 and the Photoshop
+    // block, rendered from the image actually shipping. Adobe exports carry
+    // one; it is encoded the way the exporter encodes it, not by the browser.
+    const thumb = await makeAdobeThumbnail(cleanJpeg);
+    if (thumb) {
+      fake.piexif.thumbnail = thumb.binary;
+      fake.piexif['1st'][px.ImageIFD.Compression]    = 6;
+      fake.piexif['1st'][px.ImageIFD.XResolution]    = [72, 1];
+      fake.piexif['1st'][px.ImageIFD.YResolution]    = [72, 1];
+      fake.piexif['1st'][px.ImageIFD.ResolutionUnit] = 2;
+    }
+
+    // The four metadata segments, inserted after SOI in the order the measured
+    // exports show: Exif (little-endian, as every Adobe export is), the
+    // Photoshop APP13, the APP2 ICC profile, and the APP1 XMP packet.
+    const tiff = dumpExifSafe(fake.piexif, px, { littleEndian: true });
+    const exifApp1 = exifApp1Segment(tiff);
+    const app13 = buildPhotoshopApp13({
+      dpi: fake.editor.dpi, capture: fake.capture, offset: fake.offset,
+      thumb: thumb ? thumb.bytes : null,
+      thumbWidth: thumb ? thumb.width : 0, thumbHeight: thumb ? thumb.height : 0,
+    });
+    const xmp = xmpSegment(buildXmpPacket({
+      capture: fake.capture, exportAt: fake.exportAt,
+      offsetCapture: fake.offset, offsetExport: fake.exportOffset, subsec: fake.subsec,
+      lens: fake.lensMeta, editor: fake.editor, source: fake.source, scene: fake.scene, aux: fake.aux,
+    }));
+    const modDataUrl = insertAfterSoi(cleanJpeg, [exifApp1, app13, iccApp2Segment(), xmp]);
 
     const verified = await readBackExifStrict(modDataUrl);
 
@@ -6816,7 +7365,7 @@ async function processClearItem(item, options = {}) {
     // Same pixel pipeline, written as the export with its metadata removed:
     // no Exif, no XMP, no ICC profile, Adobe's APP14 left in place, which is
     // exactly what `exiftool -all=` leaves behind on a Camera Raw export.
-    const canvasResult = await stripViaCanvas(item.previewUrl, { strip: true });
+    const canvasResult = await stripViaCanvas(item.previewUrl, {});
     const newBlob = dataUrlToBlob(canvasResult.dataUrl);
 
     releaseProcessedResources(item);
@@ -6894,11 +7443,15 @@ const App = {
     if (!S.items.length) return;
     let completed = 0;
 
+    // One persona for the whole batch: the same body and kit, the same city,
+    // one trip, one export session. Randomize Current stays independent.
+    const persona = makePersona();
+
     for (const item of S.items) {
       S.activeId = item.id;
       if (completed === 0 || completed % 4 === 0) renderCurrentItem();
       try {
-        await processRandomizeItem(item, { deferRender: true });
+        await processRandomizeItem(item, { deferRender: true, persona });
         completed++;
         if (completed % 4 === 0) {
           renderCurrentItem();
@@ -6908,6 +7461,13 @@ const App = {
         showToast(`Batch failed for ${item.file.name}: ${e.message}`, 'error');
       }
     }
+
+    // Frame counters in capture order, from a random starting point, as a
+    // camera numbers a roll.
+    const done = S.items.filter(it => it.fakeExif && it.fakeDate instanceof Date)
+      .sort((a, b) => a.fakeDate - b.fakeDate);
+    let seq = cryptoRandInt(1000, 9000);
+    for (const it of done) { seq += cryptoRandInt(1, 4); it.fakeSeq = seq; }
 
     renderCurrentItem();
     showToast(`Randomized ${completed} image${completed === 1 ? '' : 's'} in the batch.`, 'success');

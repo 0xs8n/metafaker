@@ -17,28 +17,36 @@
  * piexifjs's version as a fallback; `dumpExif` throws rather than emit a block
  * it cannot vouch for.
  *
- * Big-endian ("MM") throughout, matching piexifjs, with all offsets measured
- * from the TIFF header.
+ * Byte order is a parameter. Measured Adobe exports (Lightroom and Camera
+ * Raw) write little-endian ("II"); the writer defaults to that, with
+ * big-endian ("MM") available. All offsets are measured from the TIFF header.
  */
 
 const TYPE = { Byte: 1, Ascii: 2, Short: 3, Long: 4, Rational: 5, Undefined: 7, SLong: 9, SRational: 10 };
-const TYPE_SIZE = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 };
 
-const u8  = n => String.fromCharCode(n & 0xFF);
-const u16 = n => String.fromCharCode((n >> 8) & 0xFF, n & 0xFF);
-const u32 = n => String.fromCharCode((n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF);
-const s32 = n => u32(n < 0 ? n + 0x100000000 : n);
+/** Integer encoders for one byte order. */
+function encoders(littleEndian) {
+  const u8  = n => String.fromCharCode(n & 0xFF);
+  const u16 = littleEndian
+    ? n => String.fromCharCode(n & 0xFF, (n >> 8) & 0xFF)
+    : n => String.fromCharCode((n >> 8) & 0xFF, n & 0xFF);
+  const u32 = littleEndian
+    ? n => String.fromCharCode(n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF)
+    : n => String.fromCharCode((n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF);
+  const s32 = n => u32(n < 0 ? n + 0x100000000 : n);
+  return { u8, u16, u32, s32 };
+}
 
 const asList = v => (Array.isArray(v) ? v : [v]);
 /** Rationals arrive either as one [num, den] pair or as a list of pairs. */
 const asPairs = v => (Array.isArray(v) && Array.isArray(v[0]) ? v : [v]);
 
 /** Serialise one tag value, returning { type, count, bytes }. */
-function encodeValue(typeName, value) {
+function encodeValue(E, typeName, value) {
   switch (typeName) {
     case 'Byte': {
       const a = asList(value);
-      return { type: TYPE.Byte, count: a.length, bytes: a.map(u8).join('') };
+      return { type: TYPE.Byte, count: a.length, bytes: a.map(E.u8).join('') };
     }
     case 'Ascii': {
       const s = String(value);
@@ -46,26 +54,26 @@ function encodeValue(typeName, value) {
     }
     case 'Short': {
       const a = asList(value);
-      return { type: TYPE.Short, count: a.length, bytes: a.map(u16).join('') };
+      return { type: TYPE.Short, count: a.length, bytes: a.map(E.u16).join('') };
     }
     case 'Long': {
       const a = asList(value);
-      return { type: TYPE.Long, count: a.length, bytes: a.map(u32).join('') };
+      return { type: TYPE.Long, count: a.length, bytes: a.map(E.u32).join('') };
     }
     case 'SLong': {
       const a = asList(value);
-      return { type: TYPE.SLong, count: a.length, bytes: a.map(s32).join('') };
+      return { type: TYPE.SLong, count: a.length, bytes: a.map(E.s32).join('') };
     }
     case 'Rational': {
       const p = asPairs(value);
-      return { type: TYPE.Rational, count: p.length, bytes: p.map(([n, d]) => u32(n) + u32(d)).join('') };
+      return { type: TYPE.Rational, count: p.length, bytes: p.map(([n, d]) => E.u32(n) + E.u32(d)).join('') };
     }
     case 'SRational': {
       const p = asPairs(value);
-      return { type: TYPE.SRational, count: p.length, bytes: p.map(([n, d]) => s32(n) + s32(d)).join('') };
+      return { type: TYPE.SRational, count: p.length, bytes: p.map(([n, d]) => E.s32(n) + E.s32(d)).join('') };
     }
     case 'Undefined': {
-      const s = typeof value === 'string' ? value : asList(value).map(u8).join('');
+      const s = typeof value === 'string' ? value : asList(value).map(E.u8).join('');
       return { type: TYPE.Undefined, count: s.length, bytes: s };
     }
     default:
@@ -80,17 +88,25 @@ function encodeValue(typeName, value) {
  * offset/length. They describe a layout that no longer applies once the block
  * is rebuilt, and a dictionary that came back from `piexif.load` still carries
  * them, so keeping them produced duplicate tags and stale offsets.
+ *
+ * A value may be given as `{ type: 'Long', value: 4080 }` to override the
+ * table's type for that tag: Apple writes ExifImageWidth as a LONG where the
+ * table says SHORT, and Adobe carries that through.
  */
-function collect(dict, table, exclude) {
+function collect(E, dict, table, exclude) {
   const out = [];
   for (const key of Object.keys(dict || {})) {
     const tag = Number(key);
     if (exclude && exclude.has(tag)) continue;
     const meta = table[tag];
     if (!meta) continue;                       // unknown tag: skip rather than guess
-    const v = dict[key];
+    let v = dict[key];
     if (v === null || v === undefined) continue;
-    out.push({ tag, ...encodeValue(meta.type, v) });
+    let typeName = meta.type;
+    if (v && typeof v === 'object' && !Array.isArray(v) && 'type' in v && 'value' in v) {
+      typeName = v.type; v = v.value;
+    }
+    out.push({ tag, ...encodeValue(E, typeName, v) });
   }
   return out.sort((a, b) => a.tag - b.tag);
 }
@@ -107,23 +123,23 @@ const valuesSize = entries =>
  * offset of the following directory (0 when there is none) — the four bytes
  * piexifjs leaves out on sub-IFDs.
  */
-function writeIfd(entries, valuesAt, nextIfd) {
-  let dir = u16(entries.length);
+function writeIfd(E, entries, valuesAt, nextIfd) {
+  let dir = E.u16(entries.length);
   let values = '';
   let cursor = valuesAt;
 
   for (const e of entries) {
-    dir += u16(e.tag) + u16(e.type) + u32(e.count);
+    dir += E.u16(e.tag) + E.u16(e.type) + E.u32(e.count);
     if (e.bytes.length <= 4) {
       dir += e.bytes + '\0'.repeat(4 - e.bytes.length);
     } else {
-      dir += u32(cursor);
+      dir += E.u32(cursor);
       values += e.bytes;
       if (e.bytes.length % 2) values += '\0';   // keep the next value word-aligned
       cursor += pad2(e.bytes.length);
     }
   }
-  dir += u32(nextIfd);
+  dir += E.u32(nextIfd);
   return dir + values;
 }
 
@@ -138,9 +154,12 @@ const THUMB_LENGTH = 0x0202;
  * ("Exif\0\0" + TIFF block).
  *
  * `px` supplies the tag tables, so the two stay in step — including the
- * OffsetTime tags registered onto them at runtime.
+ * OffsetTime tags registered onto them at runtime. `opts.littleEndian`
+ * (default true) selects the byte order.
  */
-export function dumpExif(dict, px) {
+export function dumpExif(dict, px, opts = {}) {
+  const littleEndian = opts.littleEndian !== false;
+  const E = encoders(littleEndian);
   const T = px.TAGS;
   const tableFor = (key, fallback) => T[key] || T[fallback] || {};
 
@@ -148,24 +167,24 @@ export function dumpExif(dict, px) {
   const structuralE = new Set([PTR_INTEROP]);
   const structural1 = new Set([THUMB_OFFSET, THUMB_LENGTH]);
 
-  const zeroth  = collect(dict['0th'],     tableFor('0th', 'Image'),       structural0);
-  const exif    = collect(dict['Exif'],    tableFor('Exif', 'Exif'),       structuralE);
-  const gps     = collect(dict['GPS'],     tableFor('GPS', 'GPS'),         null);
-  const interop = collect(dict['Interop'], tableFor('Interop', 'Interop'), null);
-  const first   = collect(dict['1st'],     tableFor('1st', 'Image'),       structural1);
+  const zeroth  = collect(E, dict['0th'],     tableFor('0th', 'Image'),       structural0);
+  const exif    = collect(E, dict['Exif'],    tableFor('Exif', 'Exif'),       structuralE);
+  const gps     = collect(E, dict['GPS'],     tableFor('GPS', 'GPS'),         null);
+  const interop = collect(E, dict['Interop'], tableFor('Interop', 'Interop'), null);
+  const first   = collect(E, dict['1st'],     tableFor('1st', 'Image'),       structural1);
 
   const thumbnail = typeof dict.thumbnail === 'string' && dict.thumbnail.length ? dict.thumbnail : null;
   if (thumbnail && thumbnail.length > 63000) throw new Error('exif-writer: thumbnail over 64kB');
 
   // Pointer entries are four-byte Longs, so they sit inside the directory and
   // do not disturb the value areas. Values are patched once offsets are known.
-  const ptr = (tag) => ({ tag, type: TYPE.Long, count: 1, bytes: u32(0) });
+  const ptr = (tag) => ({ tag, type: TYPE.Long, count: 1, bytes: E.u32(0) });
   if (exif.length)    zeroth.push(ptr(PTR_EXIF));
   if (gps.length)     zeroth.push(ptr(PTR_GPS));
   if (interop.length) exif.push(ptr(PTR_INTEROP));
   if (thumbnail) {
-    first.push({ tag: THUMB_OFFSET, type: TYPE.Long, count: 1, bytes: u32(0) });
-    first.push({ tag: THUMB_LENGTH, type: TYPE.Long, count: 1, bytes: u32(thumbnail.length) });
+    first.push({ tag: THUMB_OFFSET, type: TYPE.Long, count: 1, bytes: E.u32(0) });
+    first.push({ tag: THUMB_LENGTH, type: TYPE.Long, count: 1, bytes: E.u32(thumbnail.length) });
   }
   zeroth.sort((a, b) => a.tag - b.tag);
   exif.sort((a, b) => a.tag - b.tag);
@@ -188,21 +207,21 @@ export function dumpExif(dict, px) {
 
   const patch = (entries, tag, value) => {
     const e = entries.find(x => x.tag === tag);
-    if (e) e.bytes = u32(value);
+    if (e) e.bytes = E.u32(value);
   };
   if (at.exif)    patch(zeroth, PTR_EXIF, at.exif.dir);
   if (at.gps)     patch(zeroth, PTR_GPS, at.gps.dir);
   if (at.interop) patch(exif, PTR_INTEROP, at.interop.dir);
   if (thumbnail)  patch(first, THUMB_OFFSET, thumbAt);
 
-  const header = 'MM\0*' + u32(8);
+  const header = (littleEndian ? 'II' : 'MM') + E.u16(42) + E.u32(8);
   let body = '';
   // IFD0 points at IFD1 when there is a thumbnail directory; sub-IFDs terminate.
-  body += writeIfd(zeroth, at.zeroth.values, at.first ? at.first.dir : 0);
-  if (at.exif)    body += writeIfd(exif,    at.exif.values, 0);
-  if (at.interop) body += writeIfd(interop, at.interop.values, 0);
-  if (at.gps)     body += writeIfd(gps,     at.gps.values, 0);
-  if (at.first)   body += writeIfd(first,   at.first.values, 0);
+  body += writeIfd(E, zeroth, at.zeroth.values, at.first ? at.first.dir : 0);
+  if (at.exif)    body += writeIfd(E, exif,    at.exif.values, 0);
+  if (at.interop) body += writeIfd(E, interop, at.interop.values, 0);
+  if (at.gps)     body += writeIfd(E, gps,     at.gps.values, 0);
+  if (at.first)   body += writeIfd(E, first,   at.first.values, 0);
 
   return 'Exif\0\0' + header + body + (thumbnail || '');
 }
@@ -212,13 +231,13 @@ export function dumpExif(dict, px) {
  * it, and falling back to piexifjs if anything is off. A metadata block that
  * validates a little better is not worth a file nobody can read.
  */
-export function dumpExifSafe(dict, px) {
+export function dumpExifSafe(dict, px, opts = {}) {
   try {
-    const bytes = dumpExif(dict, px);
+    const bytes = dumpExif(dict, px, opts);
     // Cheap structural checks only. The real gate is downstream: the pipeline
     // already runs readBackExifStrict on the finished file and fails loudly if
     // the metadata cannot be parsed back out.
-    if (!bytes.startsWith('Exif\0\0MM\0*')) throw new Error('bad TIFF header');
+    if (!/^Exif\0\0(II\*\0|MM\0\*)/.test(bytes)) throw new Error('bad TIFF header');
     if (bytes.length < 16 || bytes.length > 0xFFFD) throw new Error(`implausible length ${bytes.length}`);
     for (let i = 0; i < bytes.length; i++) {
       if (bytes.charCodeAt(i) > 0xFF) throw new Error(`non-byte value at ${i}`);

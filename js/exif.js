@@ -1,35 +1,28 @@
 /**
- * exif.js — EXIF metadata generation, parsing, and display.
+ * exif.js — Metadata generation, parsing, and display.
  *
- * Handles:
- * - Generating realistic fake EXIF data (generateFake)
- * - Reading/verifying EXIF from processed images (readBackExifStrict)
- * - Parsing EXIF from uploaded files (parseFileExif)
- * - Converting piexif internal format to display-friendly objects
- * - Formatting and rendering metadata for the UI
+ * generateFake() builds the metadata of a photo exported from Adobe Camera
+ * Raw (camera bodies, from a raw file) or Adobe Lightroom (phones, from a
+ * JPEG). The tag values that survive an export are written in the exact form
+ * each camera's firmware uses, read from real sample files; the tags Adobe
+ * drops or rewrites are dropped or rewritten the way the measured exports do.
  */
 
-// Vendored: a bare module import from a CDN cannot carry an integrity hash,
-// so a compromised CDN could run anything it liked against the user's photos,
-// and every load handed the CDN the user's IP address and referrer.
 import exifr from '../vendor/exifr.esm.js';
 import { ICONS } from './icons.js';
 import {
   pick, randInt, clamp, cryptoRandInt,
-  jitterLocation, fmtDate, fmtGpsDate, gpsTimeStamp,
+  jitterLocation, fmtDate, fmtGpsDate,
   wallClockToUtc, tzOffsetString, sunElevation,
   dmsToDec, dataUrlToBlob,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
-import { CAMERAS, LOCATIONS, EXIF_PROFILES, pickOptics } from './data.js';
+import { CAMERAS, LOCATIONS, pickOptics, pickKit } from './data.js';
 import { pickEditor } from './provenance.js';
+import { rnd } from './rng.js';
 
 // ── EXIF Parsing ─────────────────────────────────────────────────
 
-/**
- * Parse EXIF metadata from a File object using the exifr library.
- * Returns a flat object of EXIF fields, or {} if parsing fails.
- */
 export async function parseFileExif(file) {
   try {
     const raw = await exifr.parse(file, { all: true, gps: true, tiff: true, exif: true, iptc: true });
@@ -39,24 +32,18 @@ export async function parseFileExif(file) {
   }
 }
 
-/**
- * Convert piexif's internal IFD structure to a flat display-friendly object.
- * Maps numeric tag IDs to human-readable field names with decoded values.
- */
 export function piexifToDisplay(pxData) {
   const px = window.piexif;
   const z = pxData?.["0th"]  || {};
   const e = pxData?.["Exif"] || {};
   const g = pxData?.["GPS"]  || {};
   const out = {};
-
   const set = (key, val) => {
     if (val == null) return;
     if (typeof val === 'number' && Number.isNaN(val)) return;
     out[key] = val;
   };
 
-  // 0th IFD (main image info)
   set('Make',        cleanExifStr(z[px.ImageIFD.Make]));
   set('Model',       cleanExifStr(z[px.ImageIFD.Model]));
   set('Software',    cleanExifStr(z[px.ImageIFD.Software]));
@@ -65,7 +52,6 @@ export function piexifToDisplay(pxData) {
   set('YResolution', fromRat(z[px.ImageIFD.YResolution]));
   set('Orientation', z[px.ImageIFD.Orientation]);
 
-  // Exif IFD (capture settings)
   set('ExposureTime',           fromRat(e[px.ExifIFD.ExposureTime]));
   set('FNumber',                fromRat(e[px.ExifIFD.FNumber]));
   set('ISO',                    e[px.ExifIFD.ISOSpeedRatings]);
@@ -86,7 +72,6 @@ export function piexifToDisplay(pxData) {
   set('PixelXDimension',        e[px.ExifIFD.PixelXDimension]);
   set('PixelYDimension',        e[px.ExifIFD.PixelYDimension]);
 
-  // GPS IFD
   const latRef = cleanExifStr(g[px.GPSIFD.GPSLatitudeRef]);
   const lonRef = cleanExifStr(g[px.GPSIFD.GPSLongitudeRef]);
   set('GPSLatitude',  dmsToDec(g[px.GPSIFD.GPSLatitude], latRef));
@@ -97,15 +82,9 @@ export function piexifToDisplay(pxData) {
   return out;
 }
 
-/**
- * Verify that EXIF was correctly written to a data URL.
- * Tries exifr first (more robust), falls back to piexif readback.
- * Returns { blob, exif, parser, warning }.
- */
 export async function readBackExifStrict(dataUrl) {
   const blob = dataUrlToBlob(dataUrl);
   let exifrErr = null;
-
   try {
     const parsed = await exifr.parse(blob, { all: true, gps: true, tiff: true, exif: true });
     if (parsed && Object.keys(parsed).length) {
@@ -115,29 +94,178 @@ export async function readBackExifStrict(dataUrl) {
   } catch (e) {
     exifrErr = e;
   }
-
-  // Fallback: try piexif's own readback
   try {
     const parsed = piexifToDisplay(window.piexif.load(dataUrl));
     if (Object.keys(parsed).length) {
-      return {
-        blob,
-        exif: parsed,
-        parser: 'piexif',
-        warning: `EXIF was written, but exifr readback failed (${exifrErr?.message || 'unknown error'}).`,
-      };
+      return { blob, exif: parsed, parser: 'piexif',
+               warning: `EXIF was written, but exifr readback failed (${exifrErr?.message || 'unknown error'}).` };
     }
   } catch (e) {
     const exifrMsg = exifrErr?.message || 'unknown exifr error';
     throw new Error(`Metadata verification failed (exifr: ${exifrMsg}; piexif: ${e.message})`);
   }
-
   throw new Error(`Metadata verification failed (${exifrErr?.message || 'no readable EXIF found'})`);
 }
 
-// ── Fake EXIF Generation ─────────────────────────────────────────
+// ── Rational encoders ────────────────────────────────────────────
 
-/** Scene brightness bands in EV at ISO 100. */
+const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+const reduce = (n, d) => { const g = gcd(Math.abs(n), d) || 1; return [n / g, d / g]; };
+const ratFixed = (v, den) => [Math.round(v * den), den];
+
+/**
+ * Apple's rationals are the continued-fraction convergent of the float32
+ * value, taken at the first convergent that agrees to about nine digits:
+ * f/1.78 becomes 1244236/699009, a 6.765 mm focal length 251773/37217.
+ */
+function ratFloat32(v) {
+  const f = Math.fround(v);
+  if (f === 0) return [0, 1];
+  const neg = f < 0;
+  let a = Math.abs(f);
+  let h0 = 0, h1 = 1, k0 = 1, k1 = 0;
+  for (let i = 0; i < 40; i++) {
+    const ai = Math.floor(a);
+    [h0, h1] = [h1, ai * h1 + h0];
+    [k0, k1] = [k1, ai * k1 + k0];
+    if (k1 > 100000000) break;
+    if (Math.abs(h1 / k1 - Math.abs(f)) <= 1e-9 * Math.abs(f)) break;
+    if (a - ai === 0) break;
+    a = 1 / (a - ai);
+  }
+  return [neg ? -h1 : h1, k1];
+}
+
+/** APEX shutter/aperture value, as Adobe rewrites it on export: N/1000000, or N/1 when integral. */
+function apexMicro(v) {
+  const r = Math.round(v);
+  if (Math.abs(v - r) < 1e-9) return [r, 1];
+  return [Math.round(v * 1000000), 1000000];
+}
+
+/** Lens specification rationals, "24/1 70/1 28/10 28/10" in the EXIF and XMP. */
+function specRat(v) {
+  if (Number.isInteger(v)) return [v, 1];
+  if (Math.abs(v * 10 - Math.round(v * 10)) < 1e-9) return [Math.round(v * 10), 10];
+  return [Math.round(v * 100), 100];
+}
+function lensInfoString(spec) {
+  return spec.map(([n, d]) => `${n}/${d}`).join(' ');
+}
+
+/** GPS coordinate in the form the exporter writes: degrees, decimal minutes over 1e7, zero seconds. */
+function adobeGps(abs) {
+  const d = Math.floor(abs);
+  const m = (abs - d) * 60;
+  return [[d, 1], [Math.round(m * 1e7), 1e7], [0, 1]];
+}
+
+// ── Per-firmware encodings ───────────────────────────────────────
+//
+// What each camera writes, and how, among the tags that survive an Adobe
+// export. Keyed by the `writer` field in data.js. Bodies (canon/nikon/sony/
+// fuji) export from a raw file through Camera Raw and keep the FocalPlane and
+// sensor-origin tags; phones export from a JPEG through Lightroom and do not.
+
+const WRITERS = {
+  apple: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 1, brightness: 'cf', maxAperture: null, sensitivity: null,
+    flashOff: [16], flashFired: 25, metering: [5],
+    lensTags: ['make', 'model', 'info'], lensMake: 'Apple',
+    gpsVersion: null, dirRef: 'T',
+    extras: { focalEquiv: true, digitalZoom: 'zoom', sensing: true, sceneType: true },
+  },
+  google: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 6, brightness: 100, maxAperture: 100, sensitivity: null,
+    flashOff: [16], flashFired: 1, metering: [2],
+    lensTags: ['make', 'model'], lensMake: 'Google',
+    gpsVersion: [2, 2, 0, 0], dirRef: 'M',
+    extras: { focalEquiv: true, digitalZoom: 'always', customRendered: 1, sensing: true, sceneType: true,
+              contrast: true, subjectDistanceRange: true },
+  },
+  samsung: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 100, brightness: 100, maxAperture: 'apex', sensitivity: null,
+    flashOff: [0], flashFired: 1, metering: [2],
+    lensTags: [], gpsVersion: [2, 2, 0, 0], dirRef: 'M',
+    extras: { focalEquiv: true, digitalZoom: 'always' },
+  },
+  samsungA: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 10, brightness: 100, maxAperture: 'apex', sensitivity: null,
+    flashOff: [0], flashFired: 1, metering: [2],
+    lensTags: [], gpsVersion: [2, 2, 0, 0], dirRef: 'M',
+    extras: { focalEquiv: true, digitalZoom: 'always', customRendered: 0, sensing: true, sceneType: true,
+              contrast: true },
+  },
+  oneplus: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 6, brightness: 100, maxAperture: 'apex', sensitivity: null,
+    flashOff: [16], flashFired: 1, metering: [2],
+    lensTags: ['model'], lensMake: null,
+    gpsVersion: null, dirRef: 'M',
+    extras: { focalEquiv: true, digitalZoom: 'always', sensing1: true, sceneType: true },
+  },
+  xiaomi: {
+    kind: 'phone',
+    fnumber: 'lens', focal: 'lens',
+    expComp: 6, brightness: 100, maxAperture: 'apex', sensitivity: 3,
+    flashOff: [16], flashFired: 1, metering: [2],
+    lensTags: [], gpsVersion: null, dirRef: 'M',
+    extras: { focalEquiv: true, sensing1: true, sceneType: true, lightSource: 21 },
+  },
+  canon: {
+    kind: 'body',
+    fnumber: 10, focal: 1,
+    expComp: 1, brightness: null, maxAperture: 'adobe100', sensitivity: 2,
+    flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
+    lensTags: ['info', 'model', 'serial'], lensMake: null, lensInfoApertureZero: true,
+    gpsVersion: [2, 3, 0, 0], serial: 12,
+    extras: { focalPlane: true, customRendered: 0, serialNumber: true, status: true, mapDatum: true },
+  },
+  nikon: {
+    kind: 'body',
+    fnumber: 100, focal: 10,
+    expComp: 6, brightness: null, maxAperture: null, sensitivity: 2,
+    flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
+    lensTags: ['info', 'model', 'make', 'serial'], lensMake: 'NIKON', lensAdobe: true,
+    gpsVersion: [2, 3, 0, 0], serial: 7,
+    extras: { focalPlane: true, focalPlaneUnit: 3, sensing: true, fileSource: true, sceneType: true,
+              cfa: true, customRendered: 1, focalEquiv: true, gainControl: true, contrast: true,
+              subjectDistanceRange: true, serialNumber: true },
+  },
+  sony: {
+    kind: 'body',
+    fnumber: 10, focal: 10,
+    expComp: 10, brightness: 2560, maxAperture: 256, sensitivity: 2,
+    flashOff: [16], flashFired: 9, metering: [5, 5, 5, 2, 3],
+    lensTags: ['info', 'model'], lensMake: null,
+    gpsVersion: [2, 3, 0, 0],
+    extras: { focalPlane: true, focalPlaneUnit: 3, fileSource: true, sceneType: true, customRendered: 0,
+              focalEquiv: true, digitalZoom: 'always', contrast: true, lightSource: 0 },
+  },
+  fuji: {
+    kind: 'body',
+    fnumber: 100, focal: 100,
+    expComp: 100, brightness: 100, maxAperture: 100, sensitivity: 1,
+    flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
+    lensTags: ['info', 'model', 'make', 'serial'], lensMake: 'FUJIFILM',
+    gpsVersion: [2, 3, 0, 0], serial: 8,
+    extras: { focalPlane: true, focalPlaneUnit: 3, sensing: true, fileSource: true, sceneType: true,
+              customRendered: 0, focalEquiv: true, sharpness: true, subjectDistanceRange: true,
+              serialNumber: true, lightSource: 0 },
+  },
+};
+
+// ── Exposure ─────────────────────────────────────────────────────
+
 const SCENES = {
   daylight: { evMin: 13, evMax: 16, dark: false },
   overcast: { evMin: 10, evMax: 13, dark: false },
@@ -148,20 +276,12 @@ const SCENES = {
 
 function weightedPick(weights) {
   const entries = Object.entries(weights);
-  let r = Math.random() * entries.reduce((n, [, w]) => n + w, 0);
+  let r = rnd() * entries.reduce((n, [, w]) => n + w, 0);
   for (const [k, w] of entries) { r -= w; if (r <= 0) return k; }
   return entries[0][0];
 }
 
-/**
- * Choose the scene from where the sun actually was.
- *
- * Brightness used to be drawn independently of the clock, so one night-time
- * frame in three claimed full daylight. The sun's elevation at the claimed
- * place and time is a one-line computation for anyone checking, so the scene
- * follows it: high sun is mostly daylight, twilight is mostly interiors, and
- * after dark there is no daylight at all.
- */
+/** The scene follows the sun's elevation at the claimed place and time. */
 function pickScene(sunEl) {
   let w;
   if      (sunEl > 25) w = { daylight: 55, overcast: 25, indoor: 20 };
@@ -172,7 +292,6 @@ function pickScene(sunEl) {
   return { name, ...SCENES[name] };
 }
 
-/** When people take pictures: hardly at all before dawn, mostly through the day and evening. */
 const HOUR_WEIGHTS = [1, 1, 1, 1, 1, 1, 2, 4, 6, 8, 8, 8, 9, 9, 9, 9, 9, 9, 8, 7, 5, 4, 2, 1.5];
 function pickHour() {
   return Number(weightedPick(Object.fromEntries(HOUR_WEIGHTS.map((w, i) => [i, w]))));
@@ -181,126 +300,21 @@ function pickHour() {
 const HOUR = 36e5, DAY = 864e5;
 
 /**
- * Capture and export instants.
- *
- * Both are wall-clock readings in the photographed city; the zone is applied
- * when they are converted. The capture is drawn from the two years before an
- * anchor that itself sits a random one to ninety days in the past, so the
- * latest date in a batch no longer says when the tool was run. The export
- * follows the capture by hours to weeks, during waking hours, as a real one
- * does — the earlier version wrote capture and export as the same second.
- */
-function pickDates(originalDate) {
-  const anchor = Date.now() - randInt(1, 90) * DAY - Math.floor(Math.random() * DAY);
-  let capture;
-  if (originalDate instanceof Date && !isNaN(originalDate)) {
-    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
-                       pickHour(), randInt(0, 59), randInt(0, 59));
-  } else {
-    capture = new Date(anchor - randInt(2, 700 * 24) * HOUR);
-    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
-  }
-  let exportAt = new Date(Math.min(anchor, capture.getTime() + randInt(2, 45 * 24) * HOUR));
-  exportAt.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
-  if (exportAt.getTime() <= capture.getTime() + HOUR) {
-    exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
-  }
-  return { capture, exportAt };
-}
-
-// ── Rational encodings ──
-//
-// Each firmware serialises its rationals its own way, and an editor export
-// carries those strings through. Writing every value as n/100 for all nine
-// makes was a signature of this writer.
-const gcd = (a, b) => (b ? gcd(b, a % b) : a);
-const reduce = (n, d) => { const g = gcd(Math.abs(n), d) || 1; return [n / g, d / g]; };
-const ratFixed   = (v, den) => [Math.round(v * den), den];
-const ratReduced = (v, den) => reduce(Math.round(v * den), den);
-const ratOdd     = v => { const den = randInt(1000, 9999); return [Math.round(v * den), den]; };
-const ratEighths = v => reduce(Math.round(v * 8), 8);
-
-function apexRat(style, v) {
-  switch (style) {
-    case 'odd':     return ratOdd(v);
-    case 'micro':   return ratFixed(v, 1000000);
-    case 'eighths': return ratEighths(v);
-    default:        return ratFixed(v, 100);
-  }
-}
-
-function biasRat(style, stops) {
-  switch (style) {
-    case 'thirds':     return reduce(Math.round(stops * 3), 3);
-    case 'sixths':     return [Math.round(stops * 6), 6];
-    case 'tenths':     return [Math.round(stops * 10), 10];
-    case 'hundredths': return [Math.round(stops * 100), 100];
-    default:           return [0, 1];
-  }
-}
-
-/**
- * A lens focal or f-number as LensSpecification carries it: 24/1, 28/10,
- * 178/100 — the same form the XMP aux:LensInfo string uses, so the two copies
- * of the value in the file agree byte for byte.
- */
-const specRat = v => (Number.isInteger(v) ? [v, 1]
-  : Math.abs(v * 10 - Math.round(v * 10)) < 1e-9 ? [Math.round(v * 10), 10]
-  : [Math.round(v * 100), 100]);
-
-/**
- * Coordinates as Adobe writes them: degrees, decimal minutes to four places,
- * and a zero seconds field. XMP stores GPS as "DDD,MM.mmmmN", and when the
- * exporter reconciles that back into the EXIF block the seconds come out as
- * 0/1 whatever precision the camera used. It is the one encoding that is the
- * same for every make here, because the exporter wrote it, not the camera.
- */
-function adobeDegMin(abs) {
-  const d = Math.floor(abs);
-  const m = Math.round((abs - d) * 60 * 10000);
-  return [[d, 1], [m, 10000], [0, 1]];
-}
-
-/**
- * Solve a physically consistent shutter/ISO pair for a scene and aperture.
- *
- * Exposure is not three free variables. They are tied together by
- *
- *     N² / t  =  (ISO / 100) · 2^EV
- *
- * so picking shutter, aperture and ISO independently produced frames no scene
- * could have produced — ISO 51200 at 1/4000s and f/1.4 describes somewhere
- * darker than a sealed room, and anyone who computes EV back out of the EXIF
- * sees it at a glance.
- *
- * Real cameras resolve it the way this does: hold the aperture, raise ISO only
- * as far as the shutter requires, then land on a speed from the fixed ladder.
- * The rounding left over from that snap is kept, because a real camera's EXIF
- * does not come out algebraically perfect either.
- *
- * Checked against a published OnePlus 5 frame — ISO 500, f/1.7, 1/100, which
- * is EV 5.85. Fed that scene and aperture, this returns ISO 400 at 1/125.
+ * Solve a physically consistent shutter/ISO pair for a scene and aperture:
+ * N²/t = (ISO/100)·2^EV. Picking the three independently produced frames no
+ * scene could have produced.
  */
 function solveExposure(cam, aperture, ev, focalEquiv) {
   const isos = [...cam.isos].sort((a, b) => a - b);
   const seconds = s => s[0] / s[1];
-
-  // Slowest shutter still expected to come out sharp. Phones stabilise hard and
-  // target around 1/60; bodies follow roughly the 1/focal reciprocal rule.
   const slowest = cam.type === 'phone'
     ? 1 / 60
     : clamp(1 / Math.max(focalEquiv, 1), 1 / 250, 1 / 30);
-
   const required = iso => 100 * aperture * aperture / (iso * Math.pow(2, ev));
-
-  // Lowest ISO that keeps the shutter short enough; if none does, the sensor is
-  // maxed out and the exposure simply runs long, as it would at night.
   let iso = isos[isos.length - 1];
   for (const candidate of isos) {
     if (required(candidate) <= slowest) { iso = candidate; break; }
   }
-
-  // Snap to the nearest rung in stops, not in seconds.
   const want = required(iso);
   let shutter = cam.shutters[0];
   let bestErr = Infinity;
@@ -311,47 +325,89 @@ function solveExposure(cam, aperture, ev, focalEquiv) {
   return { shutter, iso };
 }
 
-/**
- * The brightest and darkest scenes this body can actually meter at a given
- * aperture — base ISO with its fastest shutter at one end, maximum ISO with its
- * slowest at the other.
- *
- * Scenes are clamped into this range before solving. Without it, an f/1.42
- * phone handed full midday sun needed 1/16000s, its shutter stopped at 1/4000,
- * and the written triplet came out two stops away from the scene it claimed.
- * Real hardware cannot record what it cannot expose, so neither should this.
- */
 function cameraEvRange(cam, aperture) {
-  const secs   = cam.shutters.map(s => s[0] / s[1]);
-  const evAt   = (t, iso) => Math.log2(aperture * aperture / t) - Math.log2(iso / 100);
-  return [
-    evAt(Math.max(...secs), Math.max(...cam.isos)),
-    evAt(Math.min(...secs), Math.min(...cam.isos)),
-  ];
+  const secs = cam.shutters.map(s => s[0] / s[1]);
+  const evAt = (t, iso) => Math.log2(aperture * aperture / t) - Math.log2(iso / 100);
+  return [evAt(Math.max(...secs), Math.max(...cam.isos)), evAt(Math.min(...secs), Math.min(...cam.isos))];
+}
+
+function apexBrightness(aperture, exposureSec, iso) {
+  return 2 * Math.log2(aperture) - Math.log2(exposureSec) - Math.log2(iso / 3.125);
+}
+
+// ── Dates and personas ───────────────────────────────────────────
+
+function pickDates(originalDate) {
+  const anchor = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
+  let capture;
+  if (originalDate instanceof Date && !isNaN(originalDate)) {
+    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
+                       pickHour(), randInt(0, 59), randInt(0, 59));
+  } else {
+    capture = new Date(anchor - randInt(2, 700 * 24) * HOUR);
+    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
+  }
+  let exportAt = new Date(Math.min(anchor, capture.getTime() + randInt(2, 45 * 24) * HOUR));
+  exportAt.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
+  if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
+  return { capture, exportAt };
 }
 
 /**
- * Pad ASCII values to an even byte count before writing.
- *
- * TIFF wants every value to start on a word boundary. piexifjs concatenates
- * value data without padding, so one odd-length string — "17.4.1" and its
- * terminator come to 7 bytes — pushes everything after it onto odd offsets, and
- * `exiftool -validate` then reports a string of "Odd offset for ..." warnings on
- * every file the tool produces. That is a deterministic signature of the writer,
- * which is exactly what this project exists to avoid.
- *
- * piexifjs appends the NUL terminator itself, so a value is even overall when
- * the string length is odd. Real encoders pad the same way, and every reader
- * strips trailing NULs, so nothing downstream sees a difference.
- *
- * Only Ascii-typed tags are touched: Undefined tags such as ExifVersion are
- * fixed-width and must not grow. So are a handful of Ascii ones — GPSDateStamp
- * is specified as exactly 11 bytes, and padding it to 12 trades one validation
- * warning for another.
+ * A persona for a batch: one body, one bag of lenses, one city, one trip of a
+ * few days, one export session. Each photo still draws its own lens from the
+ * kit, its own spot in the city, its own moment in the trip, its own exposure.
  */
-const FIXED_LENGTH_ASCII = new Set([
-  `GPS:${0x001d}`,   // GPSDateStamp, "YYYY:MM:DD\0"
-]);
+export function makePersona() {
+  const cam    = pick(CAMERAS);
+  const city   = pick(LOCATIONS);
+  const editor = pickEditor(cam.type === 'dslr' ? 'acr' : 'lr');
+  const kit    = pickKit(cam);
+  const anchor    = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
+  const tripStart = anchor - randInt(2 * 24, 700 * 24) * HOUR;
+  const tripEnd   = tripStart + randInt(0, 6) * DAY;
+  let session = new Date(Math.min(anchor, tripEnd + randInt(2, 45 * 24) * HOUR));
+  session.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
+  if (session.getTime() <= tripEnd + DAY) session = new Date(tripEnd + DAY + randInt(2, 8) * HOUR);
+  return { cam, city, editor, kit, tripStart, tripEnd, session, exported: 0 };
+}
+
+function personaDates(persona, originalDate) {
+  let capture;
+  if (originalDate instanceof Date && !isNaN(originalDate)) {
+    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
+                       pickHour(), randInt(0, 59), randInt(0, 59));
+  } else {
+    capture = new Date(persona.tripStart + Math.floor(rnd() * (persona.tripEnd - persona.tripStart + DAY)));
+    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
+  }
+  persona.exported += randInt(4, 40);
+  let exportAt = new Date(persona.session.getTime() + persona.exported * 1000);
+  if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
+  return { capture, exportAt };
+}
+
+// ── Tag registration ─────────────────────────────────────────────
+
+const TAG_OFFSET_TIME           = 0x9010;
+const TAG_OFFSET_TIME_ORIGINAL  = 0x9011;
+const TAG_OFFSET_TIME_DIGITIZED = 0x9012;
+const TAG_SERIAL_NUMBER         = 0xa431;
+const TAG_LENS_SERIAL           = 0xa435;
+
+/** Register the handful of tags piexifjs 1.0.6 does not know, so exif-writer can serialise them. */
+function registerTags(px) {
+  const E = px?.TAGS?.Exif;
+  if (!E) return;
+  const add = (tag, name, type) => { if (!E[tag]) E[tag] = { name, type }; };
+  add(TAG_OFFSET_TIME, 'OffsetTime', 'Ascii');
+  add(TAG_OFFSET_TIME_ORIGINAL, 'OffsetTimeOriginal', 'Ascii');
+  add(TAG_OFFSET_TIME_DIGITIZED, 'OffsetTimeDigitized', 'Ascii');
+  add(TAG_SERIAL_NUMBER, 'BodySerialNumber', 'Ascii');
+  add(TAG_LENS_SERIAL, 'LensSerialNumber', 'Ascii');
+}
+
+const FIXED_LENGTH_ASCII = new Set([`GPS:${0x001d}`]);
 
 function alignAsciiValues(p, px) {
   for (const [ifdKey, fallback] of [['0th', 'Image'], ['Exif', 'Exif'], ['GPS', 'GPS'],
@@ -368,251 +424,267 @@ function alignAsciiValues(p, px) {
   }
 }
 
-/** APEX brightness: Bv = Av + Tv - Sv. Wrong here would be its own tell. */
-function apexBrightness(aperture, exposureSec, iso) {
-  const av = 2 * Math.log2(aperture);
-  const tv = -Math.log2(exposureSec);
-  const sv = Math.log2(iso / 3.125);
-  return av + tv - sv;
-}
+// ── Serial-number generators (shape matches the measured samples) ──
 
-// piexifjs 1.0.6 predates the OffsetTime tags, so its writer rejects them
-// unless they are registered. Every current phone writes OffsetTimeOriginal,
-// and its absence next to a GPS timestamp is conspicuous.
-const TAG_OFFSET_TIME            = 0x9010;
-const TAG_OFFSET_TIME_ORIGINAL   = 0x9011;
-const TAG_OFFSET_TIME_DIGITIZED  = 0x9012;
-
-function registerOffsetTimeTags(px) {
-  const tags = px?.TAGS?.Exif;
-  if (!tags) return false;
-  if (!tags[TAG_OFFSET_TIME])           tags[TAG_OFFSET_TIME]           = { name: 'OffsetTime',          type: 'Ascii' };
-  if (!tags[TAG_OFFSET_TIME_ORIGINAL])  tags[TAG_OFFSET_TIME_ORIGINAL]  = { name: 'OffsetTimeOriginal',  type: 'Ascii' };
-  if (!tags[TAG_OFFSET_TIME_DIGITIZED]) tags[TAG_OFFSET_TIME_DIGITIZED] = { name: 'OffsetTimeDigitized', type: 'Ascii' };
-  return true;
+const digits = n => Array.from({ length: n }, () => '0123456789'[Math.floor(rnd() * 10)]).join('');
+function serialFor(writer) {
+  if (writer.serial === 12) return digits(12);        // Canon
+  if (writer.serial === 7)  return digits(7);         // Nikon
+  if (writer.serial === 8)  return (0x30000000 + Math.floor(rnd() * 0x0fffffff)).toString(16).toUpperCase(); // Fuji
+  return null;
 }
+const hex = n => Array.from({ length: n }, () => '0123456789abcdef'[Math.floor(rnd() * 16)]).join('');
+
+// ── Fake metadata generation ─────────────────────────────────────
 
 /**
- * Generate a complete set of realistic fake EXIF metadata.
- *
- * Picks a camera, a US location, a lens, a capture time and the scene the
- * sun allows at that time, solves a consistent exposure, and writes the tag
- * set that camera's firmware writes — in the encodings it uses — as it would
- * survive a Camera Raw export. The export's own fields (Software, the resolution,
- * the export date in ModifyDate, the Interoperability IFD) are the editor's.
- *
- * Returns { display, piexif, cam, loc, lens, editor, capture, exportAt, ... }.
+ * Build the metadata of one exported photo. Returns the display object, the
+ * piexif write object, and the context the container (XMP, APP13) needs.
  */
 export function generateFake(options = {}) {
   const px = window.piexif;
-  const cam = pick(CAMERAS);
-  const prof = EXIF_PROFILES[cam.make];
-  const loc = jitterLocation(pick(LOCATIONS));
-  const editor = pickEditor();
+  registerTags(px);
+  const persona = options.persona || null;
+  const cam = persona ? persona.cam : pick(CAMERAS);
+  const w   = WRITERS[cam.writer];
+  const loc = jitterLocation(persona ? persona.city : pick(LOCATIONS));
+  const isBody = w.kind === 'body';
+  const editor = persona ? persona.editor : pickEditor(isBody ? 'acr' : 'lr');
 
-  // Focal length, aperture and lens are chosen together so they describe a
-  // camera that can be assembled and a lens that can take the shot.
-  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
+  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam, persona ? persona.kit : null);
 
-  const { capture, exportAt } = pickDates(options.originalDate);
+  const { capture, exportAt } = persona ? personaDates(persona, options.originalDate) : pickDates(options.originalDate);
   const utc          = wallClockToUtc(capture, loc.tz);
   const exportUtc    = wallClockToUtc(exportAt, loc.tz);
   const offsetString = tzOffsetString(utc, loc.tz);
   const exportOffset = tzOffsetString(exportUtc, loc.tz);
 
-  // ── Exposure: the sun fixes the scene; one scene drives shutter, ISO and flash.
   const scene = pickScene(sunElevation(loc.lat, loc.lon, utc));
-  const flashFired = !!cam.flash && scene.dark && Math.random() < (cam.type === 'phone' ? 0.3 : 0.25);
-  // A fired flash lights the subject, so the frame is metered several stops
-  // brighter than the ambient scene.
-  const rawEv = scene.evMin + Math.random() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
+  const flashFired = !!cam.flash && scene.dark && rnd() < (cam.type === 'phone' ? 0.3 : 0.25);
+  const rawEv = scene.evMin + rnd() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
   const [evLo, evHi] = cameraEvRange(cam, aperture);
   const ev = clamp(rawEv, evLo, evHi);
-
   const { shutter, iso } = solveExposure(cam, aperture, ev, focalEquiv);
   const exposureSec = shutter[0] / shutter[1];
 
-  const flash           = flashFired ? prof.flashFired : pick(prof.flashOff);
-  const meteringMode    = pick(prof.metering);
+  const flash           = flashFired ? w.flashFired : pick(w.flashOff);
+  const meteringMode    = pick(w.metering);
   const exposureProgram = cam.type === 'phone' ? 2 : pick([1, 2, 3, 3, 3, 4]);
   const exposureMode    = exposureProgram === 1 ? 1 : 0;
   const whiteBalance    = cam.type === 'phone' ? 0 : pick([0, 0, 0, 1]);
   const sceneCapture    = scene.name === 'night' ? 3 : 0;
   const biasStops       = cam.type === 'phone' ? 0 : pick([0, 0, 0, 1 / 3, -1 / 3, 2 / 3, -2 / 3, 1, -1]);
-  const subsec = !prof.subsec ? null
-    : prof.subsec.endsWith('3') ? String(cryptoRandInt(0, 999)).padStart(3, '0')
-    : String(cryptoRandInt(0, 99)).padStart(2, '0');
-  // The exporter's resolution, not the camera's: Camera Raw defaults to 240.
-  const dpi = pick([240, 240, 240, 300, 72]);
+  const subsec = cam.subsec ? String(cryptoRandInt(0, Math.pow(10, cam.subsec) - 1)).padStart(cam.subsec, '0') : null;
+  const colorSpace = rnd() < 0.9 ? 1 : 65535;
+  const dpi = editor.dpi;
 
-  const widestAperture = cam.type === 'phone'
-    ? Math.min(...cam.lenses.map(l => l.f))
-    : Math.min(...cam.apertures);
   const tv = -Math.log2(exposureSec);
   const av = 2 * Math.log2(aperture);
   const bv = apexBrightness(aperture, exposureSec, iso);
+  const widest = cam.type === 'phone' ? Math.min(...cam.lenses.map(l => l.f)) : Math.min(...cam.apertures);
+  const latRef = loc.lat >= 0 ? 'N' : 'S';
+  const lonRef = loc.lon >= 0 ? 'E' : 'W';
 
-  const latRef = loc.lat >= 0 ? "N" : "S";
-  const lonRef = loc.lon >= 0 ? "E" : "W";
+  // Lens figures: phones carry the measured per-lens rationals; bodies compute
+  // from the aperture in the firmware's own denominator.
+  const fnumberRat = w.fnumber === 'lens'
+    ? lens.fRat
+    : reduce(Math.round(aperture * w.fnumber), w.fnumber);
+  const focalRat = w.focal === 'lens'
+    ? lens.focalRat
+    : (w.focal === 1 ? [focalPhys, 1] : reduce(Math.round(focalPhys * w.focal), w.focal));
 
-  // ── Display object
+  // Lens specification and names.
+  let lensSpec = null, lensModel = null, lensMake = null, auxLens = null, adobeLens = null;
+  if (cam.type === 'phone') {
+    lensModel = lens.model;
+    if (w.lensTags.includes('make')) lensMake = w.lensMake;
+    lensSpec = cam.lensInfo || null;
+    auxLens = lens.model;
+  } else if (cam.fixedLens) {
+    lensSpec = [specRat(focalPhys), specRat(focalPhys), specRat(widest), specRat(widest)];
+    auxLens = `${cam.model.split(' ').pop()} ${focalPhys}mm f/${widest}`;
+  } else if (lens) {
+    lensModel = lens.model;
+    if (w.lensTags.includes('make')) lensMake = w.lensMake;
+    const apZero = w.lensInfoApertureZero;
+    lensSpec = [specRat(lens.range[0]), specRat(lens.range[1]),
+                apZero ? [0, 1] : specRat(lens.wide), apZero ? [0, 1] : specRat(lens.tele)];
+    // Nikon F-mount glass reaches Camera Raw only through the raw's MakerNote,
+    // so its EXIF LensModel is dropped and XMP names it in Adobe's own form.
+    if (w.lensAdobe && lens.mount === 'F' && lens.adobe) { auxLens = lens.adobe; lensModel = lens.adobe; }
+    else auxLens = lens.model;
+  }
+
+  const serialNumber = w.extras.serialNumber ? serialFor(w) : null;
+  const lensSerial = (w.lensTags.includes('serial') && !cam.fixedLens && lens) ? hex(10).toUpperCase() : null;
+
+  // ── Display object (UI) ──
   const display = {
     Make: cam.make, Model: cam.model, Software: editor.software,
-    LensMake: lens.make, LensModel: lens.model,
+    LensMake: lensMake, LensModel: lensModel,
     DateTimeOriginal: capture, DateTime: exportAt, SubSecTimeOriginal: subsec,
-    OffsetTimeOriginal: cam.offsetTime ? offsetString : null,
+    OffsetTimeOriginal: cam.offset !== 'none' ? offsetString : null,
     ExposureTime: exposureSec, FNumber: aperture, ISO: iso,
-    FocalLength: focalPhys, FocalLengthIn35mmFormat: prof.tags.focalEquiv ? focalEquiv : null,
+    FocalLength: focalPhys, FocalLengthIn35mmFormat: w.extras.focalEquiv ? focalEquiv : null,
     Flash: flash, MeteringMode: meteringMode,
     ExposureProgram: exposureProgram, ExposureMode: exposureMode,
     WhiteBalance: whiteBalance, SceneCaptureType: sceneCapture,
-    SensingMethod: prof.tags.sensing ? 2 : null,
-    Orientation: 1, ColorSpace: 1,
+    SensingMethod: (w.extras.sensing ? 2 : (w.extras.sensing1 ? 1 : null)),
+    Orientation: 1, ColorSpace: colorSpace,
     XResolution: dpi, YResolution: dpi,
     GPSLatitude: loc.lat, GPSLongitude: loc.lon, GPSAltitude: loc.alt,
   };
 
-  // ── Piexif write object
+  // ── Piexif write object (the Adobe export's EXIF) ──
   const I = px.ImageIFD, E = px.ExifIFD, G = px.GPSIFD;
   const captureStr = fmtDate(capture);
   const exportStr  = fmtDate(exportAt);
   const p = { "0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {} };
 
+  // IFD0: the exporter drops Orientation, YCbCrPositioning and empty
+  // Artist/Copyright. ModifyDate is the export time.
   p["0th"][I.Make]           = cam.make;
   p["0th"][I.Model]          = cam.model;
-  p["0th"][I.Orientation]    = 1;
   p["0th"][I.XResolution]    = [dpi, 1];
   p["0th"][I.YResolution]    = [dpi, 1];
   p["0th"][I.ResolutionUnit] = 2;
-  p["0th"][I.Software]       = editor.software;   // the exporter, not the camera
-  p["0th"][I.DateTime]       = exportStr;         // when the export was written
-  // Required for JPEG by the Exif spec; `exiftool -validate` reports its
-  // absence, and a camera file that fails validation is its own signal.
-  p["0th"][I.YCbCrPositioning] = 1;
+  p["0th"][I.Software]       = editor.software;
+  p["0th"][I.DateTime]       = exportStr;
 
   p["Exif"][E.ExposureTime]    = shutter;
-  p["Exif"][E.FNumber]         = prof.fnumber === 'reduced' ? ratReduced(aperture, 100) : ratFixed(aperture, prof.fnumber);
+  p["Exif"][E.FNumber]         = fnumberRat;
   p["Exif"][E.ExposureProgram] = exposureProgram;
   p["Exif"][E.ISOSpeedRatings] = iso;
-  if (prof.tags.sensitivity) {
-    p["Exif"][E.SensitivityType] = prof.tags.sensitivity;
-    if (prof.tags.sensitivity === 1 && E.StandardOutputSensitivity) p["Exif"][E.StandardOutputSensitivity] = iso;
+  if (w.sensitivity) {
+    p["Exif"][E.SensitivityType] = w.sensitivity;
+    if (w.sensitivity === 1) { if (E.StandardOutputSensitivity) p["Exif"][E.StandardOutputSensitivity] = iso; }
     else p["Exif"][E.RecommendedExposureIndex] = iso;
   }
   p["Exif"][E.ExifVersion]       = cam.exifVersion;
   p["Exif"][E.DateTimeOriginal]  = captureStr;
   p["Exif"][E.DateTimeDigitized] = captureStr;
-  if (cam.offsetTime && offsetString && registerOffsetTimeTags(px)) {
-    p["Exif"][TAG_OFFSET_TIME]           = exportOffset || offsetString;
-    p["Exif"][TAG_OFFSET_TIME_ORIGINAL]  = offsetString;
-    p["Exif"][TAG_OFFSET_TIME_DIGITIZED] = offsetString;
+  if (cam.offset !== 'none' && offsetString) {
+    p["Exif"][TAG_OFFSET_TIME_ORIGINAL] = offsetString;
+    if (cam.offset === 'all' || cam.offset === 'two') p["Exif"][TAG_OFFSET_TIME] = exportOffset || offsetString;
+    if (cam.offset === 'all') p["Exif"][TAG_OFFSET_TIME_DIGITIZED] = offsetString;
   }
-  p["Exif"][E.ComponentsConfiguration] = "\x01\x02\x03\x00";
-  // APEX values, derived from the solved exposure so they agree with it.
-  p["Exif"][E.ShutterSpeedValue] = apexRat(prof.apex, tv);
-  p["Exif"][E.ApertureValue]     = apexRat(prof.apex, av);
-  if (prof.brightness) p["Exif"][E.BrightnessValue] = prof.brightness === 'odd' ? ratOdd(bv) : ratFixed(bv, 100);
-  p["Exif"][E.ExposureBiasValue] = biasRat(prof.bias, biasStops);
-  if (prof.maxAperture) p["Exif"][E.MaxApertureValue] = ratFixed(2 * Math.log2(widestAperture), prof.maxAperture);
+  // ShutterSpeedValue and ApertureValue: Adobe rewrites both as N/1000000.
+  p["Exif"][E.ShutterSpeedValue] = apexMicro(tv);
+  p["Exif"][E.ApertureValue]     = apexMicro(av);
+  if (w.brightness === 'cf')       p["Exif"][E.BrightnessValue] = ratFloat32(bv);
+  else if (w.brightness === 2560)  p["Exif"][E.BrightnessValue] = [Math.round(bv * 2560), 2560];
+  else if (w.brightness)           p["Exif"][E.BrightnessValue] = ratFixed(bv, w.brightness);
+  p["Exif"][E.ExposureBiasValue] = w.expComp === 1 ? reduce(Math.round(biasStops * 3), 3) : [Math.round(biasStops * w.expComp), w.expComp];
+  if (w.maxAperture === 'apex')          p["Exif"][E.MaxApertureValue] = fnumberRat === lens.fRat ? lens.apex : ratFixed(2 * Math.log2(widest), 100);
+  else if (w.maxAperture === 'adobe100') p["Exif"][E.MaxApertureValue] = ratFixed(2 * Math.log2(lens ? lens.wide : widest), 100);
+  else if (w.maxAperture === 256)        p["Exif"][E.MaxApertureValue] = [Math.round(2 * Math.log2(widest) * 256), 256];
+  else if (w.maxAperture)                p["Exif"][E.MaxApertureValue] = ratFixed(2 * Math.log2(widest), w.maxAperture);
   p["Exif"][E.MeteringMode] = meteringMode;
-  if (prof.tags.lightSource) p["Exif"][E.LightSource] = 0;
+  if (w.extras.lightSource != null) p["Exif"][E.LightSource] = w.extras.lightSource;
   p["Exif"][E.Flash] = flash;
-  // FocalLength is the real lens, FocalLengthIn35mmFilm the equivalent. On a
-  // phone these differ by the sensor crop; writing the equivalent into both
-  // claimed a 26mm lens inside a handset.
-  p["Exif"][E.FocalLength] = cam.type === 'phone'
-    ? (prof.fnumber === 'reduced' ? ratReduced(focalPhys, 100) : ratFixed(focalPhys, 100))
-    : [focalPhys, 1];
+  p["Exif"][E.FocalLength] = focalRat;
   if (subsec) {
-    if (prof.subsec !== 'od3') p["Exif"][E.SubSecTime] = subsec;
     p["Exif"][E.SubSecTimeOriginal]  = subsec;
     p["Exif"][E.SubSecTimeDigitized] = subsec;
   }
-  p["Exif"][E.FlashpixVersion] = "0100";
-  p["Exif"][E.ColorSpace]      = 1;       // the export is sRGB whatever the camera shot
-  // PixelXDimension / PixelYDimension set later after canvas render
-  if (prof.tags.sensing)    p["Exif"][E.SensingMethod] = 2;
-  if (prof.tags.fileSource) p["Exif"][E.FileSource]    = "\x03";
-  if (prof.tags.sceneType)  p["Exif"][E.SceneType]     = "\x01";
-  if (prof.tags.cfa)        p["Exif"][E.CFAPattern]    = "\x00\x02\x00\x02\x00\x01\x01\x02";
-  if (prof.tags.customRendered != null) p["Exif"][E.CustomRendered] = prof.tags.customRendered;
+  p["Exif"][E.ColorSpace] = colorSpace;
+  if (w.extras.focalPlane && cam.sensor) {
+    const s = cam.sensor;
+    if (s.inch) {
+      p["Exif"][E.FocalPlaneXResolution] = [s.px[0] * 1000, s.inch[0]];
+      p["Exif"][E.FocalPlaneYResolution] = [s.px[1] * 1000, s.inch[1]];
+      p["Exif"][E.FocalPlaneResolutionUnit] = 2;
+    } else if (s.cm) {
+      p["Exif"][E.FocalPlaneXResolution] = reduce(Math.round(s.px[0] / s.cm[0] * 32768), 32768);
+      p["Exif"][E.FocalPlaneYResolution] = reduce(Math.round(s.px[1] / s.cm[1] * 32768), 32768);
+      p["Exif"][E.FocalPlaneResolutionUnit] = 3;
+    } else if (s.perCm) {
+      p["Exif"][E.FocalPlaneXResolution] = [s.perCm, 1];
+      p["Exif"][E.FocalPlaneYResolution] = [s.perCm, 1];
+      p["Exif"][E.FocalPlaneResolutionUnit] = 3;
+    }
+  }
+  if (w.extras.sensing)  p["Exif"][E.SensingMethod] = 2;
+  if (w.extras.sensing1) p["Exif"][E.SensingMethod] = 1;
+  if (w.extras.fileSource) p["Exif"][E.FileSource] = "\x03";
+  if (w.extras.sceneType)  p["Exif"][E.SceneType]  = "\x01";
+  if (w.extras.cfa)        p["Exif"][E.CFAPattern] = "\x00\x02\x00\x02\x00\x01\x01\x02";
+  if (w.extras.customRendered != null) p["Exif"][E.CustomRendered] = w.extras.customRendered;
   p["Exif"][E.ExposureMode] = exposureMode;
   p["Exif"][E.WhiteBalance] = whiteBalance;
-  if (prof.tags.digitalZoom) p["Exif"][E.DigitalZoomRatio] = [1, 1];
-  if (prof.tags.focalEquiv)  p["Exif"][E.FocalLengthIn35mmFilm] = focalEquiv;
+  if (w.extras.digitalZoom === 'always') p["Exif"][E.DigitalZoomRatio] = [1, 1];
+  else if (w.extras.digitalZoom === 'zoom' && rnd() < 0.25) p["Exif"][E.DigitalZoomRatio] = ratFloat32(1 + rnd());
+  if (w.extras.focalEquiv) p["Exif"][E.FocalLengthIn35mmFilm] = focalEquiv;
   p["Exif"][E.SceneCaptureType] = sceneCapture;
-  if (prof.tags.gainControl) p["Exif"][E.GainControl] = iso < 400 ? 0 : iso < 1600 ? 1 : 2;
-  if (prof.tags.colorAdj) {
-    p["Exif"][E.Contrast]   = 0;
-    p["Exif"][E.Saturation] = 0;
-    p["Exif"][E.Sharpness]  = 0;
-  }
-  if (prof.tags.subjectDistance) p["Exif"][E.SubjectDistanceRange] = 0;
+  if (w.extras.gainControl) p["Exif"][E.GainControl] = iso < 400 ? 0 : iso < 1600 ? 1 : 2;
+  if (w.extras.contrast) { p["Exif"][E.Contrast] = 0; p["Exif"][E.Saturation] = 0; p["Exif"][E.Sharpness] = 0; }
+  else if (w.extras.sharpness) p["Exif"][E.Sharpness] = 0;
+  if (w.extras.subjectDistanceRange) p["Exif"][E.SubjectDistanceRange] = 0;
+  if (w.extras.serialNumber && serialNumber) p["Exif"][TAG_SERIAL_NUMBER] = serialNumber;
+  if (w.lensTags.includes('info') && lensSpec)   p["Exif"][E.LensSpecification] = lensSpec;
+  if (w.lensTags.includes('make') && lensMake)   p["Exif"][E.LensMake] = lensMake;
+  if (w.lensTags.includes('model') && lensModel) p["Exif"][E.LensModel] = lensModel;
+  if (lensSerial) p["Exif"][TAG_LENS_SERIAL] = lensSerial;
 
-  // Lens tags: only the ones this firmware writes. Canon leaves the apertures
-  // in its LensSpecification as 0/0.
-  const lensTags = cam.lensTags || prof.lensTags;
-  if (lensTags.includes('make')  && lens.make)  p["Exif"][E.LensMake]  = lens.make;
-  if (lensTags.includes('model') && lens.model) p["Exif"][E.LensModel] = lens.model;
-  if (lensTags.includes('info')  && lens.spec) {
-    const [f1, f2, a1, a2] = lens.spec;
-    p["Exif"][E.LensSpecification] = cam.make === 'Canon'
-      ? [specRat(f1), specRat(f2), [0, 0], [0, 0]]
-      : [specRat(f1), specRat(f2), specRat(a1), specRat(a2)];
-  }
-
-  // No MakerNote. An editor export does not carry one — every Camera Raw
-  // export sampled had zero MakerNote tags — so writing one would contradict
-  // the Software field rather than add realism.
-
-  // The exporter writes an Interoperability IFD on every sRGB JPEG.
-  p["Interop"][px.InteropIFD.InteroperabilityIndex]   = "R98";
-  p["Interop"][px.InteropIFD.InteroperabilityVersion] = "0100";
-
-  // ── GPS, in the exporter's coordinate encoding and the camera's tag set.
-  if (prof.gps.version) p["GPS"][G.GPSVersionID] = prof.gps.version;
+  // GPS, in the exporter's coordinate encoding. The exporter normalises
+  // GPSVersionID: Camera Raw writes 2.3.0.0, Lightroom 2.2.0.0 (measured).
+  p["GPS"][G.GPSVersionID] = isBody ? [2, 3, 0, 0] : [2, 2, 0, 0];
   p["GPS"][G.GPSLatitudeRef]  = latRef;
-  p["GPS"][G.GPSLatitude]     = adobeDegMin(Math.abs(loc.lat));
+  p["GPS"][G.GPSLatitude]     = adobeGps(Math.abs(loc.lat));
   p["GPS"][G.GPSLongitudeRef] = lonRef;
-  p["GPS"][G.GPSLongitude]    = adobeDegMin(Math.abs(loc.lon));
+  p["GPS"][G.GPSLongitude]    = adobeGps(Math.abs(loc.lon));
   p["GPS"][G.GPSAltitudeRef]  = 0;
-  p["GPS"][G.GPSAltitude]     = prof.gps.apple ? ratOdd(loc.alt + Math.random()) : [loc.alt, 1];
-  // UTC, converted from the capture time through the city's own zone.
-  p["GPS"][G.GPSTimeStamp]    = gpsTimeStamp(utc);
-  if (prof.gps.status) p["GPS"][G.GPSStatus] = "A";
-  if (prof.gps.apple) {
-    // iOS logs motion and heading with every frame.
-    const heading = Math.random() * 360;
-    p["GPS"][G.GPSSpeedRef]         = "K";
-    p["GPS"][G.GPSSpeed]            = Math.random() < 0.6 ? [0, 1] : ratOdd(0.3 + Math.random() * 4);
-    p["GPS"][G.GPSImgDirectionRef]  = "T";
-    p["GPS"][G.GPSImgDirection]     = ratOdd(heading);
-    p["GPS"][G.GPSDestBearingRef]   = "T";
-    p["GPS"][G.GPSDestBearing]      = ratOdd(heading);
-    p["GPS"][G.GPSHPositioningError] = [randInt(4, 35), 1];
-  }
-  if (prof.gps.mapDatum) p["GPS"][G.GPSMapDatum] = "WGS-84";
+  p["GPS"][G.GPSAltitude]     = [Math.round(loc.alt * 100), 100];
+  p["GPS"][G.GPSTimeStamp]    = [[utc.getUTCHours(), 1], [utc.getUTCMinutes(), 1], [utc.getUTCSeconds(), 1]];
+  if (w.extras.status)   p["GPS"][G.GPSStatus]   = "A";
+  if (w.extras.mapDatum) p["GPS"][G.GPSMapDatum] = "WGS-84";
   p["GPS"][G.GPSDateStamp] = fmtGpsDate(utc);
 
   alignAsciiValues(p, px);
 
-  return { display, piexif: p, cam, loc, iso, lens, editor,
-           capture, exportAt, offset: offsetString, exportOffset, subsec,
-           scene: scene.name, ev: Number(ev.toFixed(2)) };
+  // The lens description the XMP carries, and the aux block for a raw export.
+  const lensMeta = {
+    model: lensModel, auxLens,
+    lensInfo: lensSpec ? lensInfoString(lensSpec) : null,
+  };
+  const source = isBody
+    ? { raw: true, mime: cam.raw.mime, fileName: `${rawFileStem(cam)}.${cam.raw.ext}`,
+        cameraProfile: pick(['Adobe Color', 'Camera Standard', 'Camera Standard']) }
+    : { raw: false, fileName: options.sourceName || `${phoneStem(cam, capture, subsec)}.jpg` };
+  const aux = isBody ? {
+    serialNumber, lensSerial,
+    firmware: cam.firmware || null,
+    focusDistance: rnd() < 0.5 ? `${randInt(5, 900)}/10` : '4294967295/1',
+    corrected: cam.writer === 'canon' || cam.writer === 'sony',
+  } : {};
+
+  return {
+    display, piexif: p, cam, loc, iso, lens, editor,
+    capture, exportAt, offset: offsetString, exportOffset, subsec,
+    scene: scene.name, ev: Number(ev.toFixed(2)),
+    lensMeta, source, aux,
+  };
+}
+
+/** A camera-raw-style file stem, like "4E4A0122" or "DSC_1234". */
+function rawFileStem(cam) {
+  if (cam.writer === 'canon') return hex(4).toUpperCase() + digits(4);
+  return `${cam.raw.prefix}${digits(4)}`;
+}
+/** A phone's original JPEG stem, matching its own naming. */
+function phoneStem(cam, d, subsec) {
+  const p = n => String(n).padStart(2, '0');
+  const ymd = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+  const hms = `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  if (cam.make === 'Apple')   return `IMG_${digits(4)}`;
+  if (cam.make === 'Google')  return `PXL_${ymd}_${hms}${subsec || '000'}`;
+  if (cam.make === 'samsung') return `${ymd}_${hms}`;
+  return `IMG_${ymd}_${hms}`;
 }
 
 // ── Metadata Display ─────────────────────────────────────────────
 
-/**
- * Which EXIF fields to show in each UI section.
- *
- * Two parsers feed this: exifr (normal path) and piexifToDisplay (fallback).
- * They name several tags differently, so both spellings are listed — a given
- * object only ever carries one of each pair, so no row is duplicated.
- *   0x0132 DateTime        -> exifr: ModifyDate
- *   0xA002 PixelXDimension -> exifr: ExifImageWidth
- *   0xA003 PixelYDimension -> exifr: ExifImageHeight
- */
 export const SECTIONS = [
   { key: 'device',  title: 'Device',          fields: ['Make','Model','Software','LensMake','LensModel'] },
   { key: 'capture', title: 'Capture Settings', fields: ['DateTimeOriginal','DateTime','ModifyDate','OffsetTimeOriginal','SubSecTimeOriginal','ExposureTime','FNumber','ISO','FocalLength','FocalLengthIn35mmFormat','Flash','MeteringMode','ExposureProgram','ExposureMode','WhiteBalance','SceneCaptureType','SensingMethod'] },
@@ -620,7 +692,6 @@ export const SECTIONS = [
   { key: 'image',   title: 'Image',            fields: ['PixelXDimension','PixelYDimension','ExifImageWidth','ExifImageHeight','ImageWidth','ImageHeight','Orientation','ColorSpace','XResolution','YResolution'] },
 ];
 
-/** Human-readable labels for EXIF field keys. */
 export const LABELS = {
   Make:'Camera Make', Model:'Camera Model', Software:'Software',
   LensMake:'Lens Make', LensModel:'Lens Model',
@@ -638,7 +709,6 @@ export const LABELS = {
   ColorSpace:'Color Space', XResolution:'X Resolution', YResolution:'Y Resolution',
 };
 
-// Lookup maps for numeric EXIF codes → human-readable strings
 const FLASH_MAP   = { 0:'No flash', 1:'Flash fired', 9:'Flash fired', 16:'Flash off', 24:'Flash off', 25:'Flash fired', 31:'Flash fired + red-eye' };
 const METER_MAP   = { 1:'Average', 2:'Center-weighted', 3:'Spot', 4:'Multi-spot', 5:'Multi-segment', 6:'Partial' };
 const PROG_MAP    = { 0:'Not defined', 1:'Manual', 2:'Auto', 3:'Aperture priority', 4:'Shutter priority', 5:'Creative', 6:'Action', 7:'Portrait', 8:'Landscape' };
@@ -649,20 +719,10 @@ const EXPMODE_MAP = { 0:'Auto', 1:'Manual', 2:'Auto bracket' };
 const SCENE_MAP   = { 0:'Standard', 1:'Landscape', 2:'Portrait', 3:'Night' };
 const SENSING_MAP = { 1:'Not defined', 2:'One-chip color area', 3:'Two-chip color area', 4:'Three-chip color area', 5:'Color sequential area', 7:'Trilinear', 8:'Color sequential linear' };
 
-/**
- * Look up a numeric EXIF code in one of the maps above.
- *
- * exifr parsed with { all: true } already translates many of these tags to
- * readable strings ("Pattern", "Flash did not fire, auto mode"). Feeding those
- * to a numeric map misses, and the miss fallback used to prepend its prefix —
- * which is where "Mode Pattern" and "Code Flash did not fire, auto mode" came
- * from. Anything already a string is passed straight through.
- */
 function mapCode(map, v, prefix = '') {
   return typeof v === 'number' ? (map[v] ?? `${prefix}${v}`) : String(v);
 }
 
-/** Format a raw EXIF value for display based on its field key. */
 export function fmtVal(key, v) {
   if (v == null) return null;
   switch (key) {
@@ -703,18 +763,12 @@ export function fmtVal(key, v) {
   }
 }
 
-/**
- * Render an EXIF object as sectioned HTML for the metadata panel.
- * Returns { html, count } where count is the number of displayed fields.
- */
 export function renderMeta(exifObj, isFake = false) {
   if (!exifObj || Object.keys(exifObj).length === 0) {
     return { html: `<div class="no-meta"><div class="no-meta-icon">${ICONS.camera}</div><p>No EXIF metadata found in this image.</p></div>`, count: 0 };
   }
-
   let html = '';
   let count = 0;
-
   for (const sec of SECTIONS) {
     const rows = [];
     for (const field of sec.fields) {
@@ -722,10 +776,6 @@ export function renderMeta(exifObj, isFake = false) {
       const disp = fmtVal(field, raw);
       if (!disp) continue;
       count++;
-
-      // A "Map" link next to the latitude, for generated coordinates only.
-      // The original image's coordinates are the user's real position, and a
-      // link would send them to a map provider on click, so none is offered.
       let extra = '';
       if (field === 'GPSLatitude' && isFake) {
         const lat = exifObj.GPSLatitude, lon = exifObj.GPSLongitude;
@@ -738,9 +788,6 @@ export function renderMeta(exifObj, isFake = false) {
         };
         let latDec = toDec(lat);
         let lonDec = toDec(lon);
-        // Only a ref flips the sign. Without one, the value is already signed
-        // (both exifr and piexifToDisplay return signed decimals) — assuming a
-        // hemisphere here would send eastern coordinates to the wrong side.
         if (latDec != null && latRef === 'S') latDec = -Math.abs(latDec);
         if (lonDec != null && lonRef === 'W') lonDec = -Math.abs(lonDec);
         if (latDec != null && lonDec != null) {
@@ -748,14 +795,11 @@ export function renderMeta(exifObj, isFake = false) {
           extra = `<a class="gps-link" href="https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=14/${la}/${lo}" target="_blank" rel="noopener noreferrer">Map</a>`;
         }
       }
-
-      // disp comes from EXIF in an untrusted image and lands in innerHTML.
       rows.push(`<div class="meta-row">
         <span class="meta-key">${escapeHtml(LABELS[field] || field)}</span>
         <span class="meta-val${isFake ? ' is-new' : ''}">${escapeHtml(disp)}${extra}</span>
       </div>`);
     }
-
     if (rows.length) {
       html += `<div class="meta-section">
         <div class="meta-section-title">${sec.title}</div>
@@ -763,10 +807,8 @@ export function renderMeta(exifObj, isFake = false) {
       </div>`;
     }
   }
-
   if (!html) {
     return { html: `<div class="no-meta"><div class="no-meta-icon">${ICONS.camera}</div><p>No recognized EXIF fields found.</p></div>`, count: 0 };
   }
-
   return { html, count };
 }

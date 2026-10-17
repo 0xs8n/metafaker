@@ -3,28 +3,20 @@
  */
 
 import { requantize } from './jpeg-requantize.js';
-import { EDITOR_QTABLE, ADOBE_APP14, editorIcc, xmpSegment } from './provenance.js';
+import { pickEditorQtable, THUMB_QTABLE, ADOBE_APP14, editorIcc, xmpSegment } from './provenance.js';
+import { rnd, pick, randInt } from './rng.js';
+
+/** The exporter's sRGB ICC profile as a ready-to-insert APP2 segment. */
+export function iccApp2Segment() {
+  return iccSegments(editorIcc())[0];
+}
 
 // ── Random & Math ────────────────────────────────────────────────
 
-export const pick = a => a[Math.floor(Math.random() * a.length)];
-export const randInt = (lo, hi) => Math.floor(Math.random() * (hi - lo + 1)) + lo;
+export { rnd, pick, randInt };
 export const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
-
-/** Cryptographically secure random float in [0, 1). */
-export function cryptoRandFloat() {
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return buf[0] / (0xFFFFFFFF + 1);
-}
-
-/** Cryptographically secure random integer in [lo, hi]. */
-export function cryptoRandInt(lo, hi) {
-  const range = hi - lo + 1;
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return lo + (buf[0] % range);
-}
+export const cryptoRandFloat = rnd;
+export const cryptoRandInt = randInt;
 
 // ── GPS Utilities ────────────────────────────────────────────────
 
@@ -43,14 +35,14 @@ export function cryptoRandInt(lo, hi) {
  * photographed city's clock, not the machine's.
  */
 export function jitterLocation(base) {
-  const lat = base.lat + (Math.random() - 0.5) * 0.1;
-  const lon = base.lon + (Math.random() - 0.5) * 0.1;
+  const lat = base.lat + (rnd() - 0.5) * 0.1;
+  const lon = base.lon + (rnd() - 0.5) * 0.1;
   return {
     city: base.city,
     tz: base.tz,
     lat: Number(clamp(lat, -89.99, 89.99).toFixed(6)),
     lon: Number(clamp(lon, -179.99, 179.99).toFixed(6)),
-    alt: Math.max(0, Math.round((base.alt ?? 0) + (Math.random() - 0.5) * 40)),
+    alt: Math.max(0, Math.round((base.alt ?? 0) + (rnd() - 0.5) * 40)),
   };
 }
 
@@ -189,7 +181,7 @@ export function dataUrlToBlob(dataUrl) {
 
 export function randomMaxEdge() {
   const edges = [2048, 2160, 2400, 2560, 2880, 3200];
-  return edges[Math.floor(Math.random() * edges.length)];
+  return edges[Math.floor(rnd() * edges.length)];
 }
 
 export function getExportDimensions(width, height, maxEdge) {
@@ -208,7 +200,7 @@ let _gaussSpare = null;
 function gaussRand() {
   if (_gaussSpare !== null) { const v = _gaussSpare; _gaussSpare = null; return v; }
   let u, v, s;
-  do { u = Math.random() * 2 - 1; v = Math.random() * 2 - 1; s = u * u + v * v; }
+  do { u = rnd() * 2 - 1; v = rnd() * 2 - 1; s = u * u + v * v; }
   while (s >= 1 || s === 0);
   const mul = Math.sqrt(-2 * Math.log(s) / s);
   _gaussSpare = v * mul;
@@ -232,18 +224,25 @@ export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
   // Previous model used b = bBase * isoNorm² — at ISO 3200 that gave sigma ≈ 45,
   // which is a ±135 pixel range and reduces images to pure noise.
   let baseSigma;
-  if      (iso <= 200)  baseSigma = 0.7 + Math.random() * 0.5;  // 0.7–1.2
-  else if (iso <= 800)  baseSigma = 1.3 + Math.random() * 0.9;  // 1.3–2.2
-  else if (iso <= 3200) baseSigma = 2.0 + Math.random() * 1.5;  // 2.0–3.5
-  else                  baseSigma = 3.0 + Math.random() * 2.0;  // 3.0–5.0
+  if      (iso <= 200)  baseSigma = 0.7 + rnd() * 0.5;  // 0.7–1.2
+  else if (iso <= 800)  baseSigma = 1.3 + rnd() * 0.9;  // 1.3–2.2
+  else if (iso <= 3200) baseSigma = 2.0 + rnd() * 1.5;  // 2.0–3.5
+  else                  baseSigma = 3.0 + rnd() * 2.0;  // 3.0–5.0
 
   // Decompose into Poisson-Gaussian model: σ²(x) = a·x + b
   // The signal-dependent component gives the heteroscedastic structure that
   // ML forensic tools (Noiseprint++, TruFor) verify, while keeping total
-  // noise within the calibrated sigma range above.
+  // noise within the calibrated sigma range above. The shot-to-read split and
+  // the per-channel factors are drawn per image: a fixed split was itself a
+  // recipe that a classifier trained on this tool's output could learn.
   const sig2 = baseSigma * baseSigma;
-  const a    = 0.05 * sig2 / 128;   // ~5% signal-dependent (shot noise)
-  const b    = 0.95 * sig2;          // ~95% constant (read noise)
+  const shot = 0.03 + rnd() * 0.12;    // 3–15% signal-dependent
+  const a    = shot * sig2 / 128;
+  const b    = (1 - shot) * sig2;
+  const rbGain  = 1.1 + rnd() * 0.25;  // R/B shot noise relative to G
+  const gGain   = 0.75 + rnd() * 0.15;
+  const gRead   = 0.6 + rnd() * 0.25;
+  const chroma  = 0.1 + rnd() * 0.25;  // DSLR chroma noise fraction
 
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
@@ -253,10 +252,10 @@ export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
 
     if (cameraType === 'phone') {
       // Bayer CFA: 2 green, 1 red, 1 blue per 2×2 block.
-      // R/B have ~20% more shot noise than G (fewer photosites per unit area).
-      const sigmaR = Math.sqrt(a * 1.2 * r0 + b);
-      const sigmaG = Math.sqrt(a * 0.8 * g0 + b * 0.7);
-      const sigmaB = Math.sqrt(a * 1.2 * b0 + b);
+      // R/B have more shot noise than G (fewer photosites per unit area).
+      const sigmaR = Math.sqrt(a * rbGain * r0 + b);
+      const sigmaG = Math.sqrt(a * gGain * g0 + b * gRead);
+      const sigmaB = Math.sqrt(a * rbGain * b0 + b);
       d[i]     = clamp(Math.round(r0 + gaussRand() * sigmaR), 0, 255);
       d[i + 1] = clamp(Math.round(g0 + gaussRand() * sigmaG), 0, 255);
       d[i + 2] = clamp(Math.round(b0 + gaussRand() * sigmaB), 0, 255);
@@ -265,7 +264,7 @@ export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
       const luma  = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0;
       const sigma = Math.sqrt(a * luma + b);
       const lN    = gaussRand() * sigma;
-      const cN    = gaussRand() * sigma * 0.2;
+      const cN    = gaussRand() * sigma * chroma;
       d[i]     = clamp(Math.round(r0 + lN + cN), 0, 255);
       d[i + 1] = clamp(Math.round(g0 + lN),       0, 255);
       d[i + 2] = clamp(Math.round(b0 + lN - cN), 0, 255);
@@ -305,8 +304,8 @@ export function applyCameraColorProfile(ctx, w, h, make) {
   const base = CAMERA_COLOR_PROFILES[make];
   if (!base) return;
 
-  const warmth   = base.warmth   + (Math.random() - 0.5) * 4;
-  const satScale = base.satScale + (Math.random() - 0.5) * 0.06;
+  const warmth   = base.warmth   + (rnd() - 0.5) * 4;
+  const satScale = base.satScale + (rnd() - 0.5) * 0.06;
   const contrast = base.contrast;
 
   const id = ctx.getImageData(0, 0, w, h);
@@ -349,47 +348,163 @@ export function applyCameraColorProfile(ctx, w, h, make) {
  *   2. S-curve tone mapping  — histogram shape camera firmware curves produce
  *   3. Unsharp mask          — in-camera sharpening halo/ringing around edges
  */
+/**
+ * Separable box blur of the RGB channels, radius r, into a new buffer.
+ * Edges clamp. Used by the unsharp mask and the denoise pass.
+ */
+function boxBlurRGB(src, w, h, r) {
+  const tmp = new Float32Array(w * h * 3);
+  const out = new Uint8ClampedArray(src.length);
+  const n = 2 * r + 1;
+  // Horizontal
+  for (let y = 0; y < h; y++) {
+    for (let c = 0; c < 3; c++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += src[(y * w + clamp(k, 0, w - 1)) * 4 + c];
+      for (let x = 0; x < w; x++) {
+        tmp[(y * w + x) * 3 + c] = sum / n;
+        const add = src[(y * w + clamp(x + r + 1, 0, w - 1)) * 4 + c];
+        const sub = src[(y * w + clamp(x - r, 0, w - 1)) * 4 + c];
+        sum += add - sub;
+      }
+    }
+  }
+  // Vertical
+  for (let x = 0; x < w; x++) {
+    for (let c = 0; c < 3; c++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += tmp[(clamp(k, 0, h - 1) * w + x) * 3 + c];
+      for (let y = 0; y < h; y++) {
+        out[(y * w + x) * 4 + c] = sum / n;
+        const add = tmp[(clamp(y + r + 1, 0, h - 1) * w + x) * 3 + c];
+        const sub = tmp[(clamp(y - r, 0, h - 1) * w + x) * 3 + c];
+        sum += add - sub;
+      }
+    }
+  }
+  return out;
+}
+
 export function applyISPSimulation(ctx, w, h) {
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
 
-  // ── 1. S-curve tone mapping (LUT) ────────────────────────────
+  // Every stage here is drawn per image, including whether it runs at all.
+  // Applying the same curve and the same 3x3 sharpen to every file was a
+  // recipe, and a recipe is what a detector trained on this tool would learn.
+
+  // ── 1. S-curve tone mapping (LUT), four images in five ──────
   // Camera firmware applies a characteristic S-shaped tone curve for contrast.
-  // The resulting histogram shape is a camera-authenticity marker. We use a
-  // properly anchored S-curve: lut[0]=0, lut[128]=128, lut[255]=255.
-  const cs = 0.3 + Math.random() * 0.4;           // curve strength 0.3–0.7
-  const hs = Math.sin(0.5 * Math.PI * cs) || 1;   // normaliser
-  const lut = new Uint8Array(256);
-  for (let i = 0; i < 256; i++) {
-    const curved = Math.sin((i / 255 - 0.5) * Math.PI * cs) / (2 * hs) + 0.5;
-    lut[i] = clamp(Math.round(curved * 255), 0, 255);
-  }
-  for (let i = 0; i < d.length; i += 4) {
-    d[i]     = lut[d[i]];
-    d[i + 1] = lut[d[i + 1]];
-    d[i + 2] = lut[d[i + 2]];
+  // Properly anchored: lut[0]=0, lut[128]=128, lut[255]=255.
+  if (rnd() < 0.8) {
+    const cs = 0.15 + rnd() * 0.55;                 // curve strength 0.15–0.7
+    const hs = Math.sin(0.5 * Math.PI * cs) || 1;   // normaliser
+    const lut = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) {
+      const curved = Math.sin((i / 255 - 0.5) * Math.PI * cs) / (2 * hs) + 0.5;
+      lut[i] = clamp(Math.round(curved * 255), 0, 255);
+    }
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]     = lut[d[i]];
+      d[i + 1] = lut[d[i + 1]];
+      d[i + 2] = lut[d[i + 2]];
+    }
   }
 
-  // ── 3. Unsharp mask sharpening ───────────────────────────────
-  // In-camera sharpening (USM) creates characteristic halo/ringing around
-  // edges — a statistical trace that forensic models are trained to see.
-  const sharpStr = 0.08 + Math.random() * 0.10;   // 0.08–0.18
-  const orig     = new Uint8ClampedArray(d);
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const p = (y * w + x) * 4;
+  // ── 2. Unsharp mask, three images in four, radius 1 or 2 px ──
+  // In-camera and editor sharpening creates characteristic halo/ringing
+  // around edges — a statistical trace that forensic models are trained to see.
+  if (rnd() < 0.75) {
+    const sharpStr = 0.05 + rnd() * 0.15;           // 0.05–0.20
+    const radius   = rnd() < 0.6 ? 1 : 2;
+    const orig     = new Uint8ClampedArray(d);
+    const blur     = boxBlurRGB(orig, w, h, radius);
+    for (let i = 0; i < d.length; i += 4) {
       for (let c = 0; c < 3; c++) {
-        const blur = (
-          orig[((y - 1) * w + (x - 1)) * 4 + c] + orig[((y - 1) * w + x) * 4 + c] + orig[((y - 1) * w + (x + 1)) * 4 + c] +
-          orig[(y * w + (x - 1)) * 4 + c]        + orig[(y * w + x) * 4 + c]        + orig[(y * w + (x + 1)) * 4 + c] +
-          orig[((y + 1) * w + (x - 1)) * 4 + c] + orig[((y + 1) * w + x) * 4 + c] + orig[((y + 1) * w + (x + 1)) * 4 + c]
-        ) / 9;
-        d[p + c] = clamp(Math.round(orig[p + c] + sharpStr * (orig[p + c] - blur)), 0, 255);
+        d[i + c] = clamp(Math.round(orig[i + c] + sharpStr * (orig[i + c] - blur[i + c])), 0, 255);
       }
     }
   }
 
+  ctx.putImageData(id, 0, 0);
+}
+
+/**
+ * Non-rigid warp: a smooth, random displacement field of about a pixel.
+ *
+ * This is the PRNU defence that the crop, rotation and resize alone are not.
+ * Those are one global affine transform, and a sensor-pattern match can be
+ * re-registered through it by searching over scale and rotation. A field that
+ * varies across the frame has no single inverse to search for: every block is
+ * misaligned by its own fraction of a pixel, and the pattern correlation,
+ * which is summed over the whole frame, collapses. The displacement is a sum
+ * of three low-frequency waves with random directions, wavelengths and
+ * phases, and a total amplitude under two pixels, so nothing is visible.
+ */
+export function applyWarp(ctx, w, h) {
+  const id  = ctx.getImageData(0, 0, w, h);
+  const d   = id.data;
+  const src = new Uint8ClampedArray(d);
+
+  const amp = 0.6 + rnd() * 1.2;
+  const waves = [];
+  for (let k = 0; k < 3; k++) {
+    const wl = 120 + rnd() * 400;
+    const th = rnd() * Math.PI * 2;
+    const ux = Math.cos(th) / wl, uy = Math.sin(th) / wl;
+    const px = rnd() * Math.PI * 2, py = rnd() * Math.PI * 2;
+    // sin(X + Y + phase) split per axis so the inner loop has no trig.
+    const sx = new Float32Array(w), cx = new Float32Array(w);
+    const sy = new Float32Array(h), cy = new Float32Array(h);
+    for (let x = 0; x < w; x++) { const t = 2 * Math.PI * x * ux; sx[x] = Math.sin(t); cx[x] = Math.cos(t); }
+    for (let y = 0; y < h; y++) { const t = 2 * Math.PI * y * uy; sy[y] = Math.sin(t); cy[y] = Math.cos(t); }
+    waves.push({ sx, cx, sy, cy, px: [Math.sin(px), Math.cos(px)], py: [Math.sin(py), Math.cos(py)],
+                 ax: amp * (0.4 + rnd() * 0.6) / 3, ay: amp * (0.4 + rnd() * 0.6) / 3 });
+  }
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let dx = 0, dy = 0;
+      for (const wv of waves) {
+        // sin(a + b) with a = x-term, b = y-term, then + phase
+        const s = wv.sx[x] * wv.cy[y] + wv.cx[x] * wv.sy[y];
+        const c = wv.cx[x] * wv.cy[y] - wv.sx[x] * wv.sy[y];
+        dx += wv.ax * (s * wv.px[1] + c * wv.px[0]);
+        dy += wv.ay * (s * wv.py[1] + c * wv.py[0]);
+      }
+      const fx = clamp(x + dx, 0, w - 1), fy = clamp(y + dy, 0, h - 1);
+      const x0 = Math.floor(fx), y0 = Math.floor(fy);
+      const x1 = Math.min(x0 + 1, w - 1), y1 = Math.min(y0 + 1, h - 1);
+      const tx = fx - x0, ty = fy - y0;
+      const p00 = (y0 * w + x0) * 4, p10 = (y0 * w + x1) * 4, p01 = (y1 * w + x0) * 4, p11 = (y1 * w + x1) * 4;
+      const o = (y * w + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const top = src[p00 + c] + (src[p10 + c] - src[p00 + c]) * tx;
+        const bot = src[p01 + c] + (src[p11 + c] - src[p01 + c]) * tx;
+        d[o + c] = top + (bot - top) * ty;
+      }
+    }
+  }
+  ctx.putImageData(id, 0, 0);
+}
+
+/**
+ * Mild denoise before fresh noise is added: a partial blend toward a 3x3 box
+ * blur. The sensor's residual noise pattern lives in the finest detail; taking
+ * some of that off before the new, synthetic noise goes on means the final
+ * residual is dominated by noise that belongs to no camera. Kept light so
+ * texture survives; the sharpen stage restores edges.
+ */
+export function applyDenoise(ctx, w, h) {
+  const strength = 0.25 + rnd() * 0.25;
+  const id   = ctx.getImageData(0, 0, w, h);
+  const d    = id.data;
+  const blur = boxBlurRGB(d, w, h, 1);
+  for (let i = 0; i < d.length; i += 4) {
+    d[i]     += (blur[i]     - d[i])     * strength;
+    d[i + 1] += (blur[i + 1] - d[i + 1]) * strength;
+    d[i + 2] += (blur[i + 2] - d[i + 2]) * strength;
+  }
   ctx.putImageData(id, 0, 0);
 }
 
@@ -407,16 +522,26 @@ export function applyISPSimulation(ctx, w, h) {
 export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
   const cameraType = cam.type || 'phone';
 
+  // Neither effect is applied to every image: lens profiles and in-camera
+  // correction remove vignetting and lateral CA from a good share of real
+  // files, and a constant dose of each would be this tool's own signature.
+  const doVignette = rnd() < 0.7;
+  const doCA       = rnd() < 0.6;
+  if (!doVignette && !doCA) return;
+
   // Real lens vignetting: ~10–20% light falloff at corners for phones,
   // ~5–12% for DSLRs (better optics + usually partially corrected in-camera).
-  const vBase = cameraType === 'dslr'
-    ? 0.020 + Math.random() * 0.025  // ~3–6% corner darkening
-    : 0.030 + Math.random() * 0.030; // ~4–8% corner darkening
+  const vBase = !doVignette ? 0 : cameraType === 'dslr'
+    ? 0.015 + rnd() * 0.035  // ~2–7% corner darkening
+    : 0.020 + rnd() * 0.045; // ~3–9% corner darkening
 
   const diagonal = Math.sqrt(w * w + h * h);
-  const caMax    = cameraType === 'dslr'
-    ? (0.0002 + Math.random() * 0.0003) * diagonal   // subtle (~0.04–0.1% of diagonal)
-    : (0.0004 + Math.random() * 0.0004) * diagonal;  // more visible (~0.04–0.12%)
+  // Red outward is the common direction, but corrected and over-corrected
+  // lenses fringe the other way, so the sign is drawn too.
+  const caSign   = rnd() < 0.7 ? 1 : -1;
+  const caMax    = !doCA ? 0 : caSign * (cameraType === 'dslr'
+    ? (0.00015 + rnd() * 0.00035) * diagonal
+    : (0.0003  + rnd() * 0.0005)  * diagonal);
 
   const cx   = w / 2;
   const cy   = h / 2;
@@ -445,7 +570,7 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
       // Vignetting: polynomial approximation of cos⁴ radial falloff.
       const vign = Math.max(0, 1 - vBase * r * r - vBase * 0.4 * r * r * r * r);
 
-      if (dist > 0.5) {
+      if (caMax !== 0 && dist > 0.5) {
         // CA shift amount scales with r (zero at centre, caMax at corners).
         const shift  = caMax * r;
         const normDX = dx / dist;
@@ -489,48 +614,105 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
  * what a viewer assumes when no profile is present, and plenty of real camera
  * JPEGs carry none at all.
  */
-/**
- * Re-quantise a freshly encoded JPEG onto the exporter's tables.
- *
- * The quantization table is one of the strongest camera fingerprints a JPEG
- * carries, and the browser's says "browser". Overwriting the DQT bytes alone
- * would change the picture — the coefficients were quantised against the old
- * table — so the coefficients are rescaled onto the new one instead.
- *
- * Returns the input untouched when there is no table for that make, when the
- * file is not plain baseline JPEG, or on any error. A camera-matched table is
- * not worth a corrupted image.
- */
-function applyEditorQuantization(dataUrl) {
-  const table = EDITOR_QTABLE;
+function bytesToDataUrl(mime, out) {
+  // Chunked, because String.fromCharCode blows the stack on a whole image.
+  let s = '';
+  for (let i = 0; i < out.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+  }
+  return `data:${mime};base64,${btoa(s)}`;
+}
 
+function dataUrlToBytes(dataUrl) {
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-  if (!m) return dataUrl;
+  if (!m) return null;
+  const bin = atob(m[2]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return { mime: m[1], bytes };
+}
+
+/**
+ * Re-quantise a freshly encoded JPEG onto one of the exporter's measured
+ * quantization tables and write it in the exporter's pixel container: the
+ * browser's APP0 and ICC are dropped, the coefficients are rescaled onto the
+ * new tables (overwriting the DQT bytes alone would change the picture), a DRI
+ * segment and restart markers are added, Adobe's APP14 is placed before the
+ * frame header, and the Huffman tables are optimised the way the exporter's
+ * encoder optimises them. Returns `{ dataUrl, ok }`; ok is false when the
+ * input is not plain baseline JPEG, in which case the input is returned
+ * unchanged and the caller falls back.
+ */
+function requantizeToExport(dataUrl, table, opts) {
+  const parsed = dataUrlToBytes(dataUrl);
+  if (!parsed) return { dataUrl, ok: false };
   try {
-    const bin = atob(m[2]);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-    const out = requantize(bytes, table);
-    if (!out) return dataUrl;
-
-    // Chunked, because String.fromCharCode blows the stack on a whole image.
-    let s = '';
-    for (let i = 0; i < out.length; i += 0x8000) {
-      s += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
-    }
-    return `data:${m[1]};base64,${btoa(s)}`;
+    const out = requantize(parsed.bytes, table, opts);
+    if (!out) return { dataUrl, ok: false };
+    return { dataUrl: bytesToDataUrl(parsed.mime, out), ok: true };
   } catch (e) {
-    return dataUrl;
+    return { dataUrl, ok: false };
   }
 }
 
 /**
- * Every Pixel original measured writes JFIF version 1.02; Chrome writes 1.01.
- * Densities 1x1, no thumbnail, matching those files byte for byte.
+ * Encode a 256-long-edge thumbnail the way the exporter does: the standard
+ * (Annex K) quantization tables scaled to its thumbnail quality, a 32-MCU
+ * restart interval, Adobe's APP14 and the standard Huffman tables. Returns the
+ * raw bytes, a binary string for the IFD1 payload, and the dimensions. The
+ * same bytes go into both IFD1 and the Photoshop block, as the exports do.
  */
-const JFIF_APP0 = Uint8Array.from(
-  [0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x02, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+export function makeAdobeThumbnail(dataUrl, longEdge = 256) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onerror = () => resolve(null);
+    img.onload = () => {
+      try {
+        const scale = longEdge / Math.max(img.naturalWidth, img.naturalHeight, 1);
+        const w = Math.max(1, Math.round(img.naturalWidth  * scale));
+        const h = Math.max(1, Math.round(img.naturalHeight * scale));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        const url = c.toDataURL('image/jpeg', 1.0);
+        const parsed = dataUrlToBytes(url);
+        if (!parsed) return resolve(null);
+        const out = requantize(parsed.bytes, THUMB_QTABLE,
+          { restartInterval: 32, optimizeHuffman: false, app14: ADOBE_APP14 });
+        if (!out || out.length > 63000) return resolve(null);
+        let bin = '';
+        for (let i = 0; i < out.length; i += 0x8000) bin += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+        resolve({ bytes: out, binary: bin, width: w, height: h });
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.src = dataUrl;
+  });
+}
+
+/**
+ * Insert metadata segments immediately after SOI, before the first marker the
+ * pixel JPEG carries (its DQT). Used to add the Exif, Photoshop, ICC and XMP
+ * segments to the exporter's pixel container in the order the exports show.
+ */
+export function insertAfterSoi(dataUrl, segments) {
+  const parsed = dataUrlToBytes(dataUrl);
+  if (!parsed) return dataUrl;
+  const { mime, bytes } = parsed;
+  if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return dataUrl;
+  const add = segments.filter(Boolean);
+  const addLen = add.reduce((n, s) => n + s.length, 0);
+  const out = new Uint8Array(bytes.length + addLen);
+  let o = 0;
+  out.set([0xFF, 0xD8], o); o += 2;
+  for (const s of add) { out.set(s, o); o += s.length; }
+  out.set(bytes.subarray(2), o);
+  return bytesToDataUrl(mime, out);
+}
 
 /** Wrap an ICC profile into APP2 segments (chunked if it exceeds one segment). */
 function iccSegments(icc) {
@@ -611,21 +793,20 @@ export function normaliseAppSegments(dataUrl, opts = {}) {
 /**
  * Core anti-forensic canvas pipeline.
  *
- * Ten layers defeat both device-correlation forensics and ML manipulation
- * detection (TruFor, ManTraNet, CAT-Net, Noiseprint++):
+ * The stages, in order. Every parameter is drawn per image and several stages
+ * run on only a share of images, so there is no fixed recipe to learn:
  *
- *   1. Proportional crop (≤1.2% per edge) — shifts PRNU grid alignment
- *   2. Bimodal rotation (±0.5°–2.0°) — sub-pixel interpolation destroys PRNU
- *   3. Random resize — prevents dimension-based clustering
+ *   1. Proportional crop (≤1.2% per edge) — shifts the sensor grid
+ *   2. Rotation (±0.3°–2.0°) on two images in three
+ *   3. Reshape to a frame the camera can produce, then size
+ *   3b. Non-rigid warp (sub-pixel to ~2 px) and a light denoise — the PRNU
+ *       defence; a global transform can be re-registered, a field cannot
  *   4. Camera colour science — brand-specific tone/saturation/contrast
- *   5. ISP pipeline simulation — demosaicing residuals + S-curve + unsharp mask
- *      (embeds statistical traces ML detectors expect from real cameras)
- *   6. Lens optical effects — vignetting (cos⁴) + chromatic aberration
- *      (every real lens produces both; their absence is a forensic red flag)
- *   7. Poisson-Gaussian noise — σ²(x)=a·x+b, heteroscedastic per real sensors
- *      (ML tools verify signal-dependent variance; uniform Gaussian is detectable)
- *   8. Rewrite the container as an editor export: its tables, profile and APP14
- *   9. Bimodal JPEG quality — wider range = more quantization table diversity
+ *   5. ISP simulation — S-curve (4 in 5) + unsharp mask (3 in 4, radius 1–2)
+ *   6. Lens optics — vignetting (7 in 10) + chromatic aberration (3 in 5,
+ *      either sign)
+ *   7. Poisson-Gaussian noise — σ²(x)=a·x+b with a drawn shot/read split
+ *   8. Encode, re-quantise onto the exporter's tables, write its container
  */
 /**
  * Reshape the source rectangle to a frame the camera could actually produce.
@@ -679,6 +860,24 @@ function snapToCameraFrame(x, y, w, h, cam) {
   return { x: nx, y: ny, w: nw, h: nh, out };
 }
 
+/**
+ * Encode the finished canvas as the exporter's pixel container: a measured
+ * Adobe quantization table (drawn per image), the DRI and restart markers the
+ * exporter writes, Adobe's APP14 before the frame header, and optimised
+ * Huffman tables. No metadata is added here; the caller inserts Exif, the
+ * Photoshop block, the ICC profile and the XMP packet for a randomized file,
+ * or nothing for a stripped one. Falls back to dropping the browser markers
+ * and adding APP14 if the re-encoder cannot handle the frame.
+ */
+function encodeExportPixels(ctx, width, height) {
+  const mcusX = Math.ceil(width / 8);   // 4:4:4, so the MCU is 8px; DRI = MCUs per row
+  const url = ctx.canvas.toDataURL('image/jpeg', 1.0);
+  const r = requantizeToExport(url, pickEditorQtable(),
+    { restartInterval: mcusX, optimizeHuffman: true, app14: ADOBE_APP14 });
+  if (r.ok) return r.dataUrl;
+  return normaliseAppSegments(url, { app14: ADOBE_APP14 });   // fallback: at least drop APP0/ICC
+}
+
 function antiForensicRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
   const cameraMake = cam.make || '';
@@ -696,13 +895,6 @@ function antiForensicRender(img, cam = {}) {
   const srcW    = img.naturalWidth  - cropL - cropR;
   const srcH    = img.naturalHeight - cropT - cropB;
 
-  // The container the export carries. A stripped file keeps only what
-  // `exiftool -all=` would leave on a Camera Raw export: the APP14 marker,
-  // which ExifTool does not count as metadata; no profile, no packet.
-  const container = cam.strip
-    ? { app14: ADOBE_APP14 }
-    : { icc: editorIcc(), app14: ADOBE_APP14, xmp: cam.xmpSegment || null };
-
   if (srcW < 100 || srcH < 100) {
     const c   = document.createElement('canvas');
     c.width   = img.naturalWidth;
@@ -713,10 +905,7 @@ function antiForensicRender(img, cam = {}) {
     applyISPSimulation(ctx, c.width, c.height);
     applyLensOpticalEffects(ctx, c.width, c.height, cam);
     addPixelNoise(ctx, c.width, c.height, iso, cameraType);
-    let dataUrl = c.toDataURL('image/jpeg', 1.0);
-    dataUrl = applyEditorQuantization(dataUrl);
-    dataUrl = normaliseAppSegments(dataUrl, container);
-    return { dataUrl, width: c.width, height: c.height };
+    return { dataUrl: encodeExportPixels(ctx, c.width, c.height), width: c.width, height: c.height };
   }
 
   // 3. Reshape to a frame the camera can produce, then size the output.
@@ -735,11 +924,11 @@ function antiForensicRender(img, cam = {}) {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  // 2. Bimodal rotation: 50% small (0.5–1.0°), 50% large (1.0–2.0°), random sign
-  const sign     = Math.random() < 0.5 ? 1 : -1;
-  const angleDeg = sign * (Math.random() < 0.5
-    ? 0.5 + Math.random() * 0.5    // 0.5–1.0°
-    : 1.0 + Math.random() * 1.0);  // 1.0–2.0°
+  // 2. Rotation on about two images in three, 0.3–2.0° either way. Rotating
+  // every image was a tell twice over: a tilted horizon on each, and one more
+  // constant in the recipe. The warp below carries the PRNU defence on the
+  // images that are not rotated.
+  const angleDeg = rnd() < 0.65 ? (rnd() < 0.5 ? 1 : -1) * (0.3 + rnd() * 1.7) : 0;
   const angle = angleDeg * (Math.PI / 180);
 
   // Aspect-ratio-aware scale so rotated image covers all four canvas corners.
@@ -756,6 +945,11 @@ function antiForensicRender(img, cam = {}) {
   ctx.translate(-size.width / 2, -size.height / 2);
 
   ctx.drawImage(img, frame.x, frame.y, frame.w, frame.h, 0, 0, size.width, size.height);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // 3b. Non-rigid warp and a light denoise: the sensor-pattern defence.
+  applyWarp(ctx, size.width, size.height);
+  applyDenoise(ctx, size.width, size.height);
 
   // 4. Camera colour science
   applyCameraColorProfile(ctx, size.width, size.height, cameraMake);
@@ -769,16 +963,11 @@ function antiForensicRender(img, cam = {}) {
   // 7. Poisson-Gaussian noise (signal-dependent, ISO-matched)
   addPixelNoise(ctx, size.width, size.height, iso, cameraType);
 
-  // 8+9. Encode, re-quantise onto the exporter's tables, write its container.
-  // Quality 1.0 specifically: it is the only setting at which the browser emits
-  // 4:4:4 chroma, which is what an editor export uses. Everything lower is
-  // 4:2:0 and would contradict the story the file tells. It is also the
-  // cleanest source for re-quantisation, being near-lossless.
-  let dataUrl = c.toDataURL('image/jpeg', 1.0);
-  dataUrl = applyEditorQuantization(dataUrl);
-  dataUrl = normaliseAppSegments(dataUrl, container);
-
-  return { dataUrl, width: size.width, height: size.height };
+  // 8. Encode as the exporter's pixel container. Quality 1.0 specifically: it
+  // is the only setting at which the browser emits 4:4:4 chroma, which is what
+  // an editor export uses. Everything lower is 4:2:0 and would contradict the
+  // story the file tells. It is also the cleanest source for re-quantisation.
+  return { dataUrl: encodeExportPixels(ctx, size.width, size.height), width: size.width, height: size.height };
 }
 
 /**
@@ -825,5 +1014,5 @@ export function escapeHtml(value) {
 
 export function makeId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();
-  return `img_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return `img_${Date.now()}_${rnd().toString(36).slice(2, 10)}`;
 }
