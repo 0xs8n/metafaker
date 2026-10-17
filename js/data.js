@@ -23,7 +23,7 @@
  *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution.
  */
 
-import { pick, rnd } from './helpers.js';
+import { pick } from './helpers.js';
 
 // Frame shapes each body can actually produce. A generated photo whose aspect
 // ratio matches no mode the camera offers is inconsistent with that camera.
@@ -434,12 +434,11 @@ export const DSLR_LENSES = {
  * Choose focal length, aperture and lens as one consistent set.
  *
  * Phones: one of the phone's fixed lenses, carrying its own measured
- * rationals and model string. Bodies: with a kit (a batch persona's bag of
- * lenses) the lens comes first and the focal length is one that lens reaches;
- * without one, the focal length is drawn and any mountable lens that covers
- * it is chosen; only f-numbers the lens opens to are offered.
+ * rationals and model string. Bodies: the focal length is drawn and any
+ * mountable lens that covers it is chosen; only f-numbers the lens opens to
+ * are offered.
  */
-export function pickOptics(cam, kit = null) {
+export function pickOptics(cam) {
   if (cam.type === 'phone') {
     const l = pick(cam.lenses);
     return { focalPhys: l.phys, focalEquiv: l.equiv, aperture: l.f, lens: l };
@@ -454,34 +453,12 @@ export function pickOptics(cam, kit = null) {
              lens: { model: null, range: [focalPhys, focalPhys], wide, tele: wide, mount: null } };
   }
 
-  let chosen, focalPhys;
-  if (kit && kit.length) {
-    chosen = pick(kit);
-    const reach = cam.focals.filter(f => f >= chosen.range[0] && f <= chosen.range[1]);
-    focalPhys = reach.length ? pick(reach) : chosen.range[0];
-  } else {
-    focalPhys = pick(cam.focals);
-    const covering = (DSLR_LENSES[cam.make] || []).filter(l =>
-      (cam.mounts || []).includes(l.mount) && focalPhys >= l.range[0] && focalPhys <= l.range[1]);
-    chosen = covering.length ? pick(covering) : null;
-  }
+  const focalPhys = pick(cam.focals);
+  const covering = (DSLR_LENSES[cam.make] || []).filter(l =>
+    (cam.mounts || []).includes(l.mount) && focalPhys >= l.range[0] && focalPhys <= l.range[1]);
+  const chosen = covering.length ? pick(covering) : null;
   const focalEquiv = Math.round(focalPhys * (cam.crop || 1));
   const openable = chosen ? cam.apertures.filter(a => a >= chosen.wide - 0.01) : cam.apertures;
   const aperture = openable.length ? pick(openable) : (chosen ? chosen.wide : pick(cam.apertures));
   return { focalPhys, focalEquiv, aperture, lens: chosen };
-}
-
-/**
- * A photographer's bag: one to three lenses that fit the body. A batch of
- * photos from one trip is shot on a kit, not on a different lens per frame
- * drawn from the whole catalogue.
- */
-export function pickKit(cam) {
-  if (cam.type === 'phone' || cam.fixedLens) return null;
-  const pool = (DSLR_LENSES[cam.make] || []).filter(l => (cam.mounts || []).includes(l.mount));
-  if (!pool.length) return null;
-  const n = Math.min(pool.length, pick([1, 2, 2, 3]));
-  const rest = [...pool], kit = [];
-  while (kit.length < n) kit.push(rest.splice(Math.floor(rnd() * rest.length), 1)[0]);
-  return kit;
 }

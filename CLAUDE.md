@@ -19,6 +19,9 @@ comments, docs and UI text. Technical terms that describe what is measured
 
 - **Generated GPS is always inside the United States.** Locations come only from
   the US city list in `js/data.js`; `tools/check.js` asserts the range.
+- **Every image gets its own independent identity**, including in a batch: its
+  own camera, lens, city, dates, editor version and filename. Nothing shared
+  across images that could link them to each other or to one person.
 - **A non-photo is never given a camera, lens or location.** `js/classify.js`
   decides photo vs. screenshot/graphic before anything is generated.
 - **One pipeline, no user-facing modes.** The output presents as an Adobe Camera

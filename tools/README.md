@@ -97,8 +97,8 @@ screenshot. Outputs go to `tools/out/` (git-ignored). Then it asserts:
   UTF-8 BOM, and APP2 ICC_PROFILE; stripped files carry one SOI and no
   APP1/APP2 at all. Nowhere in the file: `Google Inc`, `Skia`, `JFIF`,
   `Chrome`, `Mozilla`, or UTF-16BE `Google` / `Skia`.
-- **persona** — the batch shares one camera and one city, its captures fall
-  within eight days, and its frame counters follow capture order.
+- **batch independence** — every batch image is randomized, the batch does
+  not share one camera and city, and each image has its own frame counter.
 - **non-photo** — the screenshot is classified as a non-photo and carries no
   camera Make or Model, no lens and no GPS; any `Software` it names is Adobe.
 - **exiftool** (when found on PATH or at the known Windows install path;

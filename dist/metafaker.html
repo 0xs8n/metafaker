@@ -5811,7 +5811,7 @@ __modules["data"] = (function () {
  *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution.
  */
 
-const { pick, rnd } = __modules["helpers"];
+const { pick } = __modules["helpers"];
 
 // Frame shapes each body can actually produce. A generated photo whose aspect
 // ratio matches no mode the camera offers is inconsistent with that camera.
@@ -6222,12 +6222,11 @@ const DSLR_LENSES = {
  * Choose focal length, aperture and lens as one consistent set.
  *
  * Phones: one of the phone's fixed lenses, carrying its own measured
- * rationals and model string. Bodies: with a kit (a batch persona's bag of
- * lenses) the lens comes first and the focal length is one that lens reaches;
- * without one, the focal length is drawn and any mountable lens that covers
- * it is chosen; only f-numbers the lens opens to are offered.
+ * rationals and model string. Bodies: the focal length is drawn and any
+ * mountable lens that covers it is chosen; only f-numbers the lens opens to
+ * are offered.
  */
-function pickOptics(cam, kit = null) {
+function pickOptics(cam) {
   if (cam.type === 'phone') {
     const l = pick(cam.lenses);
     return { focalPhys: l.phys, focalEquiv: l.equiv, aperture: l.f, lens: l };
@@ -6242,39 +6241,17 @@ function pickOptics(cam, kit = null) {
              lens: { model: null, range: [focalPhys, focalPhys], wide, tele: wide, mount: null } };
   }
 
-  let chosen, focalPhys;
-  if (kit && kit.length) {
-    chosen = pick(kit);
-    const reach = cam.focals.filter(f => f >= chosen.range[0] && f <= chosen.range[1]);
-    focalPhys = reach.length ? pick(reach) : chosen.range[0];
-  } else {
-    focalPhys = pick(cam.focals);
-    const covering = (DSLR_LENSES[cam.make] || []).filter(l =>
-      (cam.mounts || []).includes(l.mount) && focalPhys >= l.range[0] && focalPhys <= l.range[1]);
-    chosen = covering.length ? pick(covering) : null;
-  }
+  const focalPhys = pick(cam.focals);
+  const covering = (DSLR_LENSES[cam.make] || []).filter(l =>
+    (cam.mounts || []).includes(l.mount) && focalPhys >= l.range[0] && focalPhys <= l.range[1]);
+  const chosen = covering.length ? pick(covering) : null;
   const focalEquiv = Math.round(focalPhys * (cam.crop || 1));
   const openable = chosen ? cam.apertures.filter(a => a >= chosen.wide - 0.01) : cam.apertures;
   const aperture = openable.length ? pick(openable) : (chosen ? chosen.wide : pick(cam.apertures));
   return { focalPhys, focalEquiv, aperture, lens: chosen };
 }
 
-/**
- * A photographer's bag: one to three lenses that fit the body. A batch of
- * photos from one trip is shot on a kit, not on a different lens per frame
- * drawn from the whole catalogue.
- */
-function pickKit(cam) {
-  if (cam.type === 'phone' || cam.fixedLens) return null;
-  const pool = (DSLR_LENSES[cam.make] || []).filter(l => (cam.mounts || []).includes(l.mount));
-  if (!pool.length) return null;
-  const n = Math.min(pool.length, pick([1, 2, 2, 3]));
-  const rest = [...pool], kit = [];
-  while (kit.length < n) kit.push(rest.splice(Math.floor(rnd() * rest.length), 1)[0]);
-  return kit;
-}
-
-;return { CAMERAS, LOCATIONS, DSLR_LENSES, pickOptics, pickKit };
+;return { CAMERAS, LOCATIONS, DSLR_LENSES, pickOptics };
 })();
 
 // ── js/exif.js ────────────────────────────────────────────────────────
@@ -6292,7 +6269,7 @@ __modules["exif"] = (function () {
 const exifr = ((window.exifr && window.exifr.default) || window.exifr);
 const { ICONS } = __modules["icons"];
 const { pick, randInt, clamp, cryptoRandInt, jitterLocation, fmtDate, fmtGpsDate, wallClockToUtc, tzOffsetString, sunElevation, dmsToDec, dataUrlToBlob, fromRat, cleanExifStr, escapeHtml } = __modules["helpers"];
-const { CAMERAS, LOCATIONS, pickOptics, pickKit } = __modules["data"];
+const { CAMERAS, LOCATIONS, pickOptics } = __modules["data"];
 const { pickEditor } = __modules["provenance"];
 const { rnd } = __modules["rng"];
 
@@ -6610,7 +6587,7 @@ function apexBrightness(aperture, exposureSec, iso) {
   return 2 * Math.log2(aperture) - Math.log2(exposureSec) - Math.log2(iso / 3.125);
 }
 
-// ── Dates and personas ───────────────────────────────────────────
+// ── Dates ────────────────────────────────────────────────────────
 
 function pickDates(originalDate) {
   const anchor = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
@@ -6624,40 +6601,6 @@ function pickDates(originalDate) {
   }
   let exportAt = new Date(Math.min(anchor, capture.getTime() + randInt(2, 45 * 24) * HOUR));
   exportAt.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
-  if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
-  return { capture, exportAt };
-}
-
-/**
- * A persona for a batch: one body, one bag of lenses, one city, one trip of a
- * few days, one export session. Each photo still draws its own lens from the
- * kit, its own spot in the city, its own moment in the trip, its own exposure.
- */
-function makePersona() {
-  const cam    = pick(CAMERAS);
-  const city   = pick(LOCATIONS);
-  const editor = pickEditor(cam.type === 'dslr' ? 'acr' : 'lr');
-  const kit    = pickKit(cam);
-  const anchor    = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
-  const tripStart = anchor - randInt(2 * 24, 700 * 24) * HOUR;
-  const tripEnd   = tripStart + randInt(0, 6) * DAY;
-  let session = new Date(Math.min(anchor, tripEnd + randInt(2, 45 * 24) * HOUR));
-  session.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
-  if (session.getTime() <= tripEnd + DAY) session = new Date(tripEnd + DAY + randInt(2, 8) * HOUR);
-  return { cam, city, editor, kit, tripStart, tripEnd, session, exported: 0 };
-}
-
-function personaDates(persona, originalDate) {
-  let capture;
-  if (originalDate instanceof Date && !isNaN(originalDate)) {
-    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
-                       pickHour(), randInt(0, 59), randInt(0, 59));
-  } else {
-    capture = new Date(persona.tripStart + Math.floor(rnd() * (persona.tripEnd - persona.tripStart + DAY)));
-    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
-  }
-  persona.exported += randInt(4, 40);
-  let exportAt = new Date(persona.session.getTime() + persona.exported * 1000);
   if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
   return { capture, exportAt };
 }
@@ -6715,20 +6658,23 @@ const hex = n => Array.from({ length: n }, () => '0123456789abcdef'[Math.floor(r
 /**
  * Build the metadata of one exported photo. Returns the display object, the
  * piexif write object, and the context the container (XMP, APP13) needs.
+ *
+ * Every call draws a fresh, independent identity — camera, lens, city, dates
+ * and editor — including within a batch, so no two outputs share an identity
+ * that would link them to each other or to the person who shared them.
  */
 function generateFake(options = {}) {
   const px = window.piexif;
   registerTags(px);
-  const persona = options.persona || null;
-  const cam = persona ? persona.cam : pick(CAMERAS);
+  const cam = pick(CAMERAS);
   const w   = WRITERS[cam.writer];
-  const loc = jitterLocation(persona ? persona.city : pick(LOCATIONS));
+  const loc = jitterLocation(pick(LOCATIONS));
   const isBody = w.kind === 'body';
-  const editor = persona ? persona.editor : pickEditor(isBody ? 'acr' : 'lr');
+  const editor = pickEditor(isBody ? 'acr' : 'lr');
 
-  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam, persona ? persona.kit : null);
+  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
 
-  const { capture, exportAt } = persona ? personaDates(persona, options.originalDate) : pickDates(options.originalDate);
+  const { capture, exportAt } = pickDates(options.originalDate);
   const utc          = wallClockToUtc(capture, loc.tz);
   const exportUtc    = wallClockToUtc(exportAt, loc.tz);
   const offsetString = tzOffsetString(utc, loc.tz);
@@ -6926,7 +6872,9 @@ function generateFake(options = {}) {
   const source = isBody
     ? { raw: true, mime: cam.raw.mime, fileName: `${rawFileStem(cam)}.${cam.raw.ext}`,
         cameraProfile: pick(['Adobe Color', 'Camera Standard', 'Camera Standard']) }
-    : { raw: false, fileName: options.sourceName || `${phoneStem(cam, capture, subsec)}.jpg` };
+    // Always a generated name in the phone's own convention: the user's real
+    // filename would identify them or the original photo.
+    : { raw: false, fileName: `${phoneStem(cam, capture, subsec)}.jpg` };
   const aux = isBody ? {
     serialNumber, lensSerial,
     firmware: cam.firmware || null,
@@ -7131,7 +7079,7 @@ function renderMeta(exifObj, isFake = false) {
   return { html, count };
 }
 
-;return { parseFileExif, piexifToDisplay, readBackExifStrict, makePersona, generateFake, generateGraphic, SECTIONS, LABELS, fmtVal, renderMeta };
+;return { parseFileExif, piexifToDisplay, readBackExifStrict, generateFake, generateGraphic, SECTIONS, LABELS, fmtVal, renderMeta };
 })();
 
 // ── js/classify.js ────────────────────────────────────────────────────
@@ -7220,10 +7168,10 @@ __modules["ui"] = (function () {
  * for randomizing, stripping, and downloading processed JPEGs.
  */
 
-const { fmtBytes, escapeHtml, makeId, cryptoRandInt, rnd, dataUrlToBlob, stripViaCanvas, makeAdobeThumbnail, insertAfterSoi, iccApp2Segment } = __modules["helpers"];
+const { fmtBytes, escapeHtml, makeId, rnd, dataUrlToBlob, stripViaCanvas, makeAdobeThumbnail, insertAfterSoi, iccApp2Segment } = __modules["helpers"];
 const { dumpExifSafe } = __modules["exif-writer"];
 const { buildXmpPacket, xmpSegment, buildPhotoshopApp13 } = __modules["provenance"];
-const { generateFake, generateGraphic, makePersona, readBackExifStrict, parseFileExif, renderMeta } = __modules["exif"];
+const { generateFake, generateGraphic, readBackExifStrict, parseFileExif, renderMeta } = __modules["exif"];
 const { classifyInput } = __modules["classify"];
 const { ICONS } = __modules["icons"];
 
@@ -7299,44 +7247,19 @@ function hasProcessedOutput(item) {
 }
 
 /**
- * The name Camera Raw gives an export: the source file's own name with a
- * lowercase .jpg extension, so the convention follows the generated camera and
- * date-based names use the generated capture time. A Pixel's raw is named
- * PXL_<timestamp>.RAW-02.ORIGINAL.dng, and its export keeps that stem; the
- * millisecond field is the frame's SubSecTime, as on the phone. Uppercase .JPG
- * is what the camera writes, not what an editor writes.
+ * The name Camera Raw or Lightroom gives an export: the source file's own stem
+ * with a lowercase .jpg extension. A photo's source file is the generated one
+ * its XMP records as crs:RawFileName (DSC_4821.NEF, PXL_20240612_141503123.jpg,
+ * IMG_0734.jpg …), so the download name and the metadata tell the same story.
+ * The user's real filename is never used. A cleaned file with no generated
+ * camera gets a plain date-based name. Uppercase .JPG is what the camera
+ * writes, not what an editor writes.
  */
 function getOutputName(item) {
+  if (item?.fakeStem) return `${item.fakeStem}.jpg`;
   const d  = (item?.fakeDate instanceof Date && !isNaN(item.fakeDate)) ? item.fakeDate : new Date();
   const p = n => String(n).padStart(2, '0');
-  const YYYY = d.getFullYear();
-  const MM = p(d.getMonth() + 1);
-  const DD = p(d.getDate());
-  const hh = p(d.getHours());
-  const mm = p(d.getMinutes());
-  const ss = p(d.getSeconds());
-  const ms = String(item?.fakeSubSec ?? cryptoRandInt(0, 999)).padStart(3, '0');
-  // Frame counters run in capture order across a batch (assigned after a
-  // batch run); a single image gets a random one.
-  const seq = item?.fakeSeq ?? cryptoRandInt(1000, 9999);
-
-  // Matches the EXIF Make, which is the manufacturer's own spelling —
-  // "samsung" lowercase, "NIKON CORPORATION", "SONY".
-  const make = item?.fakeCamera?.make || '';
-  const fromRaw = item?.fakeCamera?.raw && item.fakeCamera.raw !== 'image/jpeg';
-
-  switch (make) {
-    case 'Apple':             return `IMG_${seq}.jpg`;
-    case 'samsung':           return `${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
-    case 'Google':            return `PXL_${YYYY}${MM}${DD}_${hh}${mm}${ss}${ms}${fromRaw ? '.RAW-02.ORIGINAL' : ''}.jpg`;
-    case 'OnePlus':           return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
-    case 'Xiaomi':            return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
-    case 'Canon':             return `IMG_${seq}.jpg`;
-    case 'NIKON CORPORATION': return `DSC_${seq}.jpg`;
-    case 'SONY':              return `DSC0${seq}.jpg`;
-    case 'FUJIFILM':          return `DSCF${seq}.jpg`;
-    default:                  return `IMG_${YYYY}${MM}${DD}_${hh}${mm}${ss}.jpg`;
-  }
+  return `IMG_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`;
 }
 
 function releaseItemResources(item) {
@@ -7611,13 +7534,13 @@ async function processGraphicItem(item, options = {}) {
     item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
     item.fakeExif = { ...verified.exif };      // editor provenance, no camera, no GPS
     item.fakePiexif = fake.piexif;
-    item.fakeCamera = null;
+    item.fakeCamera = null; item.fakeStem = null;
     item.fakeDate = fake.capture;
     item.fakeLocation = null;
   } catch (e) {
     item.error = e.message;
     releaseProcessedResources(item);
-    item.fakeExif = null; item.fakePiexif = null; item.fakeCamera = null; item.fakeLocation = null;
+    item.fakeExif = null; item.fakePiexif = null; item.fakeCamera = null; item.fakeStem = null; item.fakeLocation = null;
     throw e;
   } finally {
     item.processing = false;
@@ -7626,7 +7549,7 @@ async function processGraphicItem(item, options = {}) {
 }
 
 async function processRandomizeItem(item, options = {}) {
-  const { deferRender = false, persona = null } = options;
+  const { deferRender = false } = options;
 
   // A screenshot or exported graphic never passed through a lens, so giving it
   // a camera, lens, exposure and GPS would make it inconsistent with what it
@@ -7660,7 +7583,7 @@ async function processRandomizeItem(item, options = {}) {
       }
     }
 
-    const fake = generateFake({ originalDate, persona, sourceName: item.file.name });
+    const fake = generateFake({ originalDate });
     // Render the pixel container and wrap the Adobe metadata segments around it.
     const { verified, modDataUrl, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
     fake.display.PixelXDimension = width;
@@ -7684,6 +7607,7 @@ async function processRandomizeItem(item, options = {}) {
     item.fakeCamera = fake.cam;
     item.fakeDate   = fake.capture;
     item.fakeSubSec = fake.subsec;
+    item.fakeStem   = fake.source.fileName.replace(/\.[^.]+$/, '');
     item.fakeLocation = { ...fake.loc };
 
     const locTxt = item.fakeLocation?.city ? ` | ${item.fakeLocation.city}` : '';
@@ -7697,7 +7621,7 @@ async function processRandomizeItem(item, options = {}) {
     releaseProcessedResources(item);
     item.fakeExif = null;
     item.fakePiexif = null;
-    item.fakeCamera = null;
+    item.fakeCamera = null; item.fakeStem = null;
     item.fakeLocation = null;
     throw e;
   } finally {
@@ -7729,7 +7653,7 @@ async function processClearItem(item, options = {}) {
     item.modDataUrl = item.modPreviewUrl ? null : canvasResult.dataUrl;
     item.fakeExif = null;
     item.fakePiexif = null;
-    item.fakeCamera = null;
+    item.fakeCamera = null; item.fakeStem = null;
     item.fakeLocation = null;
     showToast(`Metadata stripped from ${item.file.name}.`, 'success');
   } catch (e) {
@@ -7796,15 +7720,14 @@ const App = {
     if (!S.items.length) return;
     let completed = 0;
 
-    // One persona for the whole batch: the same body and kit, the same city,
-    // one trip, one export session. Randomize Current stays independent.
-    const persona = makePersona();
-
+    // Every image gets its own independent identity — camera, lens, city,
+    // dates, filename — exactly as Randomize Current gives it, so images
+    // processed together cannot be linked to each other through it.
     for (const item of S.items) {
       S.activeId = item.id;
       if (completed === 0 || completed % 4 === 0) renderCurrentItem();
       try {
-        await processRandomizeItem(item, { deferRender: true, persona });
+        await processRandomizeItem(item, { deferRender: true });
         completed++;
         if (completed % 4 === 0) {
           renderCurrentItem();
@@ -7814,13 +7737,6 @@ const App = {
         showToast(`Batch failed for ${item.file.name}: ${e.message}`, 'error');
       }
     }
-
-    // Frame counters in capture order, from a random starting point, as a
-    // camera numbers a roll.
-    const done = S.items.filter(it => it.fakeExif && it.fakeDate instanceof Date)
-      .sort((a, b) => a.fakeDate - b.fakeDate);
-    let seq = cryptoRandInt(1000, 9000);
-    for (const it of done) { seq += cryptoRandInt(1, 4); it.fakeSeq = seq; }
 
     renderCurrentItem();
     showToast(`Randomized ${completed} image${completed === 1 ? '' : 's'} in the batch.`, 'success');

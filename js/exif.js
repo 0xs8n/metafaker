@@ -17,7 +17,7 @@ import {
   dmsToDec, dataUrlToBlob,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
-import { CAMERAS, LOCATIONS, pickOptics, pickKit } from './data.js';
+import { CAMERAS, LOCATIONS, pickOptics } from './data.js';
 import { pickEditor } from './provenance.js';
 import { rnd } from './rng.js';
 
@@ -335,7 +335,7 @@ function apexBrightness(aperture, exposureSec, iso) {
   return 2 * Math.log2(aperture) - Math.log2(exposureSec) - Math.log2(iso / 3.125);
 }
 
-// ── Dates and personas ───────────────────────────────────────────
+// ── Dates ────────────────────────────────────────────────────────
 
 function pickDates(originalDate) {
   const anchor = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
@@ -349,40 +349,6 @@ function pickDates(originalDate) {
   }
   let exportAt = new Date(Math.min(anchor, capture.getTime() + randInt(2, 45 * 24) * HOUR));
   exportAt.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
-  if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
-  return { capture, exportAt };
-}
-
-/**
- * A persona for a batch: one body, one bag of lenses, one city, one trip of a
- * few days, one export session. Each photo still draws its own lens from the
- * kit, its own spot in the city, its own moment in the trip, its own exposure.
- */
-export function makePersona() {
-  const cam    = pick(CAMERAS);
-  const city   = pick(LOCATIONS);
-  const editor = pickEditor(cam.type === 'dslr' ? 'acr' : 'lr');
-  const kit    = pickKit(cam);
-  const anchor    = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
-  const tripStart = anchor - randInt(2 * 24, 700 * 24) * HOUR;
-  const tripEnd   = tripStart + randInt(0, 6) * DAY;
-  let session = new Date(Math.min(anchor, tripEnd + randInt(2, 45 * 24) * HOUR));
-  session.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
-  if (session.getTime() <= tripEnd + DAY) session = new Date(tripEnd + DAY + randInt(2, 8) * HOUR);
-  return { cam, city, editor, kit, tripStart, tripEnd, session, exported: 0 };
-}
-
-function personaDates(persona, originalDate) {
-  let capture;
-  if (originalDate instanceof Date && !isNaN(originalDate)) {
-    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
-                       pickHour(), randInt(0, 59), randInt(0, 59));
-  } else {
-    capture = new Date(persona.tripStart + Math.floor(rnd() * (persona.tripEnd - persona.tripStart + DAY)));
-    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
-  }
-  persona.exported += randInt(4, 40);
-  let exportAt = new Date(persona.session.getTime() + persona.exported * 1000);
   if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
   return { capture, exportAt };
 }
@@ -440,20 +406,23 @@ const hex = n => Array.from({ length: n }, () => '0123456789abcdef'[Math.floor(r
 /**
  * Build the metadata of one exported photo. Returns the display object, the
  * piexif write object, and the context the container (XMP, APP13) needs.
+ *
+ * Every call draws a fresh, independent identity — camera, lens, city, dates
+ * and editor — including within a batch, so no two outputs share an identity
+ * that would link them to each other or to the person who shared them.
  */
 export function generateFake(options = {}) {
   const px = window.piexif;
   registerTags(px);
-  const persona = options.persona || null;
-  const cam = persona ? persona.cam : pick(CAMERAS);
+  const cam = pick(CAMERAS);
   const w   = WRITERS[cam.writer];
-  const loc = jitterLocation(persona ? persona.city : pick(LOCATIONS));
+  const loc = jitterLocation(pick(LOCATIONS));
   const isBody = w.kind === 'body';
-  const editor = persona ? persona.editor : pickEditor(isBody ? 'acr' : 'lr');
+  const editor = pickEditor(isBody ? 'acr' : 'lr');
 
-  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam, persona ? persona.kit : null);
+  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
 
-  const { capture, exportAt } = persona ? personaDates(persona, options.originalDate) : pickDates(options.originalDate);
+  const { capture, exportAt } = pickDates(options.originalDate);
   const utc          = wallClockToUtc(capture, loc.tz);
   const exportUtc    = wallClockToUtc(exportAt, loc.tz);
   const offsetString = tzOffsetString(utc, loc.tz);
@@ -651,7 +620,9 @@ export function generateFake(options = {}) {
   const source = isBody
     ? { raw: true, mime: cam.raw.mime, fileName: `${rawFileStem(cam)}.${cam.raw.ext}`,
         cameraProfile: pick(['Adobe Color', 'Camera Standard', 'Camera Standard']) }
-    : { raw: false, fileName: options.sourceName || `${phoneStem(cam, capture, subsec)}.jpg` };
+    // Always a generated name in the phone's own convention: the user's real
+    // filename would identify them or the original photo.
+    : { raw: false, fileName: `${phoneStem(cam, capture, subsec)}.jpg` };
   const aux = isBody ? {
     serialNumber, lensSerial,
     firmware: cam.firmware || null,

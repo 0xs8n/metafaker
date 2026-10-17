@@ -460,14 +460,13 @@ function exiftoolChecks(name, t, mode, info) {
 
 // ── Browser driving ──────────────────────────────────────────────
 
-const BATCH_SIZE = 3;   // the first N images go through Randomize Entire Batch as one persona
+const BATCH_SIZE = 3;   // the first N images go through Randomize Entire Batch
 
 async function processInBrowser(page, origin, names) {
   // The first BATCH_SIZE images go through "Randomize Entire Batch", which
-  // gives them one shared persona (same body, city, trip). The rest are
-  // loaded afterwards and randomized one by one, so each draws its own
-  // camera and the run still covers many models. Finally the first image is
-  // loaded once more and stripped, so one output of each kind exists.
+  // gives each its own independent identity. The rest are loaded afterwards
+  // and randomized one by one. Finally the first image is loaded once more
+  // and stripped, so one output of each kind exists.
   const summary = await page.evaluate(async (base, names, batchSize) => {
     const toFile = async n => {
       const r = await fetch(`${base}/testimg/${n}`);
@@ -517,23 +516,22 @@ async function processInBrowser(page, origin, names) {
       camera: it.fakeCamera ? `${it.fakeCamera.make} ${it.fakeCamera.model}` : '',
       city: it.fakeLocation ? it.fakeLocation.city : '',
       date: it.fakeDate ? new Date(it.fakeDate).toISOString() : '',
-      seq: it.fakeSeq ?? null,
+      stem: it.fakeStem ?? null,
     }));
   }, origin, names, BATCH_SIZE);
 
-  // Persona: the batch shares one camera and one city, its captures fall
-  // within one trip (a week at most), and frame counters follow capture order.
+  // Independence: every image in a batch draws its own identity. With 24
+  // cameras and 58 cities, three independent draws all landing on the same
+  // camera and the same city happens about once in two million runs, so a
+  // shared camera+city across the whole batch means a shared identity.
   const b = summary.filter(it => it.batch && it.mode === 'randomized');
-  if (b.length) {
-    const cams = new Set(b.map(it => it.camera)), cities = new Set(b.map(it => it.city));
-    assert('(batch)', 'persona: batch shares one camera', cams.size === 1, [...cams].join(' | '));
-    assert('(batch)', 'persona: batch shares one city', cities.size === 1, [...cities].join(' | '));
-    const times = b.map(it => Date.parse(it.date)).filter(Number.isFinite);
-    const span = (Math.max(...times) - Math.min(...times)) / 86400000;
-    assert('(batch)', 'persona: batch captures within 8 days', span <= 8, `span ${span.toFixed(1)} days`);
-    const ordered = [...b].sort((x, y) => Date.parse(x.date) - Date.parse(y.date)).map(it => it.seq);
-    const monotone = ordered.every((s, i) => i === 0 || (typeof s === 'number' && s > ordered[i - 1]));
-    assert('(batch)', 'persona: frame counters follow capture order', monotone, ordered.join(','));
+  assert('(batch)', 'batch: every image randomized', b.length === BATCH_SIZE, `${b.length}/${BATCH_SIZE}`);
+  if (b.length > 1) {
+    const ids = new Set(b.map(it => `${it.camera} @ ${it.city}`));
+    assert('(batch)', 'batch: images do not share one identity', ids.size > 1, [...ids].join(' | '));
+    const stems = b.map(it => it.stem);
+    assert('(batch)', 'batch: each image has its own generated filename',
+      stems.every(s => typeof s === 'string' && s) && new Set(stems).size === stems.length, stems.join(','));
   }
 
   // Screenshot: classified non-photo and cleaned by Randomize, not given a camera.
@@ -619,6 +617,10 @@ async function main() {
       row.path = path.join(OUT_DIR, outName);
       fs.writeFileSync(row.path, buf);
       const info = byteChecks(outName, buf, it.mode);
+      // The user's real filename must never reach the output, in any segment.
+      const stem = it.name.replace(/\.[^.]+$/, '');
+      assert(outName, 'privacy: input filename absent from output bytes',
+        !buf.includes(Buffer.from(stem, 'utf8')), `found "${stem}"`);
       row.layout = info.layout;
       row.dims = info.width ? `${info.width}x${info.height}` : '?';
       row.info = info;
