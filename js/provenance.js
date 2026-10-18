@@ -421,7 +421,7 @@ const signed = (n) => (n > 0 ? `+${n}` : String(n));
  * and IncrementalTint, the three legacy keys Shadows/Brightness/Contrast, and
  * sharpening at zero. A few sliders are moved at random, as people do.
  */
-function crsAttributes({ editor, isRaw, scene, cameraProfile }) {
+function crsAttributes({ editor, isRaw, scene, profileDigest }) {
   const kelvin = { daylight: [5200, 5900], overcast: [5800, 6800], indoor: [2900, 3800],
                    dim: [2800, 3600], night: [2600, 3600] }[scene] || [5000, 5600];
   const temp = kelvin[0] + Math.floor(rnd() * (kelvin[1] - kelvin[0]));
@@ -526,11 +526,15 @@ function crsAttributes({ editor, isRaw, scene, cameraProfile }) {
     ['crs:BlueHue', '0'],
     ['crs:BlueSaturation', '0'],
     ['crs:HDREditMode', '0'],
-    ['crs:ConvertToGrayscale', 'False'],
+  );
+  // With a Look applied the grayscale flag moves into the Look's parameters
+  // (26 of 26 real raw exports with a Look from crs 13 on).
+  if (!isRaw) a.push(['crs:ConvertToGrayscale', 'False']);
+  a.push(
     ['crs:OverrideLookVignette', 'False'],
     ['crs:ToneCurveName2012', 'Linear'],
-    ['crs:CameraProfile', isRaw ? cameraProfile : 'Embedded'],
-    ['crs:CameraProfileDigest', isRaw ? hex(32).toUpperCase() : '54650A341B5B5CCAE8442D0B43A92BCE'],
+    ['crs:CameraProfile', isRaw ? 'Adobe Standard' : 'Embedded'],
+    ['crs:CameraProfileDigest', isRaw ? profileDigest : '54650A341B5B5CCAE8442D0B43A92BCE'],
     ['crs:HasSettings', 'True'],
     ['crs:CropTop', '0'],
     ['crs:CropLeft', '0'],
@@ -544,11 +548,60 @@ function crsAttributes({ editor, isRaw, scene, cameraProfile }) {
   return a.map(([k, v]) => `   ${k}="${v}"`).join('\n');
 }
 
+const curve = (name, points) =>
+  `   <crs:${name}>\n    <rdf:Seq>\n${points.map(p => `     <rdf:li>${p}</rdf:li>`).join('\n')}\n    </rdf:Seq>\n   </crs:${name}>`;
+const LINEAR = ['0, 0', '255, 255'];
 const TONE_CURVES = ['ToneCurvePV2012', 'ToneCurvePV2012Red', 'ToneCurvePV2012Green', 'ToneCurvePV2012Blue']
-  .map(n => `   <crs:${n}>\n    <rdf:Seq>\n     <rdf:li>0, 0</rdf:li>\n     <rdf:li>255, 255</rdf:li>\n    </rdf:Seq>\n   </crs:${n}>`)
-  .join('\n');
+  .map(n => curve(n, LINEAR)).join('\n');
+const LOOK_CURVES = [curve('ToneCurvePV2012', ['0, 0', '22, 16', '40, 35', '127, 127', '224, 230', '240, 246', '255, 255']),
+  ...['Red', 'Green', 'Blue'].map(c => curve(`ToneCurvePV2012${c}`, LINEAR))].join('\n');
 
 const POINT_COLORS = `   <crs:PointColors>\n    <rdf:Seq>\n     <rdf:li>${Array(19).fill('-1.000000').join(', ')}</rdf:li>\n    </rdf:Seq>\n   </crs:PointColors>`;
+
+// Written from crs 17.5 on: in 7 of 7 real exports at 17.5 to 18.2, in none of
+// 5 at 17.3.1 and 17.4.
+const COLOR_VARIANCE = `   <crs:ColorVariance>\n    <rdf:Seq>\n     <rdf:li>-50.000000</rdf:li>\n    </rdf:Seq>\n   </crs:ColorVariance>`;
+const hasColorVariance = (editor) => versionAtLeast(editor.crsVersion, '17.5');
+
+const indent = (block, n) => block.replace(/^/gm, ' '.repeat(n));
+
+/**
+ * The "Adobe Color" look over the "Adobe Standard" profile: how a raw file
+ * opens by default, and what 28 of 40 real raw-source exports carry. Copied
+ * from them: name, UUID, LookTable and tone curve are the same in every one
+ * (Camera Raw 11.4.1 to Lightroom Classic 15.1); the parameters' Version is
+ * the export's own crs:Version, and from crs 17.5 they carry PointColors and
+ * ColorVariance too. Camera Raw writes the Copyright line (4 of 4 exports).
+ */
+function lookBlock(editor) {
+  const tail = hasColorVariance(editor) ? `\n${indent(POINT_COLORS, 2)}\n${indent(COLOR_VARIANCE, 2)}` : '';
+  return `   <crs:Look>
+    <rdf:Description
+     crs:Name="Adobe Color"
+     crs:Amount="1"
+     crs:UUID="B952C231111CD8E0ECCF14B86BAA7077"
+     crs:SupportsAmount="false"
+     crs:SupportsMonochrome="false"
+     crs:SupportsOutputReferred="false"
+     crs:Copyright="© 2018 Adobe Systems, Inc.">
+    <crs:Group>
+     <rdf:Alt>
+      <rdf:li xml:lang="x-default">Profiles</rdf:li>
+     </rdf:Alt>
+    </crs:Group>
+    <crs:Parameters>
+     <rdf:Description
+      crs:Version="${editor.crsVersion}"
+      crs:ProcessVersion="15.4"
+      crs:ConvertToGrayscale="False"
+      crs:CameraProfile="Adobe Standard"
+      crs:LookTable="E1095149FDB39D7A057BAB208837E2E1">
+${indent(LOOK_CURVES, 2)}${tail}
+     </rdf:Description>
+    </crs:Parameters>
+    </rdf:Description>
+   </crs:Look>`;
+}
 
 /** Adobe pads every packet with whitespace: 40 lines of 100 spaces and a short last line, 4097 bytes in all. */
 const XMP_PADDING = '\n' + (' '.repeat(100) + '\n').repeat(40) + ' '.repeat(55) + '\n';
@@ -601,7 +654,7 @@ export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport,
          ['dc:format', 'image/jpeg'],
          ['crs:RawFileName', xml(source.fileName)]);
   const attrs = A.map(([k, v]) => `   ${k}="${v}"`).join('\n');
-  const crs = crsAttributes({ editor, isRaw, scene, cameraProfile: source.cameraProfile || 'Adobe Color' });
+  const crs = crsAttributes({ editor, isRaw, scene, profileDigest: source.profileDigest });
   const derivedParams = isRaw
     ? `converted from ${source.mime} to image/jpeg, saved to new location`
     : 'saved to new location';
@@ -638,7 +691,7 @@ ${crs}>
    </xmpMM:History>
 ${derivedFrom}
 ${TONE_CURVES}
-${POINT_COLORS}
+${POINT_COLORS}${hasColorVariance(editor) ? `\n${COLOR_VARIANCE}` : ''}${isRaw ? `\n${lookBlock(editor)}` : ''}
   </rdf:Description>
  </rdf:RDF>
 </x:xmpmeta>${XMP_PADDING}<?xpacket end="w"?>`;

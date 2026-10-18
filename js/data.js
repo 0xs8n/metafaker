@@ -36,6 +36,15 @@
  *                 'two' (OffsetTime + OffsetTimeOriginal), 'orig', or 'none'.
  *   subsec      — SubSecTime digits, or 0 when the firmware writes none.
  *   raw         — for bodies, the raw file the export is converted from.
+ *   profileDigest — for bodies, the crs:CameraProfileDigest of the body's
+ *                 "Adobe Standard" profile, which is fixed per model: read from
+ *                 real raw-source exports of that body (2026-10-18; the same
+ *                 value in all 3 A7 IV exports from three editors, 4 X-T5, 2 D850
+ *                 from Camera Raw 11.4.1 and 12.4, 2 R5 Mark II, 2 Z 9, one
+ *                 each for the rest; the A7R V's from DNGs Lightroom Classic
+ *                 made of its ARWs). A body without one is never offered: a
+ *                 random digest matches no real profile, and two outputs of one
+ *                 body with different digests contradict each other.
  *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution;
  *                 `perCmRat` is the exact per-cm rational Camera Raw's exports
  *                 of that body carry (64449339/32768 for an A7 IV or A7C II).
@@ -303,7 +312,7 @@ export const CAMERAS = [
   // The R5 Mark II's launch firmware 1.0.0 is in an export of a 2024-08-25 capture.
   { make:"Canon", model:"Canon EOS R5m2", released:"2024-08-20", acrMin:"16.4", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
     exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.0.0",
-    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
+    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' }, profileDigest:'34CFA4AC8E3861352E9AE36290FF5B0C',
     sensor:{ px:[8192, 5464], inch:[1419, 947] },
     apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[100,125,160,200,250,320,400,640,800,1600,3200,6400,12800,25600,51200],
@@ -313,7 +322,7 @@ export const CAMERAS = [
   // Camera Raw writes the R6 Mark II's FocalPlane per cm over 32768, not per inch.
   { make:"Canon", model:"Canon EOS R6m2", released:"2022-11-30", firmwareDate:"2023-05-23", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
     exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.1.1",
-    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
+    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' }, profileDigest:'A7AC0B2D7EA83BFB7F00D942B278F9EC',
     sensor:{ px:[6000, 4000], perCmRat:[54718516, 32768] },
     apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[100,200,400,800,1600,3200,6400,12800,25600,51200,102400],
@@ -322,7 +331,7 @@ export const CAMERAS = [
 
   { make:"Canon", model:"Canon EOS R5", released:"2020-07-30", firmwareDate:"2023-10-17", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
     exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.8.2",
-    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
+    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' }, profileDigest:'23A8FA817AB0E63610A09E90F3703131',
     sensor:{ px:[8192, 5464], inch:[1419, 947] },
     apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[100,125,160,200,250,320,400,640,800,1600,3200,6400,12800,25600,51200],
@@ -340,7 +349,7 @@ export const CAMERAS = [
 
   { make:"Canon", model:"Canon EOS 90D", released:"2019-09-26", firmwareDate:"2019-10-25", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.6, mounts:['EF','EF-S'],
     exifVersion:"0231", offset:'all', subsec:2, flash:true, firmware:"1.1.1",
-    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
+    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' }, profileDigest:'418DA6060FE18E4AB89CD15B15C9353B',
     sensor:{ px:[6960, 4640], inch:[877, 585] },
     apertures:[1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,320,400,800,1600,3200,6400,12800,25600],
@@ -352,7 +361,7 @@ export const CAMERAS = [
   // ExifVersion 0232; Camera Raw's exports of both new bodies write 0231.
   { make:"NIKON CORPORATION", model:"NIKON Z6_3", released:"2024-06-24", acrMin:"16.3", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
     exifVersion:"0231", offset:'all', subsec:2, flash:false,
-    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
+    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' }, profileDigest:'C9968249830BD8AF4B057F09F1E3258A',
     sensor:{ px:[6048, 4032], perCmRat:[55369938, 32768] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1000,1600,3200,6400,12800,25600,51200],
@@ -370,7 +379,7 @@ export const CAMERAS = [
 
   { make:"NIKON CORPORATION", model:"NIKON Z 9", released:"2021-12-24", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
     exifVersion:"0232", offset:'all', subsec:2, flash:false,
-    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
+    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' }, profileDigest:'7742AD8D70EC50CB34CCEA53E99873A8',
     sensor:{ px:[8256, 5504], cm:[3.59, 2.39] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[64,100,200,400,800,1000,1600,3200,6400,12800,25600,51200],
@@ -379,7 +388,7 @@ export const CAMERAS = [
 
   { make:"NIKON CORPORATION", model:"NIKON D850", released:"2017-09-07", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['F'],
     exifVersion:"0231", offset:'none', subsec:2, flash:false,
-    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
+    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' }, profileDigest:'2DE3C8E3E7A6454D52ADD2F110A1ADA2',
     sensor:{ px:[8256, 5504], cm:[3.59, 2.39] },
     apertures:[1.8,2.0,2.8,4.0,5.6,8.0,11,16],
     isos:[64,100,200,400,800,1600,3200,6400,12800,25600],
@@ -399,7 +408,7 @@ export const CAMERAS = [
   // ── Sony: BrightnessValue over 2560, MaxApertureValue over 256, compensation in tenths, no serial in EXIF ──
   { make:"SONY", model:"ILCE-7CM2", released:"2023-09-30", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, crop:1.0, mounts:['E'],
     exifVersion:"0232", offset:'all', subsec:3, flash:false,
-    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
+    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' }, profileDigest:'6DCE037B2B8020C0CCBB224F2DE36670',
     sensor:{ px:[7008, 4672], perCmRat:[64449339, 32768] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,6.3,8.0,11],
     isos:[100,200,320,400,800,1600,3200,6400,12800,25600,51200],
@@ -408,7 +417,7 @@ export const CAMERAS = [
 
   { make:"SONY", model:"ILCE-7M4", released:"2021-12-17", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, modes:[[4608,3072]], crop:1.0, mounts:['E'],
     exifVersion:"0232", offset:'all', subsec:3, flash:false,
-    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
+    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' }, profileDigest:'A4DC20C59DE4E2DF67946B80BFDA0801',
     sensor:{ px:[7008, 4672], perCmRat:[64449339, 32768] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,6.3,8.0,11],
     isos:[50,100,200,400,800,1000,1250,1600,3200,6400,12800,25600,51200],
@@ -417,7 +426,7 @@ export const CAMERAS = [
 
   { make:"SONY", model:"ILCE-7RM5", released:"2022-11-24", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, crop:1.0, mounts:['E'],
     exifVersion:"0232", offset:'all', subsec:3, flash:false,
-    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
+    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' }, profileDigest:'8BC96EBFC3EA48E8A20B842065C33BC4',
     sensor:{ px:[9504, 6336], cm:[3.57, 2.38] },
     apertures:[1.4,1.8,2.0,2.2,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,640,800,1600,3200,6400,12800,25600,51200],
@@ -427,7 +436,7 @@ export const CAMERAS = [
   // ── Fujifilm: everything over 100, SensitivityType 1 without an index, serials like 3B008051 ──
   { make:"FUJIFILM", model:"X-T50", released:"2024-06-30", acrMin:"16.3", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
     exifVersion:"0232", offset:'all', subsec:2, flash:false,
-    raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
+    raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' }, profileDigest:'6DA0A6EFA8823F485E37B03DDCBA7D3D',
     sensor:{ px:[7728, 5152], perCmRat:[108260745, 32768] },
     apertures:[1.4,2.0,2.8,4.0,5.6,8.0,11],
     isos:[125,160,200,250,400,800,1600,3200,6400,12800],
@@ -436,7 +445,7 @@ export const CAMERAS = [
 
   { make:"FUJIFILM", model:"X-T5", released:"2022-11-17", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
     exifVersion:"0232", offset:'all', subsec:0, flash:false,
-    raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
+    raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' }, profileDigest:'937A7BEEC058D87FEBE4AE4633E885D6',
     sensor:{ px:[7728, 5152], perCmRat:[108260745, 32768] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[125,160,200,400,800,1000,1600,3200,6400,12800,25600,51200],

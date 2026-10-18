@@ -460,6 +460,9 @@ const rawSupportedBy = (cam, date) => {
   return !!first && first <= date;
 };
 
+/** The cameras offered: every phone, and the bodies whose profile digest was measured (see data.js). */
+const OFFERED = CAMERAS.filter(c => c.type === 'phone' || c.profileDigest);
+
 // ── Tag registration ─────────────────────────────────────────────
 
 const TAG_OFFSET_TIME           = 0x9010;
@@ -530,14 +533,14 @@ export function generateFake(options = {}) {
   let capture = null, exportAt = null, pool = [], keepDateDropped = false;
   if (kept) {
     capture = keptCapture(kept);
-    pool = CAMERAS.filter(c => existedBy(c, capture) && rawSupportedBy(c, anchor));
+    pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, anchor));
     if (!pool.length) keepDateDropped = true;
   }
   // A long measured delay can put the capture before every camera here; draw
   // again until at least one existed.
   for (let tries = 0; !pool.length && tries < 50; tries++) {
     ({ capture, exportAt } = pickTimes(anchor));
-    pool = CAMERAS.filter(c => existedBy(c, capture) && rawSupportedBy(c, exportAt));
+    pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, exportAt));
   }
   const cam = pick(pool);
   const w   = WRITERS[cam.writer];
@@ -754,7 +757,7 @@ export function generateFake(options = {}) {
   };
   const source = isBody
     ? { raw: true, mime: cam.raw.mime, fileName: `${rawFileStem(cam)}.${cam.raw.ext}`,
-        cameraProfile: pick(['Adobe Color', 'Camera Standard', 'Camera Standard']) }
+        profileDigest: cam.profileDigest }
     // Always a generated name in the phone's own convention: the user's real
     // filename would identify them or the original photo.
     : { raw: false, fileName: `${phoneStem(cam, capture, subsec)}.jpg` };

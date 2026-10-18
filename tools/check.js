@@ -603,6 +603,72 @@ async function processInBrowser(page, origin, names) {
   return summary;
 }
 
+// ── Generated packets, in bulk ───────────────────────────────────
+//
+// The test images give a handful of outputs per run, too few to see a field
+// that depends on the camera or is written at a share. These checks draw
+// PACKET_SAMPLE identities in the page and build each one's XMP packet the way
+// the app does.
+
+const PACKET_SAMPLE = 400;
+const xmpAttr = (x, k) => { const m = x.match(new RegExp(`\\b${k}="([^"]*)"`)); return m ? m[1] : null; };
+const verAtLeast = (v, min) => {
+  const a = v.split('.').map(Number), b = min.split('.').map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) { const d = (a[i] || 0) - (b[i] || 0); if (d) return d > 0; }
+  return true;
+};
+
+async function samplePackets(page) {
+  const digests = await page.evaluate(async () => {
+    const data = await import('/js/data.js');
+    return Object.fromEntries(data.CAMERAS.filter(c => c.profileDigest).map(c => [c.model, c.profileDigest]));
+  });
+  const out = [];
+  while (out.length < PACKET_SAMPLE) {           // in batches: one reply of every packet is too big
+    out.push(...await page.evaluate(async n => {
+      const ex = await import('/js/exif.js');
+      const pv = await import('/js/provenance.js');
+      return Array.from({ length: n }, () => {
+        const g = ex.generateFake({});
+        const xmp = pv.buildXmpPacket({
+          capture: g.capture, exportAt: g.exportAt, offsetCapture: g.offset, offsetExport: g.exportOffset, subsec: g.subsec,
+          lens: g.lensMeta, editor: g.editor, source: g.source, scene: g.scene, aux: g.aux,
+        });
+        return { model: g.cam.model, type: g.cam.type, software: g.editor.software, xmp: xmp.slice(0, xmp.indexOf('</x:xmpmeta>')) };
+      });
+    }, 40));
+  }
+  return { digests, out };
+}
+
+function packetChecks({ digests, out }) {
+  const F = '(packets)';
+  const bodies = out.filter(p => p.type !== 'phone');
+  assert(F, 'packets: sample includes camera bodies', bodies.length >= out.length / 10, bodies.length);
+
+  // A raw export opens on Adobe Standard with the Adobe Color look, and the
+  // profile digest is fixed per body: a random one matches no real profile.
+  const badProfile = bodies.filter(p => xmpAttr(p.xmp, 'crs:CameraProfile') !== 'Adobe Standard'
+    || xmpAttr(p.xmp, 'crs:CameraProfileDigest') !== digests[p.model]);
+  assert(F, "packets: body carries Adobe Standard and its body's measured profile digest", badProfile.length === 0,
+    badProfile.slice(0, 3).map(p => `${p.model}: ${xmpAttr(p.xmp, 'crs:CameraProfile')} ${xmpAttr(p.xmp, 'crs:CameraProfileDigest')}`).join(' | '));
+  const badLook = bodies.filter(p => {
+    const look = p.xmp.match(/<crs:Look>([\s\S]*?)<\/crs:Look>/);
+    if (!look) return true;
+    const top = p.xmp.replace(look[0], '');
+    return xmpAttr(look[1], 'crs:Name') !== 'Adobe Color' || xmpAttr(look[1], 'crs:Version') !== xmpAttr(top, 'crs:Version')
+      || /crs:ConvertToGrayscale=/.test(top);
+  });
+  assert(F, 'packets: body carries the Adobe Color look at its own crs:Version', badLook.length === 0,
+    badLook.slice(0, 3).map(p => `${p.model} ${p.software}`).join(' | '));
+  const badCv = out.filter(p => {
+    const top = p.xmp.replace(/<crs:Look>[\s\S]*?<\/crs:Look>/, '');
+    return /<crs:ColorVariance>/.test(top) !== verAtLeast(xmpAttr(top, 'crs:Version'), '17.5');
+  });
+  assert(F, 'packets: ColorVariance present exactly from crs 17.5', badCv.length === 0,
+    badCv.slice(0, 3).map(p => p.software).join(' | '));
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 
 async function main() {
@@ -632,6 +698,11 @@ async function main() {
       items = await processInBrowser(page, server.origin, names);
     } catch (e) {
       assert('(page)', 'app: processing ran without throwing', false, e.message);
+    }
+    try {
+      packetChecks(await samplePackets(page));
+    } catch (e) {
+      assert('(packets)', 'packets: sampling ran without throwing', false, e.message);
     }
 
     // Network privacy: everything must be local.
