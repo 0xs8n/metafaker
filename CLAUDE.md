@@ -35,6 +35,12 @@ comments, docs and UI text. Technical terms that describe what is measured
   touch it.
 - **Facts are measured, not invented.** Camera and Adobe values in `js/data.js`
   and `js/provenance.js` come from real files. Don't add a value without a source.
+- **Keep the Adobe release table current.** `ACR_RELEASES` / `LR_RELEASES` in
+  `js/provenance.js` hold only versions seen in real exports, with the date
+  first seen. As Adobe ships releases, outputs drift behind real exports
+  unless new ones are measured and added. The same goes for the camera list
+  in `js/data.js` (each entry needs `released`, and `firmwareDate` where the
+  entry depends on a firmware).
 - **All randomness goes through `js/rng.js`** (`crypto.getRandomValues`).
 - **Be honest about limits.** The threat model in the README states what is and
   is not proven. Don't claim more than has been measured.

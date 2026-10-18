@@ -3880,14 +3880,24 @@ __modules["provenance"] = (function () {
  */
 
 /**
- * Adobe's quantization tables, zigzag order, each read out of a real export.
- * Three quality settings were seen across seven measured Camera Raw and
- * Lightroom exports; drawing among them means the tool's output is not all
- * at one quality. `q12` is the maximum (four exports), `q11` the next step
- * (a Camera Raw 16.3 export), `q9` a lower Lightroom Classic export.
+ * Adobe's quantization tables, zigzag order, each read byte for byte out of a
+ * real export. Measured on 45 Camera Raw and Lightroom exports from Wikimedia
+ * Commons (2026-10-17): the six tables below are every table seen in clean
+ * desktop exports with Adobe's own layout (a restart interval, one Huffman
+ * segment, the APP14 marker, 4:4:4 chroma), weighted by how many files used
+ * each, so outputs spread over qualities as real exports do. The earlier
+ * version drew three of them in fixed shares, two of which are rare.
+ *
+ * Another layout also appears (no restart interval, four Huffman segments),
+ * but nearly always with a JFIF header and without Adobe's APP14 marker, which
+ * is what a file re-saved by another program after export looks like, not
+ * Adobe's own writer; it is not reproduced. Mobile Lightroom and 4:2:0 files
+ * are left out too, since the output is a desktop export at 4:4:4.
  */
 const EDITOR_QTABLES = {
-  q12: {
+  // maximum quality; 9 files (Camera Raw 17.0.1, Lightroom 7.4.1 to 9.5.1)
+  max: {
+    weight: 9,
     luma: [
         1,   1,   1,   1,   1,   1,   1,   1,
         1,   1,   1,   1,   1,   1,   1,   1,
@@ -3909,7 +3919,81 @@ const EDITOR_QTABLES = {
         3,   3,   3,   3,   3,   3,   3,   3,
     ],
   },
-  q11: {
+  // 7 files (Camera Raw 14.5 to 17.5, Lightroom 7.1.2 to 9.4.1)
+  dc2: {
+    weight: 7,
+    luma: [
+        2,   2,   2,   3,   2,   3,   4,   2,
+        2,   4,   5,   4,   3,   4,   5,   6,
+        5,   5,   5,   5,   6,   8,   7,   7,
+        7,   7,   7,   8,  11,   9,   9,   9,
+        9,   9,   9,  11,  11,  11,  11,  11,
+       11,  11,  11,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+    chroma: [
+        3,   3,   3,   7,   4,   7,  13,   7,
+        7,  13,  15,  13,  13,  13,  15,  15,
+       14,  14,  14,  14,  15,  15,  12,  12,
+       12,  12,  12,  15,  15,  12,  12,  12,
+       12,  12,  12,  15,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+  },
+  // 4 files (Camera Raw 17.2 and 17.3.1)
+  dc4: {
+    weight: 4,
+    luma: [
+        4,   3,   3,   4,   3,   4,   7,   4,
+        4,   7,   9,   7,   5,   7,   9,  11,
+        9,   9,   9,   9,  11,  14,  12,  12,
+       12,  12,  12,  14,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+    chroma: [
+        4,   6,   6,  12,   8,  12,  22,  12,
+       12,  22,  20,  14,  14,  14,  20,  20,
+       14,  14,  14,  14,  20,  17,  12,  12,
+       12,  12,  12,  17,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+  },
+  // 3 files (Camera Raw 15.3.1 and 17.5, Lightroom 8.4)
+  dc6: {
+    weight: 3,
+    luma: [
+        6,   4,   4,   7,   5,   7,  11,   6,
+        6,  11,  14,  10,   8,  10,  14,  17,
+       14,  14,  14,  14,  17,  22,  19,  19,
+       19,  19,  19,  22,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+    chroma: [
+        7,   9,   9,  19,  12,  19,  34,  19,
+       19,  34,  20,  14,  14,  14,  20,  20,
+       14,  14,  14,  14,  20,  17,  12,  12,
+       12,  12,  12,  17,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+  },
+  // 1 file (Camera Raw 17.5)
+  dc1: {
+    weight: 1,
     luma: [
         1,   1,   1,   1,   1,   1,   2,   1,
         1,   2,   3,   2,   2,   2,   3,   3,
@@ -3931,7 +4015,9 @@ const EDITOR_QTABLES = {
         8,   8,   8,   8,   8,   8,   8,   8,
     ],
   },
-  q9: {
+  // 1 file (Camera Raw 15.4)
+  dc10: {
+    weight: 1,
     luma: [
        10,   7,   7,  11,   8,  11,  18,  10,
        10,  18,  22,  17,  14,  17,  22,  27,
@@ -3955,10 +4041,12 @@ const EDITOR_QTABLES = {
   },
 };
 
-/** One of the measured qualities, weighted toward the maximum as the exports were. */
+/** One of the measured tables, drawn as often as real exports use it. */
 function pickEditorQtable() {
-  const r = rnd();
-  return r < 0.5 ? EDITOR_QTABLES.q12 : r < 0.85 ? EDITOR_QTABLES.q11 : EDITOR_QTABLES.q9;
+  const list = Object.values(EDITOR_QTABLES);
+  let r = rnd() * list.reduce((n, t) => n + t.weight, 0);
+  for (const t of list) { r -= t.weight; if (r <= 0) return t; }
+  return list[0];
 }
 
 /**
@@ -3989,29 +4077,81 @@ const THUMB_QTABLE = {
 };
 
 /**
- * The exporter. Every 16.x release of Camera Raw shares the tables, profile
- * and APP14 measured below, so the version and platform are drawn per image:
- * a single fixed Software string on every file the tool produced was a
- * perfect key for grouping them.
+ * The exporter. Every release measured (Camera Raw 14.5 to 17.5, Lightroom
+ * 7.1.2 to 9.5.1) writes the same tables, profile and APP14, so the version and
+ * platform are drawn per image: a single fixed Software string on every file
+ * the tool produced was a perfect key for grouping them.
  */
 const { rnd } = __modules["rng"];
 const { md5 } = __modules["md5"];
 
-// Two Adobe identities were measured, both on XMP Core 7.0 and both writing
-// the same container: Camera Raw 16.x, which is how a raw file from a camera
-// body gets exported, and Lightroom 7.x, which is how a phone JPEG does.
-// Camera Raw writes 300 ppi, Lightroom 240.
-const ACR_VERSIONS = ['16.1', '16.2', '16.3', '16.3', '16.4', '16.5'];
-const LR_VERSIONS  = [['7.0', '16.0'], ['7.1.2', '16.1'], ['7.2', '16.2'], ['7.3', '16.3'], ['7.4', '16.4'], ['7.5', '16.5']];
-function pickEditor(kind = 'acr') {
-  const platform = rnd() < 0.6 ? 'Windows' : 'Macintosh';
+// Two Adobe identities, both on XMP Core 7.0, process version 15.4, and the
+// same container: Camera Raw, which is how a raw file from a camera body gets
+// exported, and Lightroom (desktop), which is how a phone JPEG does. Camera Raw
+// writes 300 ppi, Lightroom 240.
+//
+// The versions are the ones seen in real exports on Wikimedia Commons
+// (5,248 files from 169 uploaders, measured 2026-10-17), each with the
+// earliest export date it was seen on, which is never before its release; no
+// version string here is invented. Lightroom M.N writes crs:Version (M+9).N,
+// measured on 7.1.2, 7.4.1, 7.5, 8.0, 8.2, 8.4, 9.3.2 and 9.4.1; patch
+// releases are listed only where their crs:Version was measured (9.5.1 writes
+// 18.5.1). Camera Raw writes its own version.
+//
+// Real exports run on the newest release available at the time about 85% of
+// the time and one minor release behind most of the rest, so the version is
+// chosen from the export date that way: a fixed old version on files dated
+// years after its successor shipped was a grouping key. This table has to be
+// extended as Adobe ships new releases, or new outputs drift behind again.
+const ACR_RELEASES = [
+  ['16.0', '2023-10-16'], ['16.2', '2024-03-03'], ['16.2.1', '2024-04-13'], ['16.3.1', '2024-06-15'],
+  ['16.4', '2024-07-11'], ['16.5', '2024-08-29'], ['17.0.1', '2024-12-10'], ['17.1', '2025-01-22'],
+  ['17.2', '2025-02-28'], ['17.3', '2025-04-29'], ['17.3.1', '2025-05-22'], ['17.4.1', '2025-07-04'],
+  ['17.5', '2025-08-29'], ['18.0', '2025-12-09'], ['18.3', '2026-06-01'], ['18.6', '2026-09-09'],
+].map(([version, date]) => ({ version, crsVersion: version, date: new Date(`${date}T00:00:00`) }));
+const LR_RELEASES = [
+  ['7.1.2', '16.1', '2024-01-02'], ['7.2', '16.2', '2024-02-28'], ['7.4.1', '16.4', '2024-08-23'],
+  ['7.5', '16.5', '2024-10-04'], ['8.0', '17.0', '2024-10-28'], ['8.1', '17.1', '2025-01-23'],
+  ['8.2', '17.2', '2025-03-12'], ['8.3', '17.3', '2025-04-23'], ['8.4', '17.4', '2025-06-23'],
+  ['8.5', '17.5', '2025-08-19'], ['9.0', '18.0', '2025-11-10'], ['9.1', '18.1', '2025-12-27'],
+  ['9.3.2', '18.3', '2026-06-01'], ['9.4', '18.4', '2026-06-21'], ['9.4.1', '18.4', '2026-07-08'],
+  ['9.5', '18.5', '2026-08-06'], ['9.5.1', '18.5.1', '2026-08-30'], ['9.6', '18.6', '2026-10-04'],
+].map(([version, crsVersion, date]) => ({ version, crsVersion, date: new Date(`${date}T00:00:00`) }));
+
+// Share of exports made on Windows, weighting every uploader equally:
+// Camera Raw 21%, Lightroom 36% (the rest Macintosh).
+const WINDOWS_SHARE = { acr: 0.21, lr: 0.36 };
+
+/** The earliest date an export by this editor can carry. */
+function earliestRelease(kind = 'acr') {
+  return (kind === 'lr' ? LR_RELEASES : ACR_RELEASES)[0].date;
+}
+
+/** The release in use at `when`: the newest one ~85%, one or two minor releases behind otherwise. */
+function releaseAt(list, when) {
+  const avail = list.filter(r => r.date <= when);
+  if (!avail.length) return list[0];
+  const groups = [];                       // consecutive releases sharing major.minor
+  for (const r of avail) {
+    const mm = r.version.split('.').slice(0, 2).join('.');
+    if (!groups.length || groups[groups.length - 1].mm !== mm) groups.push({ mm, rs: [] });
+    groups[groups.length - 1].rs.push(r);
+  }
+  const u = rnd();
+  const back = u < 0.85 ? 0 : u < 0.95 ? 1 : 2;
+  const g = groups[Math.max(0, groups.length - 1 - back)];
+  return g.rs[g.rs.length - 1];            // that minor's latest patch out by then
+}
+
+function pickEditor(kind = 'acr', when = new Date()) {
+  const platform = rnd() < (WINDOWS_SHARE[kind] ?? 0.3) ? 'Windows' : 'Macintosh';
   if (kind === 'lr') {
-    const [version, crsVersion] = LR_VERSIONS[Math.floor(rnd() * LR_VERSIONS.length)];
+    const { version, crsVersion } = releaseAt(LR_RELEASES, when);
     return { kind, version, crsVersion, platform, dpi: 240,
              software: `Adobe Lightroom ${version} (${platform})` };
   }
-  const version = ACR_VERSIONS[Math.floor(rnd() * ACR_VERSIONS.length)];
-  return { kind: 'acr', version, crsVersion: version, platform, dpi: 300,
+  const { version, crsVersion } = releaseAt(ACR_RELEASES, when);
+  return { kind: 'acr', version, crsVersion, platform, dpi: 300,
            software: `Adobe Photoshop Camera Raw ${version} (${platform})` };
 }
 const XMP_TOOLKIT = "Adobe XMP Core 7.0-c000 1.000000, 0000/00/00-00:00:00        ";
@@ -4097,7 +4237,13 @@ function xmpDate(d, offset, subsec) {
 
 const hex = (n) => Array.from({ length: n },
   () => '0123456789abcdef'[Math.floor(rnd() * 16)]).join('');
-const uuid = () => `${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`;
+// Document and instance IDs. Measured on real exports: on Macintosh every one
+// is an RFC 4122 version-4 UUID (27 of 27 files); on Windows the document and
+// instance IDs never are (12 of 12), while the DerivedFrom IDs, which name the
+// source file, are v4 for the document and mixed for the instance.
+const uuidV4 = () => `${hex(8)}-${hex(4)}-4${hex(3)}-${'89ab'[Math.floor(rnd() * 4)]}${hex(3)}-${hex(12)}`;
+const uuidPlain = () => `${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`;
+const uuidFor = (platform) => (platform === 'Macintosh' ? uuidV4() : uuidPlain());
 const xml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 const pickOne = (a) => a[Math.floor(rnd() * a.length)];
 const signed = (n) => (n > 0 ? `+${n}` : String(n));
@@ -4256,7 +4402,7 @@ const XMP_PADDING = '\n' + (' '.repeat(100) + '\n').repeat(40) + ' '.repeat(55) 
  */
 function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport, subsec,
                                  lens, editor, source, scene, aux = {} }) {
-  const id = uuid();
+  const id = uuidFor(editor.platform);
   const created  = xmpDate(capture, offsetCapture, subsec);
   const modified = xmpDate(exportAt, offsetExport);
   const original = hex(32).toUpperCase();
@@ -4297,7 +4443,7 @@ function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport, subsec
     : 'saved to new location';
   const derivedFrom = isRaw
     ? `   <xmpMM:DerivedFrom\n    stRef:documentID="${original}"\n    stRef:originalDocumentID="${original}"/>`
-    : `   <xmpMM:DerivedFrom\n    stRef:instanceID="xmp.iid:${uuid()}"\n    stRef:documentID="xmp.did:${uuid()}"\n    stRef:originalDocumentID="${original}"/>`;
+    : `   <xmpMM:DerivedFrom\n    stRef:instanceID="xmp.iid:${editor.platform === 'Macintosh' || rnd() < 0.4 ? uuidV4() : uuidPlain()}"\n    stRef:documentID="xmp.did:${uuidV4()}"\n    stRef:originalDocumentID="${original}"/>`;
   return `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="${XMP_TOOLKIT}">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
@@ -4409,7 +4555,7 @@ function xmpSegment(packet) {
   return seg;
 }
 
-;return { EDITOR_QTABLES, pickEditorQtable, THUMB_QTABLE, pickEditor, ADOBE_APP14, editorIcc, buildXmpPacket, buildPhotoshopApp13, xmpSegment };
+;return { EDITOR_QTABLES, pickEditorQtable, THUMB_QTABLE, earliestRelease, pickEditor, ADOBE_APP14, editorIcc, buildXmpPacket, buildPhotoshopApp13, xmpSegment };
 })();
 
 // ── js/helpers.js ─────────────────────────────────────────────────────
@@ -5802,6 +5948,11 @@ __modules["data"] = (function () {
  *   subsec      — SubSecTime digits, or 0 when the firmware writes none.
  *   raw         — for bodies, the raw file the export is converted from.
  *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution.
+ *   released    — when the model went on sale; a capture is never dated before it.
+ *   firmwareDate — when the firmware whose behaviour the entry reproduces was
+ *                 out: the version Canon writes into aux:Firmware, or the
+ *                 Samsung build that writes the marketing-name Model. A capture
+ *                 is never dated before it either.
  */
 
 const { pick } = __modules["helpers"];
@@ -5820,7 +5971,7 @@ const APPLE_LENSINFO_11 = [[807365, 524263], [17, 4], [9, 5], [12, 5]];
 
 const CAMERAS = [
   // ── Apple: HostComputer, SubjectArea, CompositeImage, continued-fraction rationals ──
-  { make:"Apple", model:"iPhone 15 Pro", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 15 Pro", released:"2023-09-22", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_15,
     lenses:[
@@ -5832,7 +5983,7 @@ const CAMERAS = [
     isos:[25,32,40,50,64,80,100,125,160,200,250,400,640,800,1000,1600,2500,3200],
     shutters:[[1,4000],[1,2000],[1,1215],[1,1000],[1,500],[1,364],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15],[1,8],[1,4]] },
 
-  { make:"Apple", model:"iPhone 14 Pro Max", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 14 Pro Max", released:"2022-09-16", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_15,
     lenses:[
@@ -5844,7 +5995,7 @@ const CAMERAS = [
     isos:[25,32,50,64,80,100,125,200,400,640,1600,2500],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,364],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15],[1,8]] },
 
-  { make:"Apple", model:"iPhone 13 Pro", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 13 Pro", released:"2021-09-24", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:[35, 1],
     lensInfo:APPLE_LENSINFO_13,
     lenses:[
@@ -5855,7 +6006,7 @@ const CAMERAS = [
     isos:[32,40,50,64,80,100,125,200,400,800,1600,2000],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15]] },
 
-  { make:"Apple", model:"iPhone 12", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 12", released:"2020-10-23", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_12,
     lenses:[
@@ -5865,7 +6016,7 @@ const CAMERAS = [
     isos:[32,40,50,64,80,100,125,200,400,640,800,1600],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15]] },
 
-  { make:"Apple", model:"iPhone 11", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 11", released:"2019-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'M', hpos:'cf',
     lensInfo:APPLE_LENSINFO_11,
     lenses:[
@@ -5876,7 +6027,7 @@ const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15]] },
 
   // ── Samsung Snapdragon S-series: marketing-name Model on current firmware, ImageUniqueID per sensor ──
-  { make:"samsung", model:"Galaxy S24 Ultra", sw:"S928BXXU4BYCG", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"Galaxy S24 Ultra", released:"2024-01-31", firmwareDate:"2025-03-01", sw:"S928BXXU4BYCG", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:false,
     lenses:[
       { equiv:13,  phys:2.2,  f:2.2, focalRat:[220, 100],  fRat:[220, 100], apex:[227, 100], id:"H12XSQE01PM", approx:true },
@@ -5887,7 +6038,7 @@ const CAMERAS = [
     isos:[25,32,40,50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200],
     shutters:[[1,5874],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15],[1,10]] },
 
-  { make:"samsung", model:"Galaxy S23+", sw:"S916BXXS7CXK6", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"Galaxy S23+", released:"2023-02-17", firmwareDate:"2024-11-01", sw:"S916BXXS7CXK6", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:false,
     lenses:[
       { equiv:13, phys:2.2, f:2.2, focalRat:[220, 100], fRat:[220, 100], apex:[227, 100], id:"F12XSQE01PM", approx:true },
@@ -5897,7 +6048,7 @@ const CAMERAS = [
     isos:[25,32,40,50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200],
     shutters:[[1,5874],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15]] },
 
-  { make:"samsung", model:"SM-G991B", sw:"G991BXXS9FWL9", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"SM-G991B", released:"2021-01-29", sw:"G991BXXS9FWL9", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:true,
     lenses:[
       { equiv:13, phys:1.8, f:2.2, focalRat:[180, 100], fRat:[220, 100], apex:[227, 100], id:"R12LLMF05VM", approx:true },
@@ -5909,7 +6060,7 @@ const CAMERAS = [
 
   // Exynos A54: a different writer (Android ExifInterface): 4-digit SubSecTime, no OffsetTime,
   // no ImageUniqueID, Contrast/Saturation/Sharpness, LightSource, GPSVersionID present.
-  { make:"samsung", model:"SM-A546B", sw:"A546BXXSHEZA3", type:"phone", writer:"samsungA", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"SM-A546B", released:"2023-03-24", sw:"A546BXXSHEZA3", type:"phone", writer:"samsungA", aspects:ASPECTS_PHONE,
     exifVersion:"0220", offset:'none', subsec:4, flash:true, altitude:true,
     lenses:[
       { equiv:13, phys:1.9,  f:2.2, focalRat:[190, 100], fRat:[220, 100], apex:[220, 100], approx:true },
@@ -5919,7 +6070,7 @@ const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1000],[1,602],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15]] },
 
   // ── Google: fixed-denominator rationals throughout, GPSVersionID first, CustomRendered 1 ──
-  { make:"Google", model:"Pixel 8 Pro", sw:"HDR+ 1.0.695519190zm", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4080,3072]],
+  { make:"Google", model:"Pixel 8 Pro", released:"2023-10-12", sw:"HDR+ 1.0.695519190zm", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4080,3072]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true,
     lenses:[
       { equiv:13,  phys:1.95, f:1.95, focalRat:[1950, 1000],  fRat:[195, 100], apex:[193, 100], model:"Pixel 8 Pro back camera 1.95mm f/1.95", approx:true },
@@ -5929,7 +6080,7 @@ const CAMERAS = [
     isos:[21,33,42,53,66,84,100,133,168,211,266,336,423,533,672,846,1066,1343,1692,2132,2686,3384],
     shutters:[[1,4000],[1,2000],[1,1300],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,30],[1,15]] },
 
-  { make:"Google", model:"Pixel 7a", sw:"HDR+ 1.0.748116481zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4624,3472]],
+  { make:"Google", model:"Pixel 7a", released:"2023-05-11", sw:"HDR+ 1.0.748116481zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4624,3472]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true,
     lenses:[
       { equiv:14, phys:1.835, f:2.2,  focalRat:[1835, 1000], fRat:[220, 100], apex:[228, 100], model:"Pixel 7a back camera 1.835mm f/2.2" },
@@ -5938,7 +6089,7 @@ const CAMERAS = [
     isos:[21,33,43,53,66,84,100,133,168,211,266,336,423,533,672,846,1066,1343,1692,2132,2686,3384],
     shutters:[[1,4000],[1,2000],[1,1300],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,30]] },
 
-  { make:"Google", model:"Pixel 6a", sw:"HDR+ 1.0.641377693zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
+  { make:"Google", model:"Pixel 6a", released:"2022-07-28", sw:"HDR+ 1.0.641377693zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true,
     lenses:[
       { equiv:13, phys:1.8,  f:2.2,  focalRat:[1800, 1000], fRat:[220, 100], apex:[228, 100], model:"Pixel 6a back camera 1.8mm f/2.2", approx:true },
@@ -5948,7 +6099,7 @@ const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1300],[1,1000],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,30]] },
 
   // ── OnePlus: Model "OnePlus 12", no Software, OffsetTimeOriginal only, SensingMethod 1, DigitalZoomRatio /10000 ──
-  { make:"OnePlus", model:"OnePlus 12", type:"phone", writer:"oneplus", aspects:ASPECTS_PHONE,
+  { make:"OnePlus", model:"OnePlus 12", released:"2024-01-23", type:"phone", writer:"oneplus", aspects:ASPECTS_PHONE,
     exifVersion:"0220", offset:'orig', subsec:3, flash:true,
     lenses:[
       { equiv:14, phys:2.2,  f:2.2, focalRat:[2200, 1000], fRat:[22, 10], apex:[227, 100], model:"OnePlus 12 back camera 2.2mm f/2.2", approx:true },
@@ -5959,7 +6110,7 @@ const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1000],[1,795],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15],[1,10],[1,8]] },
 
   // ── Xiaomi: Model is the device code, ExifVersion 0230, ISOSpeed with SensitivityType 3, LightSource 21, no LensModel ──
-  { make:"Xiaomi", model:"23127PN0CG", type:"phone", writer:"xiaomi", aspects:ASPECTS_PHONE,
+  { make:"Xiaomi", model:"23127PN0CG", released:"2024-02-25", type:"phone", writer:"xiaomi", aspects:ASPECTS_PHONE,
     exifVersion:"0230", offset:'two', subsec:3, flash:true,
     lenses:[
       { equiv:14, phys:2.2,  f:2.2, focalRat:[2200, 1000], fRat:[220, 100], apex:[227, 100], approx:true },
@@ -5970,7 +6121,7 @@ const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,329],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15],[1,10],[1,8]] },
 
   // ── Canon: no Software, APEX over 65536, LensInfo with 0/1 apertures, 12-digit serials ──
-  { make:"Canon", model:"Canon EOS R5", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
+  { make:"Canon", model:"Canon EOS R5", released:"2020-07-30", firmwareDate:"2023-10-17", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
     exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.8.2",
     raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
     sensor:{ px:[8192, 5464], inch:[1419, 947] },
@@ -5979,7 +6130,7 @@ const CAMERAS = [
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,30],[1,15],[1,8],[1,4],[1,2],[1,1],[2,1],[4,1]],
     focals:[24,35,50,85,100,135,200] },
 
-  { make:"Canon", model:"Canon EOS 5D Mark IV", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['EF'],
+  { make:"Canon", model:"Canon EOS 5D Mark IV", released:"2016-09-08", firmwareDate:"2021-06-14", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['EF'],
     exifVersion:"0230", offset:'none', subsec:2, flash:false, firmware:"1.3.3",
     raw:{ mime:'image/x-canon-cr2', ext:'CR2', prefix:'IMG_' },
     sensor:{ px:[6720, 4480], inch:[1419, 947] },
@@ -5988,7 +6139,7 @@ const CAMERAS = [
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,200],[1,125],[1,60],[1,30],[1,15],[1,8],[1,4]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"Canon", model:"Canon EOS 90D", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.6, mounts:['EF','EF-S'],
+  { make:"Canon", model:"Canon EOS 90D", released:"2019-09-26", firmwareDate:"2019-10-25", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.6, mounts:['EF','EF-S'],
     exifVersion:"0231", offset:'all', subsec:2, flash:true, firmware:"1.1.1",
     raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
     sensor:{ px:[6960, 4640], inch:[877, 585] },
@@ -5998,7 +6149,7 @@ const CAMERAS = [
     focals:[18,24,35,50,85,100] },
 
   // ── Nikon: exposure compensation in sixths, FocalPlane over 32768 per cm, CFAPattern, GainControl, 7-digit serials ──
-  { make:"NIKON CORPORATION", model:"NIKON Z 9", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
+  { make:"NIKON CORPORATION", model:"NIKON Z 9", released:"2021-12-24", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
     exifVersion:"0232", offset:'all', subsec:2, flash:false,
     raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
     sensor:{ px:[8256, 5504], cm:[3.59, 2.39] },
@@ -6007,7 +6158,7 @@ const CAMERAS = [
     shutters:[[1,32000],[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,160],[1,125],[1,60],[1,30],[1,15],[1,8]],
     focals:[24,35,50,85,105,200,400] },
 
-  { make:"NIKON CORPORATION", model:"NIKON D850", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['F'],
+  { make:"NIKON CORPORATION", model:"NIKON D850", released:"2017-09-07", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['F'],
     exifVersion:"0231", offset:'none', subsec:2, flash:false,
     raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
     sensor:{ px:[8256, 5504], cm:[3.59, 2.39] },
@@ -6017,7 +6168,7 @@ const CAMERAS = [
     focals:[24,35,50,85,135,200] },
 
   // The camera writes "NIKON Z 6_2"; Commons categorises it as "Z 6 II".
-  { make:"NIKON CORPORATION", model:"NIKON Z 6_2", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
+  { make:"NIKON CORPORATION", model:"NIKON Z 6_2", released:"2020-11-05", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
     exifVersion:"0231", offset:'all', subsec:2, flash:false,
     raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
     sensor:{ px:[6048, 4024], cm:[3.59, 2.39] },
@@ -6027,7 +6178,7 @@ const CAMERAS = [
     focals:[24,35,50,85,105] },
 
   // ── Sony: BrightnessValue over 2560, MaxApertureValue over 256, compensation in tenths, no serial in EXIF ──
-  { make:"SONY", model:"ILCE-7M4", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, modes:[[4608,3072]], crop:1.0, mounts:['E'],
+  { make:"SONY", model:"ILCE-7M4", released:"2021-12-17", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, modes:[[4608,3072]], crop:1.0, mounts:['E'],
     exifVersion:"0232", offset:'all', subsec:3, flash:false,
     raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
     sensor:{ px:[7008, 4672], cm:[3.56, 2.37] },
@@ -6036,7 +6187,7 @@ const CAMERAS = [
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,160],[1,125],[1,60],[1,30],[1,15],[1,8]],
     focals:[24,35,50,85,135,200] },
 
-  { make:"SONY", model:"ILCE-7RM5", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, crop:1.0, mounts:['E'],
+  { make:"SONY", model:"ILCE-7RM5", released:"2022-11-24", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, crop:1.0, mounts:['E'],
     exifVersion:"0232", offset:'all', subsec:3, flash:false,
     raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
     sensor:{ px:[9504, 6336], cm:[3.57, 2.38] },
@@ -6046,7 +6197,7 @@ const CAMERAS = [
     focals:[24,35,50,85,135] },
 
   // ── Fujifilm: everything over 100, SensitivityType 1 without an index, serials like 3B008051 ──
-  { make:"FUJIFILM", model:"X-T5", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
+  { make:"FUJIFILM", model:"X-T5", released:"2022-11-17", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
     exifVersion:"0232", offset:'all', subsec:0, flash:false,
     raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
     sensor:{ px:[7728, 5152], perCm:3289 },
@@ -6055,7 +6206,7 @@ const CAMERAS = [
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,400],[1,250],[1,125],[1,60],[1,34],[1,30],[1,15]],
     focals:[16,18,23,35,56,90] },
 
-  { make:"FUJIFILM", model:"X100VI", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:[], fixedLens:true,
+  { make:"FUJIFILM", model:"X100VI", released:"2024-02-28", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:[], fixedLens:true,
     exifVersion:"0232", offset:'all', subsec:2, flash:true,
     raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
     sensor:{ px:[7728, 5152], perCm:3289 },
@@ -6263,7 +6414,7 @@ const exifr = ((window.exifr && window.exifr.default) || window.exifr);
 const { ICONS } = __modules["icons"];
 const { pick, randInt, clamp, cryptoRandInt, jitterLocation, fmtDate, fmtGpsDate, wallClockToUtc, tzOffsetString, sunElevation, dmsToDec, dataUrlToBlob, fromRat, cleanExifStr, escapeHtml } = __modules["helpers"];
 const { CAMERAS, LOCATIONS, pickOptics } = __modules["data"];
-const { pickEditor } = __modules["provenance"];
+const { pickEditor, earliestRelease } = __modules["provenance"];
 const { rnd } = __modules["rng"];
 
 // ── EXIF Parsing ─────────────────────────────────────────────────
@@ -6582,21 +6733,92 @@ function apexBrightness(aperture, exposureSec, iso) {
 
 // ── Dates ────────────────────────────────────────────────────────
 
-function pickDates(originalDate) {
-  const anchor = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
-  let capture;
-  if (originalDate instanceof Date && !isNaN(originalDate)) {
-    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
-                       pickHour(), randInt(0, 59), randInt(0, 59));
-  } else {
-    capture = new Date(anchor - randInt(2, 700 * 24) * HOUR);
-    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
-  }
-  let exportAt = new Date(Math.min(anchor, capture.getTime() + randInt(2, 45 * 24) * HOUR));
-  exportAt.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
-  if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
+// The export dates are drawn from what real Adobe exports on Wikimedia Commons
+// show (4,688 files, 169 uploaders, every uploader weighted equally).
+
+// Capture-to-export delay, as quantiles in days: 40% are exported within a
+// day, half within two days, one in ten more than 110 days later and one in
+// twenty more than a year and a half later. Drawn by interpolating between
+// the quantiles on a log scale.
+const EXPORT_LAG_DAYS = [[0, 0.02], [0.05, 0.034], [0.1, 0.055], [0.2, 0.124], [0.3, 0.333],
+  [0.4, 0.918], [0.5, 2.014], [0.6, 3.206], [0.7, 8.076], [0.8, 25.87], [0.9, 111.1],
+  [0.95, 543.2], [0.99, 1770.8], [1, 2500]];
+function drawExportLagMs() {
+  const u = rnd();
+  let i = 1;
+  while (i < EXPORT_LAG_DAYS.length - 1 && EXPORT_LAG_DAYS[i][0] < u) i++;
+  const [q0, d0] = EXPORT_LAG_DAYS[i - 1], [q1, d1] = EXPORT_LAG_DAYS[i];
+  const t = (u - q0) / (q1 - q0);
+  return Math.exp(Math.log(d0) + t * (Math.log(d1) - Math.log(d0))) * DAY;
+}
+
+// Local hour of export, percent per hour 00-23; almost nothing between 04:00
+// and 08:00, a small floor kept there rather than none.
+const EXPORT_HOUR_WEIGHTS = [2.1, 1.8, 1.2, 0.9, 0.1, 0.1, 0.1, 0.1, 1.4, 4.1, 6.5, 5.1,
+                             2.9, 6.9, 4.0, 8.0, 8.9, 8.0, 5.2, 7.3, 5.1, 5.8, 8.1, 6.5];
+function pickExportHour() {
+  return Number(weightedPick(Object.fromEntries(EXPORT_HOUR_WEIGHTS.map((w, i) => [i, w]))));
+}
+
+/**
+ * The latest moment any date in the output may carry: a random one to ninety
+ * days in the past, so the newest date in an output does not say when the
+ * tool was run.
+ */
+const pickAnchor = () => Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
+
+/**
+ * Export and capture times for a generated photo. The export comes first: a
+ * day in the two years before the anchor, at a measured hour of the day. The
+ * capture is then the export minus a measured delay, at a measured hour of
+ * its own when the delay is a day or more. Drawn this way round, both the
+ * export hours and the delays match the real exports; drawing the capture
+ * first and rejecting exports past the anchor cut off the long delays.
+ */
+function pickTimes(anchor) {
+  const MIN = 30 * 60000;
+  const exportAt = new Date(anchor - rnd() * 700 * DAY);
+  exportAt.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
+  if (exportAt.getTime() > anchor) exportAt.setDate(exportAt.getDate() - 1);
+  const lag = drawExportLagMs();
+  let capture = new Date(exportAt.getTime() - lag);
+  // A delay of a day or more lands on an earlier calendar day, so re-drawing
+  // the hour keeps the capture before the export.
+  if (lag >= DAY) capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
+  if (exportAt.getTime() - capture.getTime() < MIN) capture = new Date(exportAt.getTime() - MIN - randInt(0, 3600) * 1000);
   return { capture, exportAt };
 }
+
+/** A capture on the kept original calendar day, at a drawn hour. */
+function keptCapture(originalDate) {
+  return new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
+                  pickHour(), randInt(0, 59), randInt(0, 59));
+}
+
+/**
+ * The export time for a kept original date: the capture plus a measured
+ * delay, at a measured hour of the day when the delay is a day or more, never
+ * before the editor's first release and never after the anchor. A capture too
+ * old for the editor is exported at some point between its first release and
+ * the anchor, as people re-export old photos.
+ */
+function pickExport(capture, anchor, earliest) {
+  const MIN = 30 * 60000;
+  for (let tries = 0; tries < 30; tries++) {
+    const lag = drawExportLagMs();
+    const t = new Date(capture.getTime() + lag);
+    if (lag >= DAY) t.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
+    if (t.getTime() >= capture.getTime() + MIN && t.getTime() <= anchor && t >= earliest) return t;
+  }
+  const lo = Math.max(capture.getTime() + MIN, earliest.getTime());
+  const hi = Math.max(lo, anchor);
+  return new Date(lo + rnd() * (hi - lo));
+}
+
+/** Whether this camera, and the firmware it reports, existed by `date`. */
+const existedBy = (cam, date) =>
+  new Date(`${cam.released}T00:00:00`) <= date &&
+  (!cam.firmwareDate || new Date(`${cam.firmwareDate}T00:00:00`) <= date);
 
 // ── Tag registration ─────────────────────────────────────────────
 
@@ -6659,15 +6881,34 @@ const hex = n => Array.from({ length: n }, () => '0123456789abcdef'[Math.floor(r
 function generateFake(options = {}) {
   const px = window.piexif;
   registerTags(px);
-  const cam = pick(CAMERAS);
+  // The capture comes first, so the camera can be one that existed by then.
+  // A kept original date older than every camera here (a photo from 2001)
+  // cannot be told consistently, so a fresh date is drawn instead and the
+  // caller is told (keepDateDropped).
+  const anchor = pickAnchor();
+  const kept = options.originalDate instanceof Date && !isNaN(options.originalDate) ? options.originalDate : null;
+  let capture = null, exportAt = null, pool = [], keepDateDropped = false;
+  if (kept) {
+    capture = keptCapture(kept);
+    pool = CAMERAS.filter(c => existedBy(c, capture));
+    if (!pool.length) keepDateDropped = true;
+  }
+  // A long measured delay can put the capture before every camera here; draw
+  // again until at least one existed.
+  for (let tries = 0; !pool.length && tries < 50; tries++) {
+    ({ capture, exportAt } = pickTimes(anchor));
+    pool = CAMERAS.filter(c => existedBy(c, capture));
+  }
+  const cam = pick(pool);
   const w   = WRITERS[cam.writer];
   const loc = jitterLocation(pick(LOCATIONS));
   const isBody = w.kind === 'body';
-  const editor = pickEditor(isBody ? 'acr' : 'lr');
+  const editorKind = isBody ? 'acr' : 'lr';
+  if (!exportAt) exportAt = pickExport(capture, anchor, earliestRelease(editorKind));
+  const editor = pickEditor(editorKind, exportAt);
 
   const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
 
-  const { capture, exportAt } = pickDates(options.originalDate);
   const utc          = wallClockToUtc(capture, loc.tz);
   const exportUtc    = wallClockToUtc(exportAt, loc.tz);
   const offsetString = tzOffsetString(utc, loc.tz);
@@ -6877,7 +7118,7 @@ function generateFake(options = {}) {
 
   return {
     display, piexif: p, cam, loc, iso, lens, editor,
-    capture, exportAt, offset: offsetString, exportOffset, subsec,
+    capture, exportAt, offset: offsetString, exportOffset, subsec, keepDateDropped,
     scene: scene.name, ev: Number(ev.toFixed(2)),
     lensMeta, source, aux,
   };
@@ -6912,10 +7153,10 @@ function phoneStem(cam, d, subsec) {
 function generateGraphic() {
   const px = window.piexif;
   registerTags(px);
-  const editor = pickEditor(rnd() < 0.5 ? 'acr' : 'lr');
   const anchor = Date.now() - randInt(1, 120) * DAY - Math.floor(rnd() * DAY);
   const exportAt = new Date(anchor);
-  exportAt.setHours(randInt(8, 23), randInt(0, 59), randInt(0, 59), 0);
+  exportAt.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
+  const editor = pickEditor(rnd() < 0.5 ? 'acr' : 'lr', exportAt);
   const capture = new Date(exportAt.getTime() - randInt(1, 600) * 60000);   // edited minutes to hours earlier
 
   const I = px.ImageIFD, E = px.ExifIFD;
@@ -7681,6 +7922,7 @@ async function processRandomizeItem(item, options = {}) {
     }
 
     const fake = generateFake({ originalDate });
+    item.keepDateDropped = !!fake.keepDateDropped;
     // Render the pixel container and wrap the Adobe metadata segments around it.
     const { verified, modDataUrl, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
     fake.display.PixelXDimension = width;
@@ -7710,6 +7952,8 @@ async function processRandomizeItem(item, options = {}) {
     const locTxt = item.fakeLocation?.city ? ` | ${item.fakeLocation.city}` : '';
     if (verified.warning) {
       showToast(`${verified.warning} Some sites strip metadata on upload.`, 'warning');
+    } else if (item.keepDateDropped && !quiet) {
+      showToast(`${item.file.name}: its original date is older than every camera the tool can name, so a new date was generated instead.`, 'warning');
     } else if (!quiet) {
       showToast(`Randomized ${item.file.name}${locTxt}`, 'info');
     }
@@ -7827,7 +8071,7 @@ const App = {
     S.busy = true;
     const run = S.run;
     const failed = [];
-    let photos = 0, cleaned = 0;
+    let photos = 0, cleaned = 0, dropped = 0;
     updateActionButtons();
 
     // Every image gets its own independent identity — camera, lens, city,
@@ -7842,6 +8086,7 @@ const App = {
           await processRandomizeItem(item, { deferRender: true, quiet: true });
           if (S.run !== run) { releaseProcessedResources(item); break; }
           if (item.inputClass?.isPhoto) photos++; else cleaned++;
+          if (item.keepDateDropped) dropped++;
           if ((photos + cleaned) % 4 === 0) {
             renderCurrentItem();
             await new Promise(resolve => setTimeout(resolve, 0));
@@ -7863,6 +8108,9 @@ const App = {
     if (parts.length) {
       const msg = parts.join(' and ');
       showToast(msg.charAt(0).toUpperCase() + msg.slice(1) + '.', 'success');
+    }
+    if (dropped) {
+      showToast(`${dropped} image${dropped === 1 ? ' has' : 's have'} an original date older than every camera the tool can name, so new dates were generated for ${dropped === 1 ? 'it' : 'them'}.`, 'warning');
     }
     if (failed.length) {
       showToast(`Could not process ${failed.length} file${failed.length === 1 ? '' : 's'}: ${failed.slice(0, 3).join('; ')}${failed.length > 3 ? '; …' : ''}`, 'error');

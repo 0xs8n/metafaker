@@ -446,6 +446,7 @@ async function processRandomizeItem(item, options = {}) {
     }
 
     const fake = generateFake({ originalDate });
+    item.keepDateDropped = !!fake.keepDateDropped;
     // Render the pixel container and wrap the Adobe metadata segments around it.
     const { verified, modDataUrl, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
     fake.display.PixelXDimension = width;
@@ -475,6 +476,8 @@ async function processRandomizeItem(item, options = {}) {
     const locTxt = item.fakeLocation?.city ? ` | ${item.fakeLocation.city}` : '';
     if (verified.warning) {
       showToast(`${verified.warning} Some sites strip metadata on upload.`, 'warning');
+    } else if (item.keepDateDropped && !quiet) {
+      showToast(`${item.file.name}: its original date is older than every camera the tool can name, so a new date was generated instead.`, 'warning');
     } else if (!quiet) {
       showToast(`Randomized ${item.file.name}${locTxt}`, 'info');
     }
@@ -592,7 +595,7 @@ export const App = {
     S.busy = true;
     const run = S.run;
     const failed = [];
-    let photos = 0, cleaned = 0;
+    let photos = 0, cleaned = 0, dropped = 0;
     updateActionButtons();
 
     // Every image gets its own independent identity — camera, lens, city,
@@ -607,6 +610,7 @@ export const App = {
           await processRandomizeItem(item, { deferRender: true, quiet: true });
           if (S.run !== run) { releaseProcessedResources(item); break; }
           if (item.inputClass?.isPhoto) photos++; else cleaned++;
+          if (item.keepDateDropped) dropped++;
           if ((photos + cleaned) % 4 === 0) {
             renderCurrentItem();
             await new Promise(resolve => setTimeout(resolve, 0));
@@ -628,6 +632,9 @@ export const App = {
     if (parts.length) {
       const msg = parts.join(' and ');
       showToast(msg.charAt(0).toUpperCase() + msg.slice(1) + '.', 'success');
+    }
+    if (dropped) {
+      showToast(`${dropped} image${dropped === 1 ? ' has' : 's have'} an original date older than every camera the tool can name, so new dates were generated for ${dropped === 1 ? 'it' : 'them'}.`, 'warning');
     }
     if (failed.length) {
       showToast(`Could not process ${failed.length} file${failed.length === 1 ? '' : 's'}: ${failed.slice(0, 3).join('; ')}${failed.length > 3 ? '; …' : ''}`, 'error');

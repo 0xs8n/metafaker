@@ -23,14 +23,24 @@
  */
 
 /**
- * Adobe's quantization tables, zigzag order, each read out of a real export.
- * Three quality settings were seen across seven measured Camera Raw and
- * Lightroom exports; drawing among them means the tool's output is not all
- * at one quality. `q12` is the maximum (four exports), `q11` the next step
- * (a Camera Raw 16.3 export), `q9` a lower Lightroom Classic export.
+ * Adobe's quantization tables, zigzag order, each read byte for byte out of a
+ * real export. Measured on 45 Camera Raw and Lightroom exports from Wikimedia
+ * Commons (2026-10-17): the six tables below are every table seen in clean
+ * desktop exports with Adobe's own layout (a restart interval, one Huffman
+ * segment, the APP14 marker, 4:4:4 chroma), weighted by how many files used
+ * each, so outputs spread over qualities as real exports do. The earlier
+ * version drew three of them in fixed shares, two of which are rare.
+ *
+ * Another layout also appears (no restart interval, four Huffman segments),
+ * but nearly always with a JFIF header and without Adobe's APP14 marker, which
+ * is what a file re-saved by another program after export looks like, not
+ * Adobe's own writer; it is not reproduced. Mobile Lightroom and 4:2:0 files
+ * are left out too, since the output is a desktop export at 4:4:4.
  */
 export const EDITOR_QTABLES = {
-  q12: {
+  // maximum quality; 9 files (Camera Raw 17.0.1, Lightroom 7.4.1 to 9.5.1)
+  max: {
+    weight: 9,
     luma: [
         1,   1,   1,   1,   1,   1,   1,   1,
         1,   1,   1,   1,   1,   1,   1,   1,
@@ -52,7 +62,81 @@ export const EDITOR_QTABLES = {
         3,   3,   3,   3,   3,   3,   3,   3,
     ],
   },
-  q11: {
+  // 7 files (Camera Raw 14.5 to 17.5, Lightroom 7.1.2 to 9.4.1)
+  dc2: {
+    weight: 7,
+    luma: [
+        2,   2,   2,   3,   2,   3,   4,   2,
+        2,   4,   5,   4,   3,   4,   5,   6,
+        5,   5,   5,   5,   6,   8,   7,   7,
+        7,   7,   7,   8,  11,   9,   9,   9,
+        9,   9,   9,  11,  11,  11,  11,  11,
+       11,  11,  11,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+    chroma: [
+        3,   3,   3,   7,   4,   7,  13,   7,
+        7,  13,  15,  13,  13,  13,  15,  15,
+       14,  14,  14,  14,  15,  15,  12,  12,
+       12,  12,  12,  15,  15,  12,  12,  12,
+       12,  12,  12,  15,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+  },
+  // 4 files (Camera Raw 17.2 and 17.3.1)
+  dc4: {
+    weight: 4,
+    luma: [
+        4,   3,   3,   4,   3,   4,   7,   4,
+        4,   7,   9,   7,   5,   7,   9,  11,
+        9,   9,   9,   9,  11,  14,  12,  12,
+       12,  12,  12,  14,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+    chroma: [
+        4,   6,   6,  12,   8,  12,  22,  12,
+       12,  22,  20,  14,  14,  14,  20,  20,
+       14,  14,  14,  14,  20,  17,  12,  12,
+       12,  12,  12,  17,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+  },
+  // 3 files (Camera Raw 15.3.1 and 17.5, Lightroom 8.4)
+  dc6: {
+    weight: 3,
+    luma: [
+        6,   4,   4,   7,   5,   7,  11,   6,
+        6,  11,  14,  10,   8,  10,  14,  17,
+       14,  14,  14,  14,  17,  22,  19,  19,
+       19,  19,  19,  22,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+    chroma: [
+        7,   9,   9,  19,  12,  19,  34,  19,
+       19,  34,  20,  14,  14,  14,  20,  20,
+       14,  14,  14,  14,  20,  17,  12,  12,
+       12,  12,  12,  17,  17,  12,  12,  12,
+       12,  12,  12,  17,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+       12,  12,  12,  12,  12,  12,  12,  12,
+    ],
+  },
+  // 1 file (Camera Raw 17.5)
+  dc1: {
+    weight: 1,
     luma: [
         1,   1,   1,   1,   1,   1,   2,   1,
         1,   2,   3,   2,   2,   2,   3,   3,
@@ -74,7 +158,9 @@ export const EDITOR_QTABLES = {
         8,   8,   8,   8,   8,   8,   8,   8,
     ],
   },
-  q9: {
+  // 1 file (Camera Raw 15.4)
+  dc10: {
+    weight: 1,
     luma: [
        10,   7,   7,  11,   8,  11,  18,  10,
        10,  18,  22,  17,  14,  17,  22,  27,
@@ -98,10 +184,12 @@ export const EDITOR_QTABLES = {
   },
 };
 
-/** One of the measured qualities, weighted toward the maximum as the exports were. */
+/** One of the measured tables, drawn as often as real exports use it. */
 export function pickEditorQtable() {
-  const r = rnd();
-  return r < 0.5 ? EDITOR_QTABLES.q12 : r < 0.85 ? EDITOR_QTABLES.q11 : EDITOR_QTABLES.q9;
+  const list = Object.values(EDITOR_QTABLES);
+  let r = rnd() * list.reduce((n, t) => n + t.weight, 0);
+  for (const t of list) { r -= t.weight; if (r <= 0) return t; }
+  return list[0];
 }
 
 /**
@@ -132,29 +220,81 @@ export const THUMB_QTABLE = {
 };
 
 /**
- * The exporter. Every 16.x release of Camera Raw shares the tables, profile
- * and APP14 measured below, so the version and platform are drawn per image:
- * a single fixed Software string on every file the tool produced was a
- * perfect key for grouping them.
+ * The exporter. Every release measured (Camera Raw 14.5 to 17.5, Lightroom
+ * 7.1.2 to 9.5.1) writes the same tables, profile and APP14, so the version and
+ * platform are drawn per image: a single fixed Software string on every file
+ * the tool produced was a perfect key for grouping them.
  */
 import { rnd } from './rng.js';
 import { md5 } from './md5.js';
 
-// Two Adobe identities were measured, both on XMP Core 7.0 and both writing
-// the same container: Camera Raw 16.x, which is how a raw file from a camera
-// body gets exported, and Lightroom 7.x, which is how a phone JPEG does.
-// Camera Raw writes 300 ppi, Lightroom 240.
-const ACR_VERSIONS = ['16.1', '16.2', '16.3', '16.3', '16.4', '16.5'];
-const LR_VERSIONS  = [['7.0', '16.0'], ['7.1.2', '16.1'], ['7.2', '16.2'], ['7.3', '16.3'], ['7.4', '16.4'], ['7.5', '16.5']];
-export function pickEditor(kind = 'acr') {
-  const platform = rnd() < 0.6 ? 'Windows' : 'Macintosh';
+// Two Adobe identities, both on XMP Core 7.0, process version 15.4, and the
+// same container: Camera Raw, which is how a raw file from a camera body gets
+// exported, and Lightroom (desktop), which is how a phone JPEG does. Camera Raw
+// writes 300 ppi, Lightroom 240.
+//
+// The versions are the ones seen in real exports on Wikimedia Commons
+// (5,248 files from 169 uploaders, measured 2026-10-17), each with the
+// earliest export date it was seen on, which is never before its release; no
+// version string here is invented. Lightroom M.N writes crs:Version (M+9).N,
+// measured on 7.1.2, 7.4.1, 7.5, 8.0, 8.2, 8.4, 9.3.2 and 9.4.1; patch
+// releases are listed only where their crs:Version was measured (9.5.1 writes
+// 18.5.1). Camera Raw writes its own version.
+//
+// Real exports run on the newest release available at the time about 85% of
+// the time and one minor release behind most of the rest, so the version is
+// chosen from the export date that way: a fixed old version on files dated
+// years after its successor shipped was a grouping key. This table has to be
+// extended as Adobe ships new releases, or new outputs drift behind again.
+const ACR_RELEASES = [
+  ['16.0', '2023-10-16'], ['16.2', '2024-03-03'], ['16.2.1', '2024-04-13'], ['16.3.1', '2024-06-15'],
+  ['16.4', '2024-07-11'], ['16.5', '2024-08-29'], ['17.0.1', '2024-12-10'], ['17.1', '2025-01-22'],
+  ['17.2', '2025-02-28'], ['17.3', '2025-04-29'], ['17.3.1', '2025-05-22'], ['17.4.1', '2025-07-04'],
+  ['17.5', '2025-08-29'], ['18.0', '2025-12-09'], ['18.3', '2026-06-01'], ['18.6', '2026-09-09'],
+].map(([version, date]) => ({ version, crsVersion: version, date: new Date(`${date}T00:00:00`) }));
+const LR_RELEASES = [
+  ['7.1.2', '16.1', '2024-01-02'], ['7.2', '16.2', '2024-02-28'], ['7.4.1', '16.4', '2024-08-23'],
+  ['7.5', '16.5', '2024-10-04'], ['8.0', '17.0', '2024-10-28'], ['8.1', '17.1', '2025-01-23'],
+  ['8.2', '17.2', '2025-03-12'], ['8.3', '17.3', '2025-04-23'], ['8.4', '17.4', '2025-06-23'],
+  ['8.5', '17.5', '2025-08-19'], ['9.0', '18.0', '2025-11-10'], ['9.1', '18.1', '2025-12-27'],
+  ['9.3.2', '18.3', '2026-06-01'], ['9.4', '18.4', '2026-06-21'], ['9.4.1', '18.4', '2026-07-08'],
+  ['9.5', '18.5', '2026-08-06'], ['9.5.1', '18.5.1', '2026-08-30'], ['9.6', '18.6', '2026-10-04'],
+].map(([version, crsVersion, date]) => ({ version, crsVersion, date: new Date(`${date}T00:00:00`) }));
+
+// Share of exports made on Windows, weighting every uploader equally:
+// Camera Raw 21%, Lightroom 36% (the rest Macintosh).
+const WINDOWS_SHARE = { acr: 0.21, lr: 0.36 };
+
+/** The earliest date an export by this editor can carry. */
+export function earliestRelease(kind = 'acr') {
+  return (kind === 'lr' ? LR_RELEASES : ACR_RELEASES)[0].date;
+}
+
+/** The release in use at `when`: the newest one ~85%, one or two minor releases behind otherwise. */
+function releaseAt(list, when) {
+  const avail = list.filter(r => r.date <= when);
+  if (!avail.length) return list[0];
+  const groups = [];                       // consecutive releases sharing major.minor
+  for (const r of avail) {
+    const mm = r.version.split('.').slice(0, 2).join('.');
+    if (!groups.length || groups[groups.length - 1].mm !== mm) groups.push({ mm, rs: [] });
+    groups[groups.length - 1].rs.push(r);
+  }
+  const u = rnd();
+  const back = u < 0.85 ? 0 : u < 0.95 ? 1 : 2;
+  const g = groups[Math.max(0, groups.length - 1 - back)];
+  return g.rs[g.rs.length - 1];            // that minor's latest patch out by then
+}
+
+export function pickEditor(kind = 'acr', when = new Date()) {
+  const platform = rnd() < (WINDOWS_SHARE[kind] ?? 0.3) ? 'Windows' : 'Macintosh';
   if (kind === 'lr') {
-    const [version, crsVersion] = LR_VERSIONS[Math.floor(rnd() * LR_VERSIONS.length)];
+    const { version, crsVersion } = releaseAt(LR_RELEASES, when);
     return { kind, version, crsVersion, platform, dpi: 240,
              software: `Adobe Lightroom ${version} (${platform})` };
   }
-  const version = ACR_VERSIONS[Math.floor(rnd() * ACR_VERSIONS.length)];
-  return { kind: 'acr', version, crsVersion: version, platform, dpi: 300,
+  const { version, crsVersion } = releaseAt(ACR_RELEASES, when);
+  return { kind: 'acr', version, crsVersion, platform, dpi: 300,
            software: `Adobe Photoshop Camera Raw ${version} (${platform})` };
 }
 const XMP_TOOLKIT = "Adobe XMP Core 7.0-c000 1.000000, 0000/00/00-00:00:00        ";
@@ -240,7 +380,13 @@ function xmpDate(d, offset, subsec) {
 
 const hex = (n) => Array.from({ length: n },
   () => '0123456789abcdef'[Math.floor(rnd() * 16)]).join('');
-const uuid = () => `${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`;
+// Document and instance IDs. Measured on real exports: on Macintosh every one
+// is an RFC 4122 version-4 UUID (27 of 27 files); on Windows the document and
+// instance IDs never are (12 of 12), while the DerivedFrom IDs, which name the
+// source file, are v4 for the document and mixed for the instance.
+const uuidV4 = () => `${hex(8)}-${hex(4)}-4${hex(3)}-${'89ab'[Math.floor(rnd() * 4)]}${hex(3)}-${hex(12)}`;
+const uuidPlain = () => `${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`;
+const uuidFor = (platform) => (platform === 'Macintosh' ? uuidV4() : uuidPlain());
 const xml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 const pickOne = (a) => a[Math.floor(rnd() * a.length)];
 const signed = (n) => (n > 0 ? `+${n}` : String(n));
@@ -399,7 +545,7 @@ const XMP_PADDING = '\n' + (' '.repeat(100) + '\n').repeat(40) + ' '.repeat(55) 
  */
 export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport, subsec,
                                  lens, editor, source, scene, aux = {} }) {
-  const id = uuid();
+  const id = uuidFor(editor.platform);
   const created  = xmpDate(capture, offsetCapture, subsec);
   const modified = xmpDate(exportAt, offsetExport);
   const original = hex(32).toUpperCase();
@@ -440,7 +586,7 @@ export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport,
     : 'saved to new location';
   const derivedFrom = isRaw
     ? `   <xmpMM:DerivedFrom\n    stRef:documentID="${original}"\n    stRef:originalDocumentID="${original}"/>`
-    : `   <xmpMM:DerivedFrom\n    stRef:instanceID="xmp.iid:${uuid()}"\n    stRef:documentID="xmp.did:${uuid()}"\n    stRef:originalDocumentID="${original}"/>`;
+    : `   <xmpMM:DerivedFrom\n    stRef:instanceID="xmp.iid:${editor.platform === 'Macintosh' || rnd() < 0.4 ? uuidV4() : uuidPlain()}"\n    stRef:documentID="xmp.did:${uuidV4()}"\n    stRef:originalDocumentID="${original}"/>`;
   return `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="${XMP_TOOLKIT}">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">

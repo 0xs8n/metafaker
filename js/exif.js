@@ -18,7 +18,7 @@ import {
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
 import { CAMERAS, LOCATIONS, pickOptics } from './data.js';
-import { pickEditor } from './provenance.js';
+import { pickEditor, earliestRelease } from './provenance.js';
 import { rnd } from './rng.js';
 
 // ── EXIF Parsing ─────────────────────────────────────────────────
@@ -337,21 +337,92 @@ function apexBrightness(aperture, exposureSec, iso) {
 
 // ── Dates ────────────────────────────────────────────────────────
 
-function pickDates(originalDate) {
-  const anchor = Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
-  let capture;
-  if (originalDate instanceof Date && !isNaN(originalDate)) {
-    capture = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
-                       pickHour(), randInt(0, 59), randInt(0, 59));
-  } else {
-    capture = new Date(anchor - randInt(2, 700 * 24) * HOUR);
-    capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
-  }
-  let exportAt = new Date(Math.min(anchor, capture.getTime() + randInt(2, 45 * 24) * HOUR));
-  exportAt.setHours(randInt(9, 23), randInt(0, 59), randInt(0, 59), 0);
-  if (exportAt.getTime() <= capture.getTime() + HOUR) exportAt = new Date(capture.getTime() + randInt(2, 8) * HOUR);
+// The export dates are drawn from what real Adobe exports on Wikimedia Commons
+// show (4,688 files, 169 uploaders, every uploader weighted equally).
+
+// Capture-to-export delay, as quantiles in days: 40% are exported within a
+// day, half within two days, one in ten more than 110 days later and one in
+// twenty more than a year and a half later. Drawn by interpolating between
+// the quantiles on a log scale.
+const EXPORT_LAG_DAYS = [[0, 0.02], [0.05, 0.034], [0.1, 0.055], [0.2, 0.124], [0.3, 0.333],
+  [0.4, 0.918], [0.5, 2.014], [0.6, 3.206], [0.7, 8.076], [0.8, 25.87], [0.9, 111.1],
+  [0.95, 543.2], [0.99, 1770.8], [1, 2500]];
+function drawExportLagMs() {
+  const u = rnd();
+  let i = 1;
+  while (i < EXPORT_LAG_DAYS.length - 1 && EXPORT_LAG_DAYS[i][0] < u) i++;
+  const [q0, d0] = EXPORT_LAG_DAYS[i - 1], [q1, d1] = EXPORT_LAG_DAYS[i];
+  const t = (u - q0) / (q1 - q0);
+  return Math.exp(Math.log(d0) + t * (Math.log(d1) - Math.log(d0))) * DAY;
+}
+
+// Local hour of export, percent per hour 00-23; almost nothing between 04:00
+// and 08:00, a small floor kept there rather than none.
+const EXPORT_HOUR_WEIGHTS = [2.1, 1.8, 1.2, 0.9, 0.1, 0.1, 0.1, 0.1, 1.4, 4.1, 6.5, 5.1,
+                             2.9, 6.9, 4.0, 8.0, 8.9, 8.0, 5.2, 7.3, 5.1, 5.8, 8.1, 6.5];
+function pickExportHour() {
+  return Number(weightedPick(Object.fromEntries(EXPORT_HOUR_WEIGHTS.map((w, i) => [i, w]))));
+}
+
+/**
+ * The latest moment any date in the output may carry: a random one to ninety
+ * days in the past, so the newest date in an output does not say when the
+ * tool was run.
+ */
+const pickAnchor = () => Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
+
+/**
+ * Export and capture times for a generated photo. The export comes first: a
+ * day in the two years before the anchor, at a measured hour of the day. The
+ * capture is then the export minus a measured delay, at a measured hour of
+ * its own when the delay is a day or more. Drawn this way round, both the
+ * export hours and the delays match the real exports; drawing the capture
+ * first and rejecting exports past the anchor cut off the long delays.
+ */
+function pickTimes(anchor) {
+  const MIN = 30 * 60000;
+  const exportAt = new Date(anchor - rnd() * 700 * DAY);
+  exportAt.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
+  if (exportAt.getTime() > anchor) exportAt.setDate(exportAt.getDate() - 1);
+  const lag = drawExportLagMs();
+  let capture = new Date(exportAt.getTime() - lag);
+  // A delay of a day or more lands on an earlier calendar day, so re-drawing
+  // the hour keeps the capture before the export.
+  if (lag >= DAY) capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
+  if (exportAt.getTime() - capture.getTime() < MIN) capture = new Date(exportAt.getTime() - MIN - randInt(0, 3600) * 1000);
   return { capture, exportAt };
 }
+
+/** A capture on the kept original calendar day, at a drawn hour. */
+function keptCapture(originalDate) {
+  return new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
+                  pickHour(), randInt(0, 59), randInt(0, 59));
+}
+
+/**
+ * The export time for a kept original date: the capture plus a measured
+ * delay, at a measured hour of the day when the delay is a day or more, never
+ * before the editor's first release and never after the anchor. A capture too
+ * old for the editor is exported at some point between its first release and
+ * the anchor, as people re-export old photos.
+ */
+function pickExport(capture, anchor, earliest) {
+  const MIN = 30 * 60000;
+  for (let tries = 0; tries < 30; tries++) {
+    const lag = drawExportLagMs();
+    const t = new Date(capture.getTime() + lag);
+    if (lag >= DAY) t.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
+    if (t.getTime() >= capture.getTime() + MIN && t.getTime() <= anchor && t >= earliest) return t;
+  }
+  const lo = Math.max(capture.getTime() + MIN, earliest.getTime());
+  const hi = Math.max(lo, anchor);
+  return new Date(lo + rnd() * (hi - lo));
+}
+
+/** Whether this camera, and the firmware it reports, existed by `date`. */
+const existedBy = (cam, date) =>
+  new Date(`${cam.released}T00:00:00`) <= date &&
+  (!cam.firmwareDate || new Date(`${cam.firmwareDate}T00:00:00`) <= date);
 
 // ── Tag registration ─────────────────────────────────────────────
 
@@ -414,15 +485,34 @@ const hex = n => Array.from({ length: n }, () => '0123456789abcdef'[Math.floor(r
 export function generateFake(options = {}) {
   const px = window.piexif;
   registerTags(px);
-  const cam = pick(CAMERAS);
+  // The capture comes first, so the camera can be one that existed by then.
+  // A kept original date older than every camera here (a photo from 2001)
+  // cannot be told consistently, so a fresh date is drawn instead and the
+  // caller is told (keepDateDropped).
+  const anchor = pickAnchor();
+  const kept = options.originalDate instanceof Date && !isNaN(options.originalDate) ? options.originalDate : null;
+  let capture = null, exportAt = null, pool = [], keepDateDropped = false;
+  if (kept) {
+    capture = keptCapture(kept);
+    pool = CAMERAS.filter(c => existedBy(c, capture));
+    if (!pool.length) keepDateDropped = true;
+  }
+  // A long measured delay can put the capture before every camera here; draw
+  // again until at least one existed.
+  for (let tries = 0; !pool.length && tries < 50; tries++) {
+    ({ capture, exportAt } = pickTimes(anchor));
+    pool = CAMERAS.filter(c => existedBy(c, capture));
+  }
+  const cam = pick(pool);
   const w   = WRITERS[cam.writer];
   const loc = jitterLocation(pick(LOCATIONS));
   const isBody = w.kind === 'body';
-  const editor = pickEditor(isBody ? 'acr' : 'lr');
+  const editorKind = isBody ? 'acr' : 'lr';
+  if (!exportAt) exportAt = pickExport(capture, anchor, earliestRelease(editorKind));
+  const editor = pickEditor(editorKind, exportAt);
 
   const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
 
-  const { capture, exportAt } = pickDates(options.originalDate);
   const utc          = wallClockToUtc(capture, loc.tz);
   const exportUtc    = wallClockToUtc(exportAt, loc.tz);
   const offsetString = tzOffsetString(utc, loc.tz);
@@ -632,7 +722,7 @@ export function generateFake(options = {}) {
 
   return {
     display, piexif: p, cam, loc, iso, lens, editor,
-    capture, exportAt, offset: offsetString, exportOffset, subsec,
+    capture, exportAt, offset: offsetString, exportOffset, subsec, keepDateDropped,
     scene: scene.name, ev: Number(ev.toFixed(2)),
     lensMeta, source, aux,
   };
@@ -667,10 +757,10 @@ function phoneStem(cam, d, subsec) {
 export function generateGraphic() {
   const px = window.piexif;
   registerTags(px);
-  const editor = pickEditor(rnd() < 0.5 ? 'acr' : 'lr');
   const anchor = Date.now() - randInt(1, 120) * DAY - Math.floor(rnd() * DAY);
   const exportAt = new Date(anchor);
-  exportAt.setHours(randInt(8, 23), randInt(0, 59), randInt(0, 59), 0);
+  exportAt.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
+  const editor = pickEditor(rnd() < 0.5 ? 'acr' : 'lr', exportAt);
   const capture = new Date(exportAt.getTime() - randInt(1, 600) * 60000);   // edited minutes to hours earlier
 
   const I = px.ImageIFD, E = px.ExifIFD;
