@@ -6,6 +6,8 @@ It is for anyone who wants to share a photo without also sharing where they live
 
 Everything runs locally in your browser. There is no backend, no upload step and no cloud storage, and the page makes **no network request at all** beyond loading its own files.
 
+**What it protects, and what it doesn't.** It removes everything a photo's metadata says about you — location, time, device, serial numbers, the original filename — and gives every image its own unrelated identity. It does **not** remove the camera's sensor pattern: a processed photo can still be matched to the specific camera that took it by anyone who has a reference fingerprint of that camera, built from the device itself or from enough of your other photos taken with it. If that matters to you, take sensitive photos with a different phone or camera from the one whose photos you post under your own name. The picture itself also still matches its original. Details and measurements are under [Threat model and limits](#threat-model-and-limits).
+
 ## Current behavior
 
 - Accepts multiple images from drag and drop or the file picker, decoded with
@@ -15,10 +17,17 @@ Everything runs locally in your browser. There is no backend, no upload step and
   reason rather than silently.
 - Tells a camera photo from a non-photo before generating any metadata. A
   screenshot or exported graphic never passed through a lens, so giving it a
-  camera, lens and GPS would make it inconsistent with what it is. Such
-  inputs are cleaned of any identifying metadata instead — either a plain strip
-  or an Adobe-exported graphic carrying editor provenance only, chosen at random
-  so they do not share one signature, and never a camera or a location.
+  camera, lens and GPS would make it inconsistent with what it is. The decision
+  uses the file's real format (read from its first bytes, not its name or
+  MIME type), transparency, and its content: screens and graphics are full of
+  perfectly uniform areas and sharp text edges on uniform backgrounds, which a
+  camera sensor's noise never produces. Calibrated on 298 real camera photos
+  and 26 real screenshots, each also as a messaging-app copy and as this tool's
+  own output: no photo variant was taken for a screenshot, and 94% of
+  screenshot variants were caught. Non-photos are cleaned of any identifying
+  metadata instead — either a plain strip or an Adobe-exported graphic
+  carrying editor provenance only, chosen at random so they do not share one
+  signature, and never a camera or a location.
 - Builds a local batch queue with previews and per-image state.
 - Parses original EXIF locally in the browser.
 - Re-encodes each processed image as a new JPEG through a privacy pipeline that removes identifying traces from the pixels, not only from the metadata.
@@ -79,7 +88,7 @@ The application is split into small browser modules:
 For each loaded file:
 
 1. The browser reads the input locally and creates an object URL for previewing.
-2. `exifr` parses the original metadata, and `js/classify.js` decides whether the input is a camera photo or a non-photo (a screenshot or exported graphic) from its format, its dimensions and whether it names a camera.
+2. `exifr` parses the original metadata, and `js/classify.js` decides whether the input is a camera photo or a non-photo (a screenshot or exported graphic) from whether it names a camera, its real format, transparency and its content.
 3. On `Randomize`, a photo gets a generated camera, lens, timestamps, exposure, location and editor identity from `generateFake()`, and the XMP packet is built from the same values. A non-photo is cleaned instead, as described above, and never given a camera or a location.
 4. The image goes through the canvas pipeline in `js/helpers.js` and is exported as a fresh JPEG with the exporter's container.
 5. `js/exif-writer.js` serialises the EXIF block and it is inserted into the JPEG.
@@ -93,13 +102,13 @@ The canvas export is not a plain re-encode. Each photo passes through these stag
 
 1. Proportional crop of up to 1.2% per edge, which shifts the sensor grid.
 2. Rotation of 0.3 to 2.0 degrees in either direction on about two images in three, with a scale factor that keeps the frame filled.
-3. Reshape onto a frame the generated camera can produce, landing on a native capture resolution when reachable. Otherwise the image is always downscaled, by 8 to 20% and to at most one of six long-edge sizes (2048 to 3200 pixels), even when it is already small. Resampling onto a new, smaller grid is the step that reliably breaks the sensor-pattern (PRNU) link between a photo and the camera that took it.
-4. A non-rigid warp: a smooth random displacement field of under two pixels, built from three low-frequency waves with random directions and phases, followed by a light denoise. This strengthens the sensor-pattern protection. A crop and rotation are one global transform, and a sensor-pattern match can be re-aligned through it by searching over scale and rotation; a field that varies across the frame has no single inverse, so every block is misaligned by its own fraction of a pixel and the whole-frame correlation weakens. Measured on its own, the warp is not enough (see the threat model below); the downscale in step 3 is what reliably breaks the link.
+3. Reshape onto a frame the generated camera can produce, then always downscale, by 8 to 20% and to at most one of six long-edge sizes (2048 to 3200 pixels), even when the image is already small. Resampling onto a smaller grid weakens the sensor-pattern (PRNU) link between the photo and the camera that took it, but does not break it; see the threat model.
+4. A non-rigid warp: a smooth random displacement field of under two pixels, built from three low-frequency waves with random directions and phases, followed by a light denoise. It is meant to weaken the sensor-pattern link further, since a field that varies across the frame has no single inverse to search for. Measured on real phones, its effect is small: the warp, denoise and fresh noise together cut the match score only about twofold.
 5. Per-brand colour profile: warmth, saturation and contrast matched to the generated make.
 6. ISP simulation: an anchored S-curve tone mapping on four images in five, and an unsharp mask of radius one or two pixels on three in four.
 7. Lens optics: radial vignetting on seven images in ten and sub-pixel chromatic aberration, in either direction, on three in five.
 8. Poisson-Gaussian sensor noise scaled to the generated ISO value, with the shot-to-read split and per-channel factors drawn per image.
-9. JPEG encode at quality 1.0 (the only setting at which the browser emits 4:4:4 chroma, which an export uses), then re-quantisation of the coefficients onto the exporter's measured tables, and rewriting of the container: the browser's JFIF and ICC segments are removed and the exporter's ICC profile, XMP packet and APP14 marker are written in its order.
+9. JPEG encode at quality 1.0 (the only setting at which the browser emits 4:4:4 chroma, which an export uses), then re-quantisation of the coefficients onto the exporter's measured tables, with rounding ties treated the same for both signs, and rewriting of the container: the browser's JFIF and ICC segments are removed and the exporter's ICC profile, XMP packet and APP14 marker are written in its order. (The re-quantiser used to round every tie the same way, which left one identical faint 8×8 pattern in every output, enough to tell them apart from real exports almost perfectly.)
 
 A non-photo (a screenshot or exported graphic) takes a light path: crop, downscale (capped at 1600 pixels on the long edge) and a clean re-encode in the same export container. It has no sensor and no lens, so sensor noise, lens effects or a warp would only make it less like what it is.
 
@@ -155,8 +164,10 @@ What this tool does and does not protect against, stated plainly, because the pe
 
 - **Metadata.** Everything the original carried is gone: Exif, XMP, IPTC, MakerNote, ICC, embedded thumbnails, trailers such as Samsung's and Google's motion-photo data, C2PA manifests. The output's metadata describes a camera, place and time that are not yours.
 - **Encoder fingerprints.** The browser's quantization tables, JFIF header and ICC profile are replaced with a real exporter's. Each output uses one of the exporter's measured tables and its ICC profile, as real Adobe exports do.
-- **Sensor pattern (PRNU).** Every camera sensor leaves a faint, unique noise pattern in its photos, which can link a photo to the specific camera that took it. The pipeline is built to break that link: it always downscales the image, which is the step that reliably breaks the correlation, and adds a non-rigid warp, a denoise and fresh noise on top. `tools/prnu.py` measures this against a synthetic sensor fingerprint. On an earlier version of the pipeline, which did not always downscale, the median correlation fell from about 56,700 to about 790, a drop of roughly 98.6%, but 7 of 10 processed images still exceeded the standard match threshold of 60. The pipeline was strengthened in response (the downscale made unconditional, the denoise made stronger), and that version has not yet been re-measured. Nothing has been measured against a real camera's sensor pattern. Treat this as strong protection, not a proven guarantee.
+- **Sensor pattern (PRNU): not removed.** Every camera sensor leaves a faint, unique noise pattern in its photos. Anyone with a reference fingerprint of your camera — built from the device itself, or from enough of your other photos taken with it — can check whether a processed photo came from it. Measured on real phones from the VISION dataset: all 22 processed outputs of an iPhone 6 still matched that phone (match scores 506 to 17,235, where 60 is the standard threshold; a second iPhone 6 of the same model scored at most 20), and so did 15 of the 16 matchable photos from a 12 MP Huawei P9. The downscale, warp, denoise and fresh noise weaken the pattern about twofold but do not remove it; offline, even shrinking to 0.3× left it matchable. Processed photos from the same phone can sometimes also be linked to each other without the phone (22 of 91 pairs in one test). **What protects you:** take sensitive photos with a different phone or camera from the one whose photos you post under your own name, or that could be taken from you.
 - **Machine-learning image-analysis models** (TruFor, Noiseprint++, CAT-Net and the like) have not been tested against this output. The pipeline reproduces the statistical traces of an ordinary camera photo, but no claim is made about how these models assess it.
+- **The picture itself matches its original.** The visible content is unchanged, so perceptual hashes and reverse image search will match a processed photo to its original and to other processed copies of it (median distance 2 to 6 bits out of 64). If the original was ever shared or uploaded anywhere, the processed version links to it. No tool can prevent this without changing the picture. Unrelated photos stay unrelated (about 30 of 64 bits apart).
+- **Recognisable as a group.** Analysed together, many outputs may still be told apart from ordinary photos. The strongest sign, a faint 8×8 pattern every output shared, is fixed (see step 9 of the pipeline): measured on real phone photos, a detector built on it went from separating outputs from real files almost perfectly (AUC 0.995) to 0.74, where 0.5 would be indistinguishable, so a weaker trace of unidentified origin remains. Other population-level differences found in the same evaluation remain and are being worked on: the claimed Camera Raw and Lightroom versions are older than real exports from the same dates, the added noise is more colourful than a real camera's, and fewer quantization tables are used than real exports show.
 - **Image content** is yours to check: faces, reflections, signage, documents, screen contents, and anything that contradicts the generated location or season.
 - **Downloads carry their origin.** Browsers record where a file came from in filesystem metadata outside the file (`Zone.Identifier` on Windows, quarantine and "where from" attributes on macOS). The file's bytes are clean; the download record is not. The offline single-file build opened from disk avoids the web origin.
 - **Linking across a batch.** Every image, in a batch or on its own, draws an independent identity, so the metadata gives no common device, place or date to link images to one another. Their content still can: the same scene, objects or people across several photos link them regardless of metadata.
@@ -167,7 +178,7 @@ What this tool does and does not protect against, stated plainly, because the pe
 node tools/check.js
 ```
 
-Launches headless Chrome, processes every image in `testimg/` plus a synthetic PNG screenshot, and asserts: the output's structure byte by byte (segment order, no JFIF, the Adobe thumbnails, a correct XMP byte-order mark, no browser strings anywhere in the file); that the page made no request to any host but the test server; that images randomized as a batch each get their own identity; that the screenshot is classified as a non-photo and given no camera, lens or location; and, when `exiftool` is installed, that each file produces only the validation warnings a real Adobe export does, that its GPS is inside the United States, that its dates, exposure and sun position are consistent, and that no browser-encoded data survives.
+Launches headless Chrome, processes every image in `testimg/` (synthetic images carrying sensor-like noise, since real photos cannot be redistributed here) plus a set of non-photo cases (a PNG screenshot, the same screenshot as JPEG, a PNG renamed `.jpg`, an SVG, a transparent WebP, and the tool's own screenshot output loaded again) and an extensionless JPEG with no MIME type, and asserts: the output's structure byte by byte (segment order, no JFIF, the Adobe thumbnails, a correct XMP byte-order mark, no browser strings anywhere in the file); that the page made no request to any host but the test server; that images randomized as a batch each get their own identity; that every non-photo case is classified as a non-photo and given no camera, lens or location, and that no camera photo is taken for a screenshot; that the input's filename appears nowhere in any output; and, when `exiftool` is installed, that each file produces only the validation warnings a real Adobe export does, that its GPS is inside the United States, that its dates, exposure and sun position are consistent, and that no browser-encoded data survives.
 
 `node tools/stress.js <inDir> <outDir>` runs both the randomize and strip paths over a folder of edge-case inputs (tiny, boundary and odd sizes, panoramas, grayscale/CMYK/progressive JPEG, WebP, RGBA and screenshot PNGs) and reports the classifier verdict and any failure per file. See `tools/README.md` for this and the offline pixel-domain measurements.
 

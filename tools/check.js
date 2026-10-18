@@ -488,20 +488,51 @@ async function processInBrowser(page, origin, names) {
     App.select(S.items[S.items.length - 1].id);
     await App.clear();
 
-    // A synthetic PNG screenshot at a laptop screen size: Randomize must not
-    // give it a camera; it must be classified non-photo and cleaned (a plain
-    // strip or an exported graphic, chosen at random).
-    const c = document.createElement('canvas');
-    c.width = 2560; c.height = 1600;
-    const cx = c.getContext('2d');
-    cx.fillStyle = '#1e293b'; cx.fillRect(0, 0, 2560, 1600);
-    cx.fillStyle = '#e2e8f0'; cx.fillRect(40, 40, 900, 60);
-    const pngBlob = await new Promise(res => c.toBlob(res, 'image/png'));
-    const shot = new File([pngBlob], 'screenshot.png', { type: 'image/png' });
-    await App.loadFiles([shot]);
-    const shotId = S.items[S.items.length - 1].id;
-    App.select(shotId);
-    await App.randomize();                     // should clean, not add a camera
+    // Non-photo cases: Randomize must classify each as a non-photo and clean
+    // it (a plain strip or an exported graphic, chosen at random), never give
+    // it a camera or a location. Each one is a way a non-photo used to slip
+    // through as a photo: decided by extension or MIME, by dimensions only, or
+    // by format only.
+    const drawScreen = (w, h) => {
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const cx = c.getContext('2d');
+      cx.fillStyle = '#1e293b'; cx.fillRect(0, 0, w, h);
+      cx.fillStyle = '#334155'; cx.fillRect(0, 0, w, 72);
+      cx.fillStyle = '#f8fafc'; cx.fillRect(Math.round(w * 0.2), 120, Math.round(w * 0.6), h - 240);
+      cx.fillStyle = '#0f172a'; cx.font = '28px sans-serif';
+      for (let y = 180; y < h - 160; y += 44) cx.fillText('The quick brown fox jumps over the lazy dog 0123456789', Math.round(w * 0.22), y);
+      cx.fillStyle = '#e2e8f0'; cx.font = 'bold 30px sans-serif'; cx.fillText('Inbox  Archive  Settings', 32, 46);
+      return c;
+    };
+    const toBlob = (c, type, q) => new Promise(res => c.toBlob(res, type, q));
+    const screen = drawScreen(2560, 1600);
+    const nonPhoto = new Map();   // id -> case name
+    const loadOne = async (file, label) => {
+      await App.loadFiles([file]);
+      const it = S.items[S.items.length - 1];
+      if (it.file !== file) return null;     // rejected at load
+      if (label) nonPhoto.set(it.id, label);
+      App.select(it.id);
+      await App.randomize();
+      return it;
+    };
+    const shotPng = await loadOne(new File([await toBlob(screen, 'image/png')], 'screen-capture.png', { type: 'image/png' }), 'PNG screenshot');
+    await loadOne(new File([await toBlob(screen, 'image/jpeg', 0.85)], 'screen-capture-shared.jpg', { type: 'image/jpeg' }), 'JPEG screenshot');
+    await loadOne(new File([await toBlob(screen, 'image/png')], 'renamed-png.jpg', { type: 'image/jpeg' }), 'PNG renamed .jpg');
+    const svg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"><rect width="800" height="600" fill="#2563eb"/><circle cx="400" cy="300" r="180" fill="#f8fafc"/></svg>';
+    await loadOne(new File([svg], 'vector-artwork.svg', { type: 'image/svg+xml' }), 'SVG graphic');
+    const alpha = document.createElement('canvas'); alpha.width = 900; alpha.height = 700;
+    const ax = alpha.getContext('2d'); ax.fillStyle = 'rgba(37,99,235,0.6)'; ax.beginPath(); ax.arc(450, 350, 300, 0, 7); ax.fill();
+    await loadOne(new File([await toBlob(alpha, 'image/webp', 0.9)], 'transparent-art.webp', { type: 'image/webp' }), 'WebP with transparency');
+    if (shotPng && shotPng.modBlob) {
+      await loadOne(new File([shotPng.modBlob], 'reprocessed-output.jpg', { type: 'image/jpeg' }), 'own screenshot output reloaded');
+    }
+    // A camera JPEG with no extension and no MIME type (how Windows Chrome
+    // hands over such files) must be accepted and treated as a photo.
+    const noExt = await toFile(names[0]);
+    const noExtItem = await loadOne(new File([noExt], 'no-extension-photo', { type: '' }), null);
+    const noExtId = noExtItem ? noExtItem.id : null;
 
     return S.items.map((it, i) => ({
       index: i,
@@ -509,9 +540,11 @@ async function processInBrowser(page, origin, names) {
       error: it.error,
       hasBlob: !!it.modBlob,
       size: it.modBlob ? it.modBlob.size : 0,
-      mode: it.id === shotId ? 'nonphoto' : (it.fakeExif ? 'randomized' : 'stripped'),
+      mode: nonPhoto.has(it.id) ? 'nonphoto' : (it.fakeExif ? 'randomized' : 'stripped'),
       isPhoto: it.inputClass ? it.inputClass.isPhoto : null,
-      isScreenshotCase: it.id === shotId,
+      reason: it.inputClass ? it.inputClass.reason : '',
+      nonPhotoCase: nonPhoto.get(it.id) || null,
+      noExtCase: it.id === noExtId,
       batch: batchIds.has(it.id),
       camera: it.fakeCamera ? `${it.fakeCamera.make} ${it.fakeCamera.model}` : '',
       city: it.fakeLocation ? it.fakeLocation.city : '',
@@ -534,13 +567,24 @@ async function processInBrowser(page, origin, names) {
       stems.every(s => typeof s === 'string' && s) && new Set(stems).size === stems.length, stems.join(','));
   }
 
-  // Screenshot: classified non-photo and cleaned by Randomize, not given a camera.
-  const shot = summary.find(it => it.isScreenshotCase);
-  if (shot) {
-    assert('(screenshot)', 'classify: PNG screenshot flagged non-photo', shot.isPhoto === false, `isPhoto=${shot.isPhoto}`);
-    assert('(screenshot)', 'classify: no camera or location on non-photo', !shot.camera && !shot.city, `camera=${shot.camera} city=${shot.city}`);
-  } else {
-    assert('(screenshot)', 'classify: screenshot case present', false, 'screenshot item missing');
+  // Non-photos: classified non-photo and cleaned by Randomize, never given a camera.
+  const EXPECTED_NON_PHOTO = ['PNG screenshot', 'JPEG screenshot', 'PNG renamed .jpg', 'SVG graphic',
+    'WebP with transparency', 'own screenshot output reloaded'];
+  for (const label of EXPECTED_NON_PHOTO) {
+    const it = summary.find(x => x.nonPhotoCase === label);
+    if (!assert(`(${label})`, 'classify: case loaded', !!it, 'item missing or rejected at load')) continue;
+    assert(`(${label})`, 'classify: flagged non-photo', it.isPhoto === false, `isPhoto=${it.isPhoto} (${it.reason})`);
+    assert(`(${label})`, 'classify: no camera or location', !it.camera && !it.city, `camera=${it.camera} city=${it.city}`);
+  }
+  // Real photos are not mistaken for screenshots by the content check.
+  const photosIn = summary.filter(x => !x.nonPhotoCase);
+  const misread = photosIn.filter(x => x.isPhoto === false);
+  assert('(photos)', 'classify: no camera photo taken for a screenshot', misread.length === 0,
+    misread.map(x => `${x.name}: ${x.reason}`).join(' | '));
+  const noExt = summary.find(x => x.noExtCase);
+  if (assert('(no extension)', 'load: extensionless JPEG with empty MIME accepted', !!noExt, 'rejected at load')) {
+    assert('(no extension)', 'classify: treated as a photo and randomized', noExt.isPhoto === true && !!noExt.camera,
+      `isPhoto=${noExt.isPhoto} camera=${noExt.camera}`);
   }
 
   // Pull blobs one at a time: a single returnByValue of all of them is too big.

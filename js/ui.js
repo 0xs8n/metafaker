@@ -15,7 +15,7 @@ import {
   generateFake, generateGraphic, readBackExifStrict,
   parseFileExif, renderMeta,
 } from './exif.js';
-import { classifyInput } from './classify.js';
+import { classifyInput, sniffFormat, measureContent } from './classify.js';
 import { ICONS } from './icons.js';
 
 /** Wrap a serialised TIFF block ("Exif\0\0" + data) as an APP1 segment. */
@@ -33,6 +33,8 @@ export const S = {
   activeId: null,
   tab: 'orig',
   fieldCounts: { orig: 0 },
+  busy: false,   // a batch run is in progress; actions that would race it are refused
+  run: 0,        // bumped by reset(), which cancels a running batch
 };
 
 function createItem(file) {
@@ -54,19 +56,28 @@ function createItem(file) {
   };
 }
 
-/** Read an image's pixel dimensions from its file, or {0,0} on failure. */
-function readDimensions(file) {
-  return new Promise(resolve => {
-    if (typeof createImageBitmap === 'function') {
-      createImageBitmap(file).then(bmp => {
-        const d = { width: bmp.width, height: bmp.height };
-        if (bmp.close) bmp.close();
-        resolve(d);
-      }).catch(() => resolve({ width: 0, height: 0 }));
-    } else {
-      resolve({ width: 0, height: 0 });
-    }
-  });
+/**
+ * Decode an image once to read its dimensions and the content signals the
+ * classifier uses. Resolves { width, height, content }; content is null when
+ * the browser cannot decode the file here (HEIC in Chrome, SVG).
+ */
+async function readImageInfo(file) {
+  if (typeof createImageBitmap !== 'function') return { width: 0, height: 0, content: null };
+  let bmp;
+  try { bmp = await createImageBitmap(file); } catch { return { width: 0, height: 0, content: null }; }
+  try {
+    let content = null;
+    try { content = measureContent(bmp); } catch { content = null; }
+    return { width: bmp.width, height: bmp.height, content };
+  } finally {
+    if (bmp.close) bmp.close();
+  }
+}
+
+/** The file's real format, from its first bytes. */
+async function readFormat(file) {
+  try { return sniffFormat(new Uint8Array(await file.slice(0, 1024).arrayBuffer())); }
+  catch { return 'unknown'; }
 }
 
 function getItem(id) {
@@ -212,9 +223,9 @@ function updateActionButtons() {
   const btnDownload = document.getElementById('btnDownload');
   const btnDownloadAll = document.getElementById('btnDownloadAll');
 
-  if (btnRandom) btnRandom.disabled = !hasCurrent || current.processing;
-  if (btnClear) btnClear.disabled = !hasCurrent || current.processing;
-  if (btnRandomAll) btnRandomAll.disabled = !S.items.length || anyProcessing;
+  if (btnRandom) btnRandom.disabled = S.busy || !hasCurrent || current.processing;
+  if (btnClear) btnClear.disabled = S.busy || !hasCurrent || current.processing;
+  if (btnRandomAll) btnRandomAll.disabled = S.busy || !S.items.length || anyProcessing;
   if (btnDownload) btnDownload.disabled = !hasOutput;
   if (btnDownloadAll) btnDownloadAll.disabled = !getProcessedItems().length;
 }
@@ -235,7 +246,7 @@ function renderActiveTab() {
 
   if (hasProcessedOutput(current) && !current.fakeExif) {
     const stripNote = (current.inputClass && !current.inputClass.isPhoto)
-      ? `This looks like a screenshot, not a camera photo, so no camera details were added. Its metadata was removed instead.`
+      ? `This looks like ${current.inputClass.kind === 'graphic' ? 'a graphic' : 'a screenshot'}, not a camera photo, so no camera details were added. Its metadata was removed instead.`
       : `Metadata was stripped from this image.`;
     body.innerHTML = `<div class="no-meta"><div class="no-meta-icon">${ICONS.clean}</div><p>${escapeHtml(stripNote)}</p></div>`;
     S.fieldCounts.orig = 0;
@@ -286,15 +297,18 @@ function renderCurrentItem() {
   renderActiveTab();
 }
 
-async function hydrateItem(file) {
+async function hydrateItem(file, format) {
   const item = createItem(file);
   item.processing = true;
+  item.format = format;
   item.origExif = await parseFileExif(file);
-  const dims = await readDimensions(file);
-  item.inputClass = classifyInput({ type: file.type, exif: item.origExif, width: dims.width, height: dims.height });
+  const info = await readImageInfo(file);
+  item.inputClass = classifyInput({ format, exif: item.origExif, content: info.content });
   item.processing = false;
   return item;
 }
+
+const IMAGE_FORMATS = new Set(['jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'tiff', 'avif', 'heic', 'svg']);
 
 async function ensureBlob(item) {
   if (item.modBlob) return item.modBlob;
@@ -392,7 +406,9 @@ async function processGraphicItem(item, options = {}) {
 }
 
 async function processRandomizeItem(item, options = {}) {
-  const { deferRender = false } = options;
+  // quiet: a batch reports once at the end instead of per image, so its
+  // summary is not buried under one notice per file.
+  const { deferRender = false, quiet = false } = options;
 
   // A screenshot or exported graphic never passed through a lens, so giving it
   // a camera, lens, exposure and GPS would make it inconsistent with what it
@@ -405,8 +421,11 @@ async function processRandomizeItem(item, options = {}) {
     // editor provenance only. Neither invents a camera, a lens or GPS.
     if (rnd() < 0.45) await processClearItem(item, { deferRender });
     else              await processGraphicItem(item, { deferRender });
-    const why = item.inputClass?.reason ? ` (${item.inputClass.reason})` : '';
-    showToast(`${item.file.name} looks like a screenshot, not a camera photo${why}. It was cleaned of camera, lens and location details rather than given new camera metadata.`, 'warning');
+    if (!quiet) {
+      const what = item.inputClass?.kind === 'graphic' ? 'a graphic' : 'a screenshot';
+      const why = item.inputClass?.reason ? ` (${item.inputClass.reason})` : '';
+      showToast(`${item.file.name} looks like ${what}, not a camera photo${why}. It was cleaned of camera, lens and location details rather than given new camera metadata.`, 'warning');
+    }
     return;
   }
 
@@ -456,7 +475,7 @@ async function processRandomizeItem(item, options = {}) {
     const locTxt = item.fakeLocation?.city ? ` | ${item.fakeLocation.city}` : '';
     if (verified.warning) {
       showToast(`${verified.warning} Some sites strip metadata on upload.`, 'warning');
-    } else {
+    } else if (!quiet) {
       showToast(`Randomized ${item.file.name}${locTxt}`, 'info');
     }
   } catch (e) {
@@ -511,11 +530,20 @@ async function processClearItem(item, options = {}) {
 
 export const App = {
   async loadFiles(filesLike) {
-    const files = Array.from(filesLike || []).filter(file => (file.type || '').startsWith('image/'));
-    if (!files.length) {
-      showToast('Select image files only.', 'warning');
-      return;
+    // Decide by the file's bytes, not its MIME type: Windows Chrome reports no
+    // type at all for .heic files and for images without an extension.
+    const all = Array.from(filesLike || []);
+    const files = [], skipped = [];
+    for (const file of all) {
+      const format = await readFormat(file);
+      if (IMAGE_FORMATS.has(format)) files.push({ file, format });
+      else skipped.push(file.name);
     }
+    if (skipped.length) {
+      const list = skipped.slice(0, 3).join(', ') + (skipped.length > 3 ? ` and ${skipped.length - 3} more` : '');
+      showToast(`Skipped ${skipped.length} file${skipped.length === 1 ? '' : 's'} that ${skipped.length === 1 ? 'is' : 'are'} not a supported image: ${list}.`, 'warning');
+    }
+    if (!files.length) return;
 
     const grid = document.getElementById('contentGrid');
     if (grid) grid.style.display = 'grid';
@@ -523,9 +551,9 @@ export const App = {
     let added = 0;
     const renderEvery = files.length > 20 ? 8 : files.length > 8 ? 4 : 1;
 
-    for (const file of files) {
+    for (const { file, format } of files) {
       try {
-        const item = await hydrateItem(file);
+        const item = await hydrateItem(file, format);
         S.items.push(item);
         S.activeId = item.id;
         added++;
@@ -550,7 +578,7 @@ export const App = {
 
   async randomize() {
     const item = getActiveItem();
-    if (!item) return;
+    if (!item || S.busy || item.processing) return;
     try {
       await processRandomizeItem(item);
       renderCurrentItem();
@@ -560,34 +588,55 @@ export const App = {
   },
 
   async randomizeAll() {
-    if (!S.items.length) return;
-    let completed = 0;
+    if (!S.items.length || S.busy) return;
+    S.busy = true;
+    const run = S.run;
+    const failed = [];
+    let photos = 0, cleaned = 0;
+    updateActionButtons();
 
     // Every image gets its own independent identity — camera, lens, city,
     // dates, filename — exactly as Randomize Current gives it, so images
     // processed together cannot be linked to each other through it.
-    for (const item of S.items) {
-      S.activeId = item.id;
-      if (completed === 0 || completed % 4 === 0) renderCurrentItem();
-      try {
-        await processRandomizeItem(item, { deferRender: true });
-        completed++;
-        if (completed % 4 === 0) {
-          renderCurrentItem();
-          await new Promise(resolve => setTimeout(resolve, 0));
+    try {
+      for (const item of [...S.items]) {
+        if (S.run !== run) break;                 // the queue was cleared
+        S.activeId = item.id;
+        if (photos + cleaned === 0 || (photos + cleaned) % 4 === 0) renderCurrentItem();
+        try {
+          await processRandomizeItem(item, { deferRender: true, quiet: true });
+          if (S.run !== run) { releaseProcessedResources(item); break; }
+          if (item.inputClass?.isPhoto) photos++; else cleaned++;
+          if ((photos + cleaned) % 4 === 0) {
+            renderCurrentItem();
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
+        } catch (e) {
+          if (S.run !== run) break;
+          failed.push(`${item.file.name} (${e.message})`);
         }
-      } catch (e) {
-        showToast(`Batch failed for ${item.file.name}: ${e.message}`, 'error');
       }
+    } finally {
+      S.busy = false;
     }
+    if (S.run !== run) return;
 
     renderCurrentItem();
-    showToast(`Randomized ${completed} image${completed === 1 ? '' : 's'} in the batch.`, 'success');
+    const parts = [];
+    if (photos) parts.push(`randomized ${photos} photo${photos === 1 ? '' : 's'}`);
+    if (cleaned) parts.push(`cleaned ${cleaned} screenshot${cleaned === 1 ? '' : 's'} or graphic${cleaned === 1 ? '' : 's'} without adding a camera`);
+    if (parts.length) {
+      const msg = parts.join(' and ');
+      showToast(msg.charAt(0).toUpperCase() + msg.slice(1) + '.', 'success');
+    }
+    if (failed.length) {
+      showToast(`Could not process ${failed.length} file${failed.length === 1 ? '' : 's'}: ${failed.slice(0, 3).join('; ')}${failed.length > 3 ? '; …' : ''}`, 'error');
+    }
   },
 
   async clear() {
     const item = getActiveItem();
-    if (!item) return;
+    if (!item || S.busy || item.processing) return;
     try {
       await processClearItem(item);
       renderCurrentItem();
@@ -632,6 +681,8 @@ export const App = {
   },
 
   reset() {
+    S.run++;          // stops a running batch before its next image
+    S.busy = false;
     S.items.forEach(item => {
       releaseItemResources(item);
       releaseProcessedResources(item);

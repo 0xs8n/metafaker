@@ -318,7 +318,14 @@ export function requantize(data, target, opts = {}) {
     if (!sq || !dq) return null;
     for (let k = 0; k < 64; k++) {
       if (blk[k] === 0) continue;
-      blk[k] = Math.round((blk[k] * sq[k]) / dq[k]);
+      // Round half away from zero, the same for both signs. With the
+      // browser's fine quality-1.0 tables, exact .5 ties are common, and
+      // Math.round sent every one toward +infinity: that left one identical
+      // 8x8 pattern in every output, enough to recognise them as a group
+      // (AUC 0.995 against real files; 0.74 with this rounding, measured on
+      // real phone photos). Breaking ties at random measured no better.
+      const v = (blk[k] * sq[k]) / dq[k];
+      blk[k] = Math.sign(v) * Math.round(Math.abs(v));
     }
   }
 

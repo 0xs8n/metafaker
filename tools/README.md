@@ -82,10 +82,14 @@ protocol plumbing is shared in `tools/lib/cdp.js`.
 
     node tools/check.js
 
-Serves the repo on `127.0.0.1`, loads every `testimg/*.jpg`, puts the first
-three through Randomize Entire Batch and the rest through Randomize one by one,
-strips one extra copy of the first image, and randomizes a synthetic PNG
-screenshot. Outputs go to `tools/out/` (git-ignored). Then it asserts:
+Serves the repo on `127.0.0.1`, loads every `testimg/*.jpg` (synthetic
+images carrying sensor-like noise), puts the first three through Randomize
+Entire Batch and the rest through Randomize one by one, and strips one extra
+copy of the first image. It then randomizes a set of non-photo cases (a PNG
+screenshot, the same screenshot as JPEG, a PNG renamed `.jpg`, an SVG, a
+transparent WebP, and the tool's own screenshot output loaded again) and an
+extensionless JPEG with no MIME type. Outputs go to `tools/out/`
+(git-ignored). Then it asserts:
 
 - **privacy** — every network request the page made went to `127.0.0.1`,
   `blob:` or `data:`; no uncaught exceptions, `console.error` calls or
@@ -98,9 +102,13 @@ screenshot. Outputs go to `tools/out/` (git-ignored). Then it asserts:
   APP1/APP2 at all. Nowhere in the file: `Google Inc`, `Skia`, `JFIF`,
   `Chrome`, `Mozilla`, or UTF-16BE `Google` / `Skia`.
 - **batch independence** — every batch image is randomized, the batch does
-  not share one camera and city, and each image has its own frame counter.
-- **non-photo** — the screenshot is classified as a non-photo and carries no
-  camera Make or Model, no lens and no GPS; any `Software` it names is Adobe.
+  not share one camera and city, and each image has its own generated
+  filename.
+- **classification** — every non-photo case is classified as a non-photo and
+  carries no camera Make or Model, no lens and no GPS (any `Software` it names
+  is Adobe); no camera photo is taken for a screenshot; the extensionless JPEG
+  is accepted and randomized as a photo.
+- **filename** — the input's filename appears nowhere in any output's bytes.
 - **exiftool** (when found on PATH or at the known Windows install path;
   otherwise SKIPPED) — `-validate` reports only the warnings a real Adobe
   export produces and no others; Make/Model present; Software is Adobe Camera
@@ -153,10 +161,12 @@ took it. `prnu-process.js` runs a folder of images through the real strip path
 fingerprint we control, stamps it into textured content, runs those through the
 pipeline, and measures the peak-to-correlation-energy against the estimated
 fingerprint before and after. Grounded in the shipped code rather than asserted.
-The result is reported in the README's threat model: on an earlier pipeline,
-the warp and denoise cut the median correlation by roughly 98.6% but 7 of 10
-images still matched, which is why the pipeline now always downscales. The
-strengthened pipeline has not yet been re-measured.
+On an earlier pipeline it found that 7 of 10 images still matched. The
+current pipeline was then measured against real phones instead of a synthetic
+fingerprint (VISION dataset: iPhone 6 and Huawei P9, maximum-likelihood
+fingerprints from flat-field shots): processed photos still match their camera
+(22 of 22 iPhone 6 outputs), and the downscale, warp, denoise and noise weaken
+the pattern only about twofold. The README's threat model reports the numbers.
 
 ### `build.js`
 

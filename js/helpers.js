@@ -434,16 +434,15 @@ export function applyISPSimulation(ctx, w, h) {
 /**
  * Non-rigid warp: a smooth, random displacement field of about a pixel.
  *
- * Part of the sensor-pattern (PRNU) protection. A crop and rotation are one
+ * Meant to weaken the sensor-pattern (PRNU) link. A crop and rotation are one
  * global transform, and a sensor-pattern match can be re-aligned through it by
- * searching over scale and rotation. A field that varies across the frame has
- * no single inverse to search for: every block is misaligned by its own
- * fraction of a pixel, which weakens the whole-frame correlation. Measured with
- * tools/prnu.py, the warp alone cuts the correlation sharply but does not
- * reliably break it; the downscale in the main pipeline is what does. The
- * displacement is a sum of three low-frequency waves with random directions,
- * wavelengths and phases, and a total amplitude under two pixels, so nothing
- * is visible.
+ * searching over scale and rotation; a field that varies across the frame has
+ * no single inverse. In practice its effect is small: the field's wavelengths
+ * (120-520 px) make it nearly a plain shift over any patch, and on real phones
+ * the warp, denoise and fresh noise together cut the match score only about
+ * twofold, far from breaking it. The displacement is a sum of three
+ * low-frequency waves with random directions, wavelengths and phases, and a
+ * total amplitude under two pixels, so nothing is visible.
  */
 export function applyWarp(ctx, w, h) {
   const id  = ctx.getImageData(0, 0, w, h);
@@ -824,8 +823,9 @@ export function normaliseAppSegments(dataUrl, opts = {}) {
  * from whatever image was loaded, not from the camera being claimed.
  *
  * Where the source is already close to one of the camera's frame shapes, it is
- * centre-cropped onto it, and if the camera's measured native resolution is
- * reachable without upscaling, the output lands on it exactly.
+ * centre-cropped onto it. The output is then always downscaled from there; it
+ * never lands on the camera's native resolution, because an export is normally
+ * smaller than native and every bit of downscaling weakens the sensor pattern.
  *
  * Where it is not close — a receipt at 0.34, a panorama at 3.75 — nothing is
  * done. Forcing those onto 9:16 would discard 40% and 65% of the picture
@@ -838,7 +838,7 @@ const MAX_CROP_TO_FIT = 0.20;   // 16:9 onto a 3:2 body costs 15.6%, which is a
 
 function snapToCameraFrame(x, y, w, h, cam) {
   const aspects = cam.aspects;
-  if (!aspects || !aspects.length) return { x, y, w, h, out: null };
+  if (!aspects || !aspects.length) return { x, y, w, h };
 
   const a = w / h;
   let best = null;
@@ -846,26 +846,14 @@ function snapToCameraFrame(x, y, w, h, cam) {
     const loss = 1 - Math.min(a, t) / Math.max(a, t);
     if (!best || loss < best.loss) best = { t, loss };
   }
-  if (best.loss > MAX_CROP_TO_FIT) return { x, y, w, h, out: null };
+  if (best.loss > MAX_CROP_TO_FIT) return { x, y, w, h };
 
   let nw = w, nh = h;
   if (a > best.t) nw = Math.round(h * best.t);
   else            nh = Math.round(w / best.t);
   const nx = x + Math.round((w - nw) / 2);
   const ny = y + Math.round((h - nh) / 2);
-
-  // Land on a real capture resolution when the source is big enough to get
-  // there by downscaling. Upscaling to reach it would add an inconsistency of
-  // its own.
-  let out = null;
-  for (const [mw0, mh0] of cam.modes || []) {
-    for (const [mw, mh] of [[mw0, mh0], [mh0, mw0]]) {
-      if (Math.abs(mw / mh - best.t) > 0.01) continue;
-      if (nw >= mw * 0.98 && nh >= mh * 0.98) { out = { width: mw, height: mh }; break; }
-    }
-    if (out) break;
-  }
-  return { x: nx, y: ny, w: nw, h: nh, out };
+  return { x: nx, y: ny, w: nw, h: nh };
 }
 
 /**
@@ -931,15 +919,13 @@ function privacyRender(img, cam = {}) {
     return { dataUrl: encodeExportPixels(ctx, c.width, c.height, minimal), width: c.width, height: c.height };
   }
 
-  // 3. Reshape to a frame the camera can produce, then size the output.
-  // A native capture resolution is used when reachable; otherwise a downscale
-  // is always applied, even to an already-small input. Resampling onto a new,
-  // smaller grid is the one transform that reliably breaks sensor-pattern
-  // (PRNU) correlation — it moves every photosite's noise off the lattice the
-  // camera's fingerprint lives on, so the photo can no longer be matched to the
-  // camera that took it. The crop, rotation and warp weaken that link; the
-  // downscale is what breaks it. 8–20% is invisible and well within the range
-  // an export resizes by.
+  // 3. Reshape to a frame the camera can produce, then size the output. A
+  // downscale is always applied, even to an already-small input: resampling
+  // onto a new, smaller grid moves every photosite's noise off the lattice the
+  // camera's sensor pattern (PRNU) lives on, which weakens the link between the
+  // photo and the camera. It does NOT break that link: measured on real phones
+  // (iPhone 6, Huawei P9), outputs at these scales still match the camera's
+  // fingerprint, and offline even a 0.3 scale did. See the README threat model.
   const frame = snapToCameraFrame(srcX, srcY, srcW, srcH, cam);
   const longest = Math.max(frame.w, frame.h);
   // Non-photos are capped at 1600 on the long edge. They keep the exporter's
@@ -948,7 +934,7 @@ function privacyRender(img, cam = {}) {
   // the renderer at quality 1.0, and no real screenshot needs more than 1600.
   const maxEdge = minimal ? Math.min(1600, Math.round(longest * (0.80 + rnd() * 0.12)))
                           : Math.min(randomMaxEdge(), Math.round(longest * (0.80 + rnd() * 0.12)));
-  const size = frame.out || getExportDimensions(frame.w, frame.h, maxEdge);
+  const size = getExportDimensions(frame.w, frame.h, maxEdge);
 
   const c   = document.createElement('canvas');
   c.width   = size.width;
