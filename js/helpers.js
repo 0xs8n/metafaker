@@ -228,6 +228,12 @@ export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
   else if (iso <= 800)  baseSigma = 1.3 + rnd() * 0.9;  // 1.3–2.2
   else if (iso <= 3200) baseSigma = 2.0 + rnd() * 1.5;  // 2.0–3.5
   else                  baseSigma = 3.0 + rnd() * 2.0;  // 3.0–5.0
+  // A camera body's sensor is many times a phone's, so at the same ISO its
+  // export is cleaner. Measured with tools/noise.py against plain downscales
+  // of the same inputs, the body outputs carried about 0.4 levels more
+  // luminance noise than the reference without this factor, and 0.12 less
+  // with 0.75.
+  if (cameraType === 'dslr') baseSigma *= 0.85;
 
   // Decompose into Poisson-Gaussian model: σ²(x) = a·x + b
   // The signal-dependent component gives the heteroscedastic structure real
@@ -239,39 +245,125 @@ export function addPixelNoise(ctx, w, h, iso = 100, cameraType = 'phone') {
   const shot = 0.03 + rnd() * 0.12;    // 3–15% signal-dependent
   const a    = shot * sig2 / 128;
   const b    = (1 - shot) * sig2;
-  const rbGain  = 1.1 + rnd() * 0.25;  // R/B shot noise relative to G
-  const gGain   = 0.75 + rnd() * 0.15;
-  const gRead   = 0.6 + rnd() * 0.25;
-  const chroma  = 0.1 + rnd() * 0.25;  // DSLR chroma noise fraction
+
+  // The noise is built the way it reaches a real export, not as three
+  // independent channels. Demosaicing spreads each photosite's sample across
+  // all three channels and its neighbours, and the raw converter's colour noise
+  // reduction (25 by default in Camera Raw and Lightroom) smooths away most of
+  // the chroma that is left. So the noise is a luminance field with a slight
+  // grain, plus a much weaker, smoother chroma field. Per-channel independent
+  // noise, which this used to add, is far more colourful than any real export.
+  const P = NOISE_SHAPE[cameraType] || NOISE_SHAPE.phone;
+  const grain   = P.grain[0]  + rnd() * (P.grain[1]  - P.grain[0]);
+  const chroma  = P.chroma[0] + rnd() * (P.chroma[1] - P.chroma[0]);
+  const cRadius = randInt(P.cRadius[0], P.cRadius[1]);
+  const crTilt  = 0.8 + rnd() * 0.4;   // Cr against Cb, as the sensor's R/B gains differ
+
+  // Chroma first, so its scratch buffer is gone before the luminance field and
+  // the pixels are allocated: at most three full-frame float fields at once.
+  const n  = w * h;
+  const cb = gaussField(n), cr = gaussField(n);
+  {
+    const tmp = new Float32Array(n);
+    smoothFieldBox(cb, w, h, cRadius, tmp);
+    smoothFieldBox(cr, w, h, cRadius, tmp);
+  }
+  const lum = gaussField(n);
+  smoothField3(lum, w, h, grain);
 
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
 
-  for (let i = 0; i < d.length; i += 4) {
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
     const r0 = d[i], g0 = d[i + 1], b0 = d[i + 2];
-
-    if (cameraType === 'phone') {
-      // Bayer CFA: 2 green, 1 red, 1 blue per 2×2 block.
-      // R/B have more shot noise than G (fewer photosites per unit area).
-      const sigmaR = Math.sqrt(a * rbGain * r0 + b);
-      const sigmaG = Math.sqrt(a * gGain * g0 + b * gRead);
-      const sigmaB = Math.sqrt(a * rbGain * b0 + b);
-      d[i]     = clamp(Math.round(r0 + gaussRand() * sigmaR), 0, 255);
-      d[i + 1] = clamp(Math.round(g0 + gaussRand() * sigmaG), 0, 255);
-      d[i + 2] = clamp(Math.round(b0 + gaussRand() * sigmaB), 0, 255);
-    } else {
-      // DSLR: luminance-dominant noise with small chroma component.
-      const luma  = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0;
-      const sigma = Math.sqrt(a * luma + b);
-      const lN    = gaussRand() * sigma;
-      const cN    = gaussRand() * sigma * chroma;
-      d[i]     = clamp(Math.round(r0 + lN + cN), 0, 255);
-      d[i + 1] = clamp(Math.round(g0 + lN),       0, 255);
-      d[i + 2] = clamp(Math.round(b0 + lN - cN), 0, 255);
-    }
+    const y0 = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
+    const sigma = Math.sqrt(a * y0 + b);
+    const dy  = lum[p] * sigma;
+    const dcb = cb[p] * sigma * chroma;
+    const dcr = cr[p] * sigma * chroma * crTilt;
+    d[i]     = clamp(Math.round(r0 + dy + 1.402 * dcr), 0, 255);
+    d[i + 1] = clamp(Math.round(g0 + dy - 0.344136 * dcb - 0.714136 * dcr), 0, 255);
+    d[i + 2] = clamp(Math.round(b0 + dy + 1.772 * dcb), 0, 255);
   }
 
   ctx.putImageData(id, 0, 0);
+}
+
+// Per camera type, the ranges each image's noise character is drawn from:
+// `grain` is the neighbour weight of the luminance field's 3x3 smoothing (0 is
+// per-pixel white noise), `chroma` the chroma field's RMS relative to the
+// luminance field's, and `cRadius` the box radius of the chroma smoothing.
+// Calibrated with tools/noise.py: outputs of real camera files and Adobe
+// exports against plain downscales of the same files (see tools/README.md).
+const NOISE_SHAPE = {
+  phone: { grain: [0.08, 0.30], chroma: [0.06, 0.24], cRadius: [1, 3] },
+  dslr:  { grain: [0.06, 0.28], chroma: [0.05, 0.20], cRadius: [1, 3] },
+};
+
+/** n independent standard normal draws. */
+function gaussField(n) {
+  const f = new Float32Array(n);
+  for (let i = 0; i < n; i++) f[i] = gaussRand();
+  return f;
+}
+
+/**
+ * Smooth a unit-variance white field in place with the separable kernel
+ * [k, 1, k] and rescale it back to unit variance. Edges clamp.
+ */
+function smoothField3(f, w, h, k) {
+  if (k <= 0) return;
+  const g = 1 / Math.sqrt(1 + 2 * k * k);   // per axis, [k,1,k] scales white-noise variance by 1+2k²
+  const row = new Float32Array(w);
+  for (let y = 0; y < h; y++) {
+    const o = y * w;
+    for (let x = 0; x < w; x++) row[x] = f[o + x];
+    for (let x = 0; x < w; x++) {
+      const l = row[x > 0 ? x - 1 : 0], r = row[x < w - 1 ? x + 1 : w - 1];
+      f[o + x] = (row[x] + k * (l + r)) * g;
+    }
+  }
+  const col = new Float32Array(h);
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) col[y] = f[y * w + x];
+    for (let y = 0; y < h; y++) {
+      const u = col[y > 0 ? y - 1 : 0], v = col[y < h - 1 ? y + 1 : h - 1];
+      f[y * w + x] = (col[y] + k * (u + v)) * g;
+    }
+  }
+}
+
+/**
+ * Smooth a unit-variance white field in place with two passes of a separable
+ * box of radius r (close to a Gaussian), and rescale it to unit variance.
+ */
+function smoothFieldBox(f, w, h, r, tmp) {
+  const m = 2 * r + 1;
+  for (let pass = 0; pass < 2; pass++) {
+    for (let y = 0; y < h; y++) {               // horizontal, f -> tmp
+      const o = y * w;
+      let s = 0;
+      for (let k = -r; k <= r; k++) s += f[o + clamp(k, 0, w - 1)];
+      for (let x = 0; x < w; x++) {
+        tmp[o + x] = s / m;
+        s += f[o + Math.min(x + r + 1, w - 1)] - f[o + Math.max(x - r, 0)];
+      }
+    }
+    for (let x = 0; x < w; x++) {               // vertical, tmp -> f
+      let s = 0;
+      for (let k = -r; k <= r; k++) s += tmp[clamp(k, 0, h - 1) * w + x];
+      for (let y = 0; y < h; y++) {
+        f[y * w + x] = s / m;
+        s += tmp[Math.min(y + r + 1, h - 1) * w + x] - tmp[Math.max(y - r, 0) * w + x];
+      }
+    }
+  }
+  // Variance of white noise after two box passes: sum of the squared weights
+  // of the triangular kernel they make, per axis, squared for two axes.
+  let ss = 0;
+  for (let t = -2 * r; t <= 2 * r; t++) { const c = (m - Math.abs(t)) / (m * m); ss += c * c; }
+  const g = 1 / ss;                             // = 1 / (per-axis variance)
+  for (let i = 0; i < f.length; i++) f[i] *= g;  // sqrt(g²) for the two axes
 }
 
 // ── Camera colour science ────────────────────────────────────────
@@ -310,6 +402,13 @@ export function applyCameraColorProfile(ctx, w, h, make) {
 
   const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
+  // The saturation change is taken from a smoothed copy, so it reaches the
+  // picture's colours but not its fine chroma grain. Boosting every pixel's
+  // chroma also boosted the photo's colour noise: measured with
+  // tools/noise.py, a 1.15 boost raised the chroma-to-luminance noise ratio by
+  // about 0.06, which made the phone outputs more colourful than real exports.
+  const smooth = satScale !== 1 ? boxBlurRGB(d, w, h, 2) : null;
+  const satAdd = satScale - 1;
 
   for (let i = 0; i < d.length; i += 4) {
     let r = d[i], g = d[i + 1], b = d[i + 2];
@@ -323,11 +422,16 @@ export function applyCameraColorProfile(ctx, w, h, make) {
     r = clamp(Math.round(r + warmth), 0, 255);
     b = clamp(Math.round(b - warmth), 0, 255);
 
-    // Luminance-preserving saturation
-    const lum = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
-    r = clamp(Math.round(lum + (r - lum) * satScale), 0, 255);
-    g = clamp(Math.round(lum + (g - lum) * satScale), 0, 255);
-    b = clamp(Math.round(lum + (b - lum) * satScale), 0, 255);
+    // Luminance-preserving saturation of the low-frequency colour: the
+    // smoothed copy's chroma after the same contrast and warmth (the constant
+    // part of the contrast cancels out of a chroma difference).
+    if (smooth) {
+      const sr = smooth[i] * contrast + warmth, sg = smooth[i + 1] * contrast, sb = smooth[i + 2] * contrast - warmth;
+      const sl = 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
+      r = clamp(Math.round(r + (sr - sl) * satAdd), 0, 255);
+      g = clamp(Math.round(g + (sg - sl) * satAdd), 0, 255);
+      b = clamp(Math.round(b + (sb - sl) * satAdd), 0, 255);
+    }
 
     d[i] = r; d[i + 1] = g; d[i + 2] = b;
   }
@@ -538,13 +642,19 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
     ? 0.015 + rnd() * 0.035  // ~2–7% corner darkening
     : 0.020 + rnd() * 0.045; // ~3–9% corner darkening
 
-  const diagonal = Math.sqrt(w * w + h * h);
-  // Red outward is the common direction, but corrected and over-corrected
-  // lenses fringe the other way, so the sign is drawn too.
+  // Lateral CA is what is left after correction: phones correct it in the
+  // image processor and Camera Raw's profiles remove most of the rest, so the
+  // residual is a fraction of a pixel at the corner. It used to be drawn as
+  // 0.03–0.08% of the diagonal (up to about 3 px) and applied with whole-pixel
+  // rounding, which misregistered the colour channels across the whole frame:
+  // measured with tools/noise.py, that alone raised the chroma-to-luminance
+  // noise ratio by about 0.5 on the images it touched. Red outward is the
+  // common direction, but over-corrected lenses fringe the other way, so the
+  // sign is drawn too.
   const caSign   = rnd() < 0.7 ? 1 : -1;
   const caMax    = !doCA ? 0 : caSign * (cameraType === 'dslr'
-    ? (0.00015 + rnd() * 0.00035) * diagonal
-    : (0.0003  + rnd() * 0.0005)  * diagonal);
+    ? 0.08 + rnd() * 0.27     // px at the corner
+    : 0.10 + rnd() * 0.35);
 
   const cx   = w / 2;
   const cy   = h / 2;
@@ -579,15 +689,11 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
         const normDX = dx / dist;
         const normDY = dy / dist;
 
-        // Red shifts outward; blue shifts inward toward centre.
-        const rX = clamp(Math.round(x + normDX * shift), 0, w - 1);
-        const rY = clamp(Math.round(y + normDY * shift), 0, h - 1);
-        const bX = clamp(Math.round(x - normDX * shift), 0, w - 1);
-        const bY = clamp(Math.round(y - normDY * shift), 0, h - 1);
-
-        d[i]     = clamp(Math.round(rBuf[rY * w + rX] * vign), 0, 255);
-        d[i + 1] = clamp(Math.round(gBuf[p]           * vign), 0, 255);
-        d[i + 2] = clamp(Math.round(bBuf[bY * w + bX] * vign), 0, 255);
+        // Red shifts outward; blue shifts inward toward centre. Sampled
+        // bilinearly: the shift is sub-pixel.
+        d[i]     = clamp(Math.round(sampleBilinear(rBuf, w, h, x + normDX * shift, y + normDY * shift) * vign), 0, 255);
+        d[i + 1] = clamp(Math.round(gBuf[p] * vign), 0, 255);
+        d[i + 2] = clamp(Math.round(sampleBilinear(bBuf, w, h, x - normDX * shift, y - normDY * shift) * vign), 0, 255);
       } else {
         d[i]     = clamp(Math.round(rBuf[p] * vign), 0, 255);
         d[i + 1] = clamp(Math.round(gBuf[p] * vign), 0, 255);
@@ -597,6 +703,17 @@ export function applyLensOpticalEffects(ctx, w, h, cam = {}) {
   }
 
   ctx.putImageData(id, 0, 0);
+}
+
+/** One channel buffer sampled at a fractional position, edges clamped. */
+function sampleBilinear(buf, w, h, fx, fy) {
+  fx = clamp(fx, 0, w - 1); fy = clamp(fy, 0, h - 1);
+  const x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const x1 = Math.min(x0 + 1, w - 1), y1 = Math.min(y0 + 1, h - 1);
+  const tx = fx - x0, ty = fy - y0;
+  const top = buf[y0 * w + x0] + (buf[y0 * w + x1] - buf[y0 * w + x0]) * tx;
+  const bot = buf[y1 * w + x0] + (buf[y1 * w + x1] - buf[y1 * w + x0]) * tx;
+  return top + (bot - top) * ty;
 }
 
 /**

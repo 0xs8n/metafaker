@@ -36,6 +36,23 @@ Note this reads as a *pass* for our output rather than a failure: the file
 presents as an editor export, and real exports are resized too, so they have no
 CFA trace either.
 
+## `noise.py`
+
+    python tools/noise.py a.jpg b.jpg ...
+    python tools/noise.py --summary a.jpg b.jpg ...
+
+Noise character on the flattest mid-tone 16x16 blocks of each image: the
+chroma-to-luminance ratio of the noise residual, the correlation between its R,
+G and B parts, its lag-1 autocorrelation (grain), and its luminance standard
+deviation. A real export's noise is mostly luminance, moves together across
+channels and has a slight grain. Compare an output against the same input
+downscaled plainly to the output's size and saved with the output's own
+quantization tables; against any other reference the tables alone shift the
+chroma figure. Measured 2026-10-18 on 44 Commons files: the phone outputs'
+chroma excess fell from +0.24 to +0.05 and the RGB-correlation gap from -0.26
+to -0.02 once the noise was rebuilt as a smoothed luminance field plus a weaker
+chroma field.
+
 ## `pipeline_sim.py`
 
     python tools/pipeline_sim.py photo.jpg
