@@ -143,6 +143,25 @@ function apexMicro(v) {
   return [Math.round(v * 1000000), 1000000];
 }
 
+/** FNumber as every Adobe export writes it: a decimal, 8/1, 56/10, 18/10 (for f/1.78). */
+function adobeFNumber(f) {
+  const tenths = Math.round(f * 10);
+  return tenths % 10 === 0 ? [tenths / 10, 1] : [tenths, 10];
+}
+
+/**
+ * A Canon lens's maximum aperture at the focal length used, as Camera Raw
+ * writes it: APEX on Canon's eighth-stop scale, as a decimal (3/1 for f/2.8,
+ * 175/100 for f/1.8, 5625/1000 for f/7.1). Measured on R5, R5 Mark II and
+ * R6 Mark II exports.
+ */
+function eighthStopAperture(f) {
+  const v = Math.round(2 * Math.log2(f) * 8) / 8;
+  if (Number.isInteger(v)) return [v, 1];
+  if (Number.isInteger(v * 100)) return [Math.round(v * 100), 100];
+  return [Math.round(v * 1000), 1000];
+}
+
 /** Lens specification rationals, "24/1 70/1 28/10 28/10" in the EXIF and XMP. */
 function specRat(v) {
   if (Number.isInteger(v)) return [v, 1];
@@ -166,11 +185,17 @@ function adobeGps(abs) {
 // export. Keyed by the `writer` field in data.js. Bodies (canon/nikon/sony/
 // fuji) export from a raw file through Camera Raw and keep the FocalPlane and
 // sensor-origin tags; phones export from a JPEG through Lightroom and do not.
+//
+// FNumber is not the camera's: every Adobe export measured rewrites it as a
+// decimal (f/1.78 as 18/10, f/5.6 as 56/10, f/8 as 8/1), so it is written that
+// way for every make. FocalLength keeps the camera's denominator, unreduced
+// (470/10 from a Nikon, 1590/100 from a Fujifilm). A DigitalZoomRatio array is
+// the value the firmware writes when no zoom was used, which the export keeps.
 
 const WRITERS = {
   apple: {
     kind: 'phone',
-    fnumber: 'lens', focal: 'lens',
+    focal: 'lens',
     expComp: 1, brightness: 'cf', maxAperture: null, sensitivity: null,
     flashOff: [16], flashFired: 25, metering: [5],
     lensTags: ['make', 'model', 'info'], lensMake: 'Apple',
@@ -179,25 +204,25 @@ const WRITERS = {
   },
   google: {
     kind: 'phone',
-    fnumber: 'lens', focal: 'lens',
-    expComp: 6, brightness: 100, maxAperture: 100, sensitivity: null,
+    focal: 'lens',
+    expComp: 6, brightness: 100, maxAperture: 'apex', sensitivity: null,
     flashOff: [16], flashFired: 1, metering: [2],
     lensTags: ['make', 'model'], lensMake: 'Google',
     gpsVersion: [2, 2, 0, 0], dirRef: 'M',
-    extras: { focalEquiv: true, digitalZoom: 'always', customRendered: 1, sensing: true, sceneType: true,
+    extras: { focalEquiv: true, digitalZoom: [0, 1], customRendered: 1, sensing: true, sceneType: true,
               contrast: true, subjectDistanceRange: true },
   },
   samsung: {
     kind: 'phone',
-    fnumber: 'lens', focal: 'lens',
+    focal: 'lens',
     expComp: 100, brightness: 100, maxAperture: 'apex', sensitivity: null,
     flashOff: [0], flashFired: 1, metering: [2],
     lensTags: [], gpsVersion: [2, 2, 0, 0], dirRef: 'M',
-    extras: { focalEquiv: true, digitalZoom: 'always' },
+    extras: { focalEquiv: true, digitalZoom: [100, 100] },
   },
   samsungA: {
     kind: 'phone',
-    fnumber: 'lens', focal: 'lens',
+    focal: 'lens',
     expComp: 10, brightness: 100, maxAperture: 'apex', sensitivity: null,
     flashOff: [0], flashFired: 1, metering: [2],
     lensTags: [], gpsVersion: [2, 2, 0, 0], dirRef: 'M',
@@ -206,7 +231,7 @@ const WRITERS = {
   },
   oneplus: {
     kind: 'phone',
-    fnumber: 'lens', focal: 'lens',
+    focal: 'lens',
     expComp: 6, brightness: 100, maxAperture: 'apex', sensitivity: null,
     flashOff: [16], flashFired: 1, metering: [2],
     lensTags: ['model'], lensMake: null,
@@ -215,7 +240,7 @@ const WRITERS = {
   },
   xiaomi: {
     kind: 'phone',
-    fnumber: 'lens', focal: 'lens',
+    focal: 'lens',
     expComp: 6, brightness: 100, maxAperture: 'apex', sensitivity: 3,
     flashOff: [16], flashFired: 1, metering: [2],
     lensTags: [], gpsVersion: null, dirRef: 'M',
@@ -223,8 +248,8 @@ const WRITERS = {
   },
   canon: {
     kind: 'body',
-    fnumber: 10, focal: 1,
-    expComp: 1, brightness: null, maxAperture: 'adobe100', sensitivity: 2,
+    focal: 1,
+    expComp: 1, brightness: null, maxAperture: 'eighth', sensitivity: 2,
     flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
     lensTags: ['info', 'model', 'serial'], lensMake: null, lensInfoApertureZero: true,
     gpsVersion: [2, 3, 0, 0], serial: 12,
@@ -232,28 +257,28 @@ const WRITERS = {
   },
   nikon: {
     kind: 'body',
-    fnumber: 100, focal: 10,
+    focal: 10,
     expComp: 6, brightness: null, maxAperture: null, sensitivity: 2,
     flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
     lensTags: ['info', 'model', 'make', 'serial'], lensMake: 'NIKON', lensAdobe: true,
     gpsVersion: [2, 3, 0, 0], serial: 7,
     extras: { focalPlane: true, focalPlaneUnit: 3, sensing: true, fileSource: true, sceneType: true,
               cfa: true, customRendered: 1, focalEquiv: true, gainControl: true, contrast: true,
-              subjectDistanceRange: true, serialNumber: true },
+              subjectDistanceRange: true, serialNumber: true, lightSource: 0 },
   },
   sony: {
     kind: 'body',
-    fnumber: 10, focal: 10,
+    focal: 10,
     expComp: 10, brightness: 2560, maxAperture: 256, sensitivity: 2,
     flashOff: [16], flashFired: 9, metering: [5, 5, 5, 2, 3],
     lensTags: ['info', 'model'], lensMake: null,
     gpsVersion: [2, 3, 0, 0],
     extras: { focalPlane: true, focalPlaneUnit: 3, fileSource: true, sceneType: true, customRendered: 0,
-              focalEquiv: true, digitalZoom: 'always', contrast: true, lightSource: 0 },
+              focalEquiv: true, digitalZoom: [16, 16], contrast: true, lightSource: 0 },
   },
   fuji: {
     kind: 'body',
-    fnumber: 100, focal: 100,
+    focal: 100,
     expComp: 100, brightness: 100, maxAperture: 100, sensitivity: 1,
     flashOff: [0], flashFired: 9, metering: [5, 5, 5, 2, 3],
     lensTags: ['info', 'model', 'make', 'serial'], lensMake: 'FUJIFILM',
@@ -424,6 +449,17 @@ const existedBy = (cam, date) =>
   new Date(`${cam.released}T00:00:00`) <= date &&
   (!cam.firmwareDate || new Date(`${cam.firmwareDate}T00:00:00`) <= date);
 
+/**
+ * Whether Camera Raw could open this body's raw files by `date`. A body names
+ * its first supporting release as `acrMin`; an export dated before that
+ * release existed would name an editor that could not have read the file.
+ */
+const rawSupportedBy = (cam, date) => {
+  if (!cam.acrMin) return true;
+  const first = earliestRelease('acr', cam.acrMin);
+  return !!first && first <= date;
+};
+
 // ── Tag registration ─────────────────────────────────────────────
 
 const TAG_OFFSET_TIME           = 0x9010;
@@ -494,22 +530,23 @@ export function generateFake(options = {}) {
   let capture = null, exportAt = null, pool = [], keepDateDropped = false;
   if (kept) {
     capture = keptCapture(kept);
-    pool = CAMERAS.filter(c => existedBy(c, capture));
+    pool = CAMERAS.filter(c => existedBy(c, capture) && rawSupportedBy(c, anchor));
     if (!pool.length) keepDateDropped = true;
   }
   // A long measured delay can put the capture before every camera here; draw
   // again until at least one existed.
   for (let tries = 0; !pool.length && tries < 50; tries++) {
     ({ capture, exportAt } = pickTimes(anchor));
-    pool = CAMERAS.filter(c => existedBy(c, capture));
+    pool = CAMERAS.filter(c => existedBy(c, capture) && rawSupportedBy(c, exportAt));
   }
   const cam = pick(pool);
   const w   = WRITERS[cam.writer];
   const loc = jitterLocation(pick(LOCATIONS));
   const isBody = w.kind === 'body';
   const editorKind = isBody ? 'acr' : 'lr';
-  if (!exportAt) exportAt = pickExport(capture, anchor, earliestRelease(editorKind));
-  const editor = pickEditor(editorKind, exportAt);
+  const acrMin = isBody ? cam.acrMin || null : null;
+  if (!exportAt) exportAt = pickExport(capture, anchor, earliestRelease(editorKind, acrMin));
+  const editor = pickEditor(editorKind, exportAt, acrMin);
 
   const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
 
@@ -544,14 +581,15 @@ export function generateFake(options = {}) {
   const latRef = loc.lat >= 0 ? 'N' : 'S';
   const lonRef = loc.lon >= 0 ? 'E' : 'W';
 
-  // Lens figures: phones carry the measured per-lens rationals; bodies compute
-  // from the aperture in the firmware's own denominator.
-  const fnumberRat = w.fnumber === 'lens'
-    ? lens.fRat
-    : reduce(Math.round(aperture * w.fnumber), w.fnumber);
-  const focalRat = w.focal === 'lens'
-    ? lens.focalRat
-    : (w.focal === 1 ? [focalPhys, 1] : reduce(Math.round(focalPhys * w.focal), w.focal));
+  // Lens figures: FNumber in the exporter's decimal form; FocalLength as the
+  // firmware writes it, the phone's measured per-lens rational or the body's
+  // own denominator, unreduced.
+  const fnumberRat = adobeFNumber(aperture);
+  const focalRat = w.focal === 'lens' ? lens.focalRat : [Math.round(focalPhys * w.focal), w.focal];
+  // The widest aperture the lens offers at this focal length; a variable zoom
+  // closes down towards its long end.
+  const apertureAtFocal = !lens || !lens.range || lens.range[1] === lens.range[0] ? (lens ? lens.wide : widest)
+    : lens.wide + (lens.tele - lens.wide) * (focalPhys - lens.range[0]) / (lens.range[1] - lens.range[0]);
 
   // Lens specification and names.
   let lensSpec = null, lensModel = null, lensMake = null, auxLens = null, adobeLens = null;
@@ -566,9 +604,10 @@ export function generateFake(options = {}) {
   } else if (lens) {
     lensModel = lens.model;
     if (w.lensTags.includes('make')) lensMake = w.lensMake;
+    // Canon leaves the apertures empty; Camera Raw 16.5 and later write them as 0/0.
     const apZero = w.lensInfoApertureZero;
     lensSpec = [specRat(lens.range[0]), specRat(lens.range[1]),
-                apZero ? [0, 1] : specRat(lens.wide), apZero ? [0, 1] : specRat(lens.tele)];
+                apZero ? [0, 0] : specRat(lens.wide), apZero ? [0, 0] : specRat(lens.tele)];
     // Nikon F-mount glass reaches Camera Raw only through the raw's MakerNote,
     // so its EXIF LensModel is dropped and XMP names it in Adobe's own form.
     if (w.lensAdobe && lens.mount === 'F' && lens.adobe) { auxLens = lens.adobe; lensModel = lens.adobe; }
@@ -617,8 +656,8 @@ export function generateFake(options = {}) {
   p["Exif"][E.ISOSpeedRatings] = iso;
   if (w.sensitivity) {
     p["Exif"][E.SensitivityType] = w.sensitivity;
-    if (w.sensitivity === 1) { if (E.StandardOutputSensitivity) p["Exif"][E.StandardOutputSensitivity] = iso; }
-    else p["Exif"][E.RecommendedExposureIndex] = iso;
+    // Fujifilm writes SensitivityType 1 without the index it names.
+    if (w.sensitivity !== 1) p["Exif"][E.RecommendedExposureIndex] = iso;
   }
   p["Exif"][E.ExifVersion]       = cam.exifVersion;
   p["Exif"][E.DateTimeOriginal]  = captureStr;
@@ -635,8 +674,8 @@ export function generateFake(options = {}) {
   else if (w.brightness === 2560)  p["Exif"][E.BrightnessValue] = [Math.round(bv * 2560), 2560];
   else if (w.brightness)           p["Exif"][E.BrightnessValue] = ratFixed(bv, w.brightness);
   p["Exif"][E.ExposureBiasValue] = w.expComp === 1 ? reduce(Math.round(biasStops * 3), 3) : [Math.round(biasStops * w.expComp), w.expComp];
-  if (w.maxAperture === 'apex')          p["Exif"][E.MaxApertureValue] = fnumberRat === lens.fRat ? lens.apex : ratFixed(2 * Math.log2(widest), 100);
-  else if (w.maxAperture === 'adobe100') p["Exif"][E.MaxApertureValue] = ratFixed(2 * Math.log2(lens ? lens.wide : widest), 100);
+  if (w.maxAperture === 'apex')          p["Exif"][E.MaxApertureValue] = lens && lens.apex ? lens.apex : ratFixed(2 * Math.log2(widest), 100);
+  else if (w.maxAperture === 'eighth')   p["Exif"][E.MaxApertureValue] = eighthStopAperture(apertureAtFocal);
   else if (w.maxAperture === 256)        p["Exif"][E.MaxApertureValue] = [Math.round(2 * Math.log2(widest) * 256), 256];
   else if (w.maxAperture)                p["Exif"][E.MaxApertureValue] = ratFixed(2 * Math.log2(widest), w.maxAperture);
   p["Exif"][E.MeteringMode] = meteringMode;
@@ -658,6 +697,10 @@ export function generateFake(options = {}) {
       p["Exif"][E.FocalPlaneXResolution] = reduce(Math.round(s.px[0] / s.cm[0] * 32768), 32768);
       p["Exif"][E.FocalPlaneYResolution] = reduce(Math.round(s.px[1] / s.cm[1] * 32768), 32768);
       p["Exif"][E.FocalPlaneResolutionUnit] = 3;
+    } else if (s.perCmRat) {
+      p["Exif"][E.FocalPlaneXResolution] = s.perCmRat;
+      p["Exif"][E.FocalPlaneYResolution] = s.perCmRat;
+      p["Exif"][E.FocalPlaneResolutionUnit] = 3;
     } else if (s.perCm) {
       p["Exif"][E.FocalPlaneXResolution] = [s.perCm, 1];
       p["Exif"][E.FocalPlaneYResolution] = [s.perCm, 1];
@@ -668,11 +711,13 @@ export function generateFake(options = {}) {
   if (w.extras.sensing1) p["Exif"][E.SensingMethod] = 1;
   if (w.extras.fileSource) p["Exif"][E.FileSource] = "\x03";
   if (w.extras.sceneType)  p["Exif"][E.SceneType]  = "\x01";
-  if (w.extras.cfa)        p["Exif"][E.CFAPattern] = "\x00\x02\x00\x02\x00\x01\x01\x02";
+  // The 2x2 repeat as two SHORTs in the file's (little-endian) order, then RGGB.
+  if (w.extras.cfa)        p["Exif"][E.CFAPattern] = "\x02\x00\x02\x00\x00\x01\x01\x02";
   if (w.extras.customRendered != null) p["Exif"][E.CustomRendered] = w.extras.customRendered;
   p["Exif"][E.ExposureMode] = exposureMode;
   p["Exif"][E.WhiteBalance] = whiteBalance;
-  if (w.extras.digitalZoom === 'always') p["Exif"][E.DigitalZoomRatio] = [1, 1];
+  if (Array.isArray(w.extras.digitalZoom)) p["Exif"][E.DigitalZoomRatio] = w.extras.digitalZoom;
+  else if (w.extras.digitalZoom === 'always') p["Exif"][E.DigitalZoomRatio] = [1, 1];
   else if (w.extras.digitalZoom === 'zoom' && rnd() < 0.25) p["Exif"][E.DigitalZoomRatio] = ratFloat32(1 + rnd());
   if (w.extras.focalEquiv) p["Exif"][E.FocalLengthIn35mmFilm] = focalEquiv;
   p["Exif"][E.SceneCaptureType] = sceneCapture;

@@ -265,14 +265,35 @@ const LR_RELEASES = [
 // Camera Raw 21%, Lightroom 36% (the rest Macintosh).
 const WINDOWS_SHARE = { acr: 0.21, lr: 0.36 };
 
-/** The earliest date an export by this editor can carry. */
-export function earliestRelease(kind = 'acr') {
-  return (kind === 'lr' ? LR_RELEASES : ACR_RELEASES)[0].date;
+/** Whether dotted version `v` is `min` or later ("17.0.1" >= "17"). */
+function versionAtLeast(v, min) {
+  const a = v.split('.').map(Number), b = min.split('.').map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] || 0) - (b[i] || 0);
+    if (d) return d > 0;
+  }
+  return true;
 }
 
-/** The release in use at `when`: the newest one ~85%, one or two minor releases behind otherwise. */
-function releaseAt(list, when) {
-  const avail = list.filter(r => r.date <= when);
+/**
+ * The earliest date an export by this editor can carry. With `minVersion` (a
+ * body's first supporting Camera Raw), the first release seen in real exports
+ * at or after it, or null when the table has none yet.
+ */
+export function earliestRelease(kind = 'acr', minVersion = null) {
+  const list = kind === 'lr' ? LR_RELEASES : ACR_RELEASES;
+  const r = minVersion ? list.find(x => versionAtLeast(x.version, minVersion)) : list[0];
+  return r ? r.date : null;
+}
+
+/**
+ * The release in use at `when`: the newest one ~85%, one or two minor releases
+ * behind otherwise, never older than `minVersion`. A raw file opens only in a
+ * Camera Raw that supports its camera, so a body's export cannot name an
+ * earlier one.
+ */
+function releaseAt(list, when, minVersion = null) {
+  const avail = list.filter(r => r.date <= when && (!minVersion || versionAtLeast(r.version, minVersion)));
   if (!avail.length) return list[0];
   const groups = [];                       // consecutive releases sharing major.minor
   for (const r of avail) {
@@ -286,14 +307,14 @@ function releaseAt(list, when) {
   return g.rs[g.rs.length - 1];            // that minor's latest patch out by then
 }
 
-export function pickEditor(kind = 'acr', when = new Date()) {
+export function pickEditor(kind = 'acr', when = new Date(), minVersion = null) {
   const platform = rnd() < (WINDOWS_SHARE[kind] ?? 0.3) ? 'Windows' : 'Macintosh';
   if (kind === 'lr') {
     const { version, crsVersion } = releaseAt(LR_RELEASES, when);
     return { kind, version, crsVersion, platform, dpi: 240,
              software: `Adobe Lightroom ${version} (${platform})` };
   }
-  const { version, crsVersion } = releaseAt(ACR_RELEASES, when);
+  const { version, crsVersion } = releaseAt(ACR_RELEASES, when, minVersion);
   return { kind: 'acr', version, crsVersion, platform, dpi: 300,
            software: `Adobe Photoshop Camera Raw ${version} (${platform})` };
 }

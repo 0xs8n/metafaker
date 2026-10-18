@@ -553,7 +553,7 @@ async function processInBrowser(page, origin, names) {
     }));
   }, origin, names, BATCH_SIZE);
 
-  // Independence: every image in a batch draws its own identity. With 24
+  // Independence: every image in a batch draws its own identity. With 36
   // cameras and 58 cities, three independent draws all landing on the same
   // camera and the same city happens about once in two million runs, so a
   // shared camera+city across the whole batch means a shared identity.

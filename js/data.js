@@ -7,11 +7,27 @@
  * and 6.5, Lightroom Classic 13.4 and 14.0.1). Where a secondary phone lens
  * was not among the samples its figures are marked `approx`.
  *
+ * The models released from mid-2024 on (iPhone 16, 16 Pro, 17 Pro, Pixel 9,
+ * 9 Pro, Galaxy S25 Ultra, EOS R5 Mark II, Z6III, X-T50) and the R6 Mark II,
+ * Z f and A7C II were added on 2026-10-18 from 43 camera originals, five or
+ * more per phone model from at least four uploaders and one or two per body,
+ * read byte by byte, plus nine Adobe exports of those bodies and the EXIF of
+ * about 100 more exports as Commons reports it. Each new phone was checked
+ * against an original of its make's existing model (iPhone 15 Pro, Pixel 8
+ * Pro, Galaxy S24 Ultra, Z 6II): same firmware family, same tag set, so they
+ * share its writer profile. A body's FocalPlane resolution, ExifVersion and
+ * SubSecTime width are the export's, which is not always what the camera
+ * writes: Camera Raw writes the Z6III's and Z f's ExifVersion as 0231.
+ *
  * The strings are what the device writes, not the marketing name, and the two
  * differ more than you would expect: Samsung's current firmware writes
  * "Galaxy S24 Ultra" as the Model while older firmware writes "SM-G991B";
  * OnePlus writes "OnePlus 12" and no Software at all; Xiaomi writes the
- * device code "23127PN0CG"; Nikon writes "NIKON Z 6_2" for the Z 6II.
+ * device code "23127PN0CG"; Nikon writes "NIKON Z 6_2" for the Z 6II and
+ * "NIKON Z6_3" for the Z6III; Canon writes "Canon EOS R5m2" for the R5 Mark II.
+ *
+ * A lens's `fRat` is the FNumber the phone itself writes. The export does not
+ * keep it: every Adobe export rewrites FNumber as a decimal (see exif.js).
  *
  * Per model:
  *   writer      — which firmware family's encodings apply (see exif.js).
@@ -20,12 +36,23 @@
  *                 'two' (OffsetTime + OffsetTimeOriginal), 'orig', or 'none'.
  *   subsec      — SubSecTime digits, or 0 when the firmware writes none.
  *   raw         — for bodies, the raw file the export is converted from.
- *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution.
+ *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution;
+ *                 `perCmRat` is the exact per-cm rational Camera Raw's exports
+ *                 of that body carry (64449339/32768 for an A7 IV or A7C II).
  *   released    — when the model went on sale; a capture is never dated before it.
+ *                 Where the maker gave only a month, the last day of it.
  *   firmwareDate — when the firmware whose behaviour the entry reproduces was
  *                 out: the version Canon writes into aux:Firmware, or the
  *                 Samsung build that writes the marketing-name Model. A capture
- *                 is never dated before it either.
+ *                 is never dated before it either. Where no release date for
+ *                 the version is known, the earliest capture seen carrying it.
+ *   acrMin      — for bodies, the first Camera Raw release that opens the
+ *                 body's raw files, from Adobe's "Cameras supported by Camera
+ *                 Raw" list (helpx.adobe.com, read 2026-10-18). Only set where
+ *                 it is newer than the oldest release in ACR_RELEASES
+ *                 (provenance.js); an export is never dated before that
+ *                 release nor names an older one, and a body whose release
+ *                 has not been seen in a real export yet is never chosen.
  */
 
 import { pick } from './helpers.js';
@@ -35,8 +62,17 @@ import { pick } from './helpers.js';
 const ASPECTS_PHONE = [4/3, 3/4, 16/9, 9/16, 1];
 const ASPECTS_DSLR  = [3/2, 2/3];
 
+// A phone's exposure time as a Lightroom export carries it: rounded to values
+// like these, all seen in real exports of phone photos (1/4600, 1/730), never
+// the firmware's own 1/4673.
+const SHUTTERS_PHONE_EXPORT = [[1,12000],[1,7600],[1,6000],[1,4600],[1,4000],[1,2000],[1,1800],[1,1000],[1,750],
+  [1,730],[1,700],[1,500],[1,470],[1,250],[1,230],[1,210],[1,125],[1,100],[1,90],[1,60],[1,30],[1,15],[1,8],[1,4]];
+
 // Apple lens specification rationals, exact as the phones write them (the
 // float32 values 2.22 and 1.78 come out as 1551800/699009 and 1244236/699009).
+const APPLE_LENSINFO_17P = [[1551800, 699009], [1081, 64], [1244236, 699009], [1433, 512]];
+const APPLE_LENSINFO_16P = [[1551800, 699009], [2052196, 131047], [1244236, 699009], [14, 5]];
+const APPLE_LENSINFO_16 = [[1551800, 699009], [6249513, 1048576], [8, 5], [11, 5]];
 const APPLE_LENSINFO_15 = [[1551800, 699009], [9, 1], [1244236, 699009], [14, 5]];
 const APPLE_LENSINFO_13 = [[299253, 190607], [9, 1], [3, 2], [14, 5]];
 const APPLE_LENSINFO_12 = [[1625285, 1048571], [21, 5], [8, 5], [12, 5]];
@@ -44,6 +80,42 @@ const APPLE_LENSINFO_11 = [[807365, 524263], [17, 4], [9, 5], [12, 5]];
 
 export const CAMERAS = [
   // ── Apple: HostComputer, SubjectArea, CompositeImage, continued-fraction rationals ──
+  { make:"Apple", model:"iPhone 17 Pro", released:"2025-09-19", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+    exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
+    lensInfo:APPLE_LENSINFO_17P,
+    lenses:[
+      { equiv:14,  phys:2.22,   f:2.2,  fRat:[11, 5],            focalRat:[1551800, 699009], model:"iPhone 17 Pro back triple camera 2.22mm f/2.2", approx:true },
+      { equiv:24,  phys:6.765,  f:1.78, fRat:[1244236, 699009], focalRat:[251773, 37217],   model:"iPhone 17 Pro back triple camera 6.765mm f/1.78" },
+      { equiv:48,  phys:6.765,  f:1.78, fRat:[1244236, 699009], focalRat:[251773, 37217],   model:"iPhone 17 Pro back triple camera 6.765mm f/1.78" },
+      { equiv:100, phys:16.891, f:2.8,  fRat:[1433, 512],        focalRat:[1081, 64],        model:"iPhone 17 Pro back triple camera 16.891mm f/2.8", approx:true },
+      { equiv:200, phys:16.891, f:2.8,  fRat:[1433, 512],        focalRat:[1081, 64],        model:"iPhone 17 Pro back triple camera 16.891mm f/2.8" },
+    ],
+    isos:[40,50,64,80,100,125,160,200,250,320,400,640,800,1000,1600],
+    shutters:SHUTTERS_PHONE_EXPORT },
+
+  { make:"Apple", model:"iPhone 16 Pro", released:"2024-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+    exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
+    lensInfo:APPLE_LENSINFO_16P,
+    lenses:[
+      { equiv:14,  phys:2.22,  f:2.2,  fRat:[11, 5],            focalRat:[1551800, 699009], model:"iPhone 16 Pro back triple camera 2.22mm f/2.2" },
+      { equiv:24,  phys:6.765, f:1.78, fRat:[1244236, 699009], focalRat:[251773, 37217],   model:"iPhone 16 Pro back triple camera 6.765mm f/1.78" },
+      { equiv:48,  phys:6.765, f:1.78, fRat:[1244236, 699009], focalRat:[251773, 37217],   model:"iPhone 16 Pro back triple camera 6.765mm f/1.78" },
+      { equiv:120, phys:15.66, f:2.8,  fRat:[14, 5],            focalRat:[2052196, 131047], model:"iPhone 16 Pro back triple camera 15.66mm f/2.8" },
+    ],
+    isos:[50,64,80,100,125,160,200,250,320,400,500,640,800,1250,1600],
+    shutters:SHUTTERS_PHONE_EXPORT },
+
+  { make:"Apple", model:"iPhone 16", released:"2024-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+    exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
+    lensInfo:APPLE_LENSINFO_16,
+    lenses:[
+      { equiv:13, phys:2.22, f:2.2, fRat:[11, 5], focalRat:[1551800, 699009],  model:"iPhone 16 back dual wide camera 2.22mm f/2.2", approx:true },
+      { equiv:26, phys:5.96, f:1.6, fRat:[8, 5],  focalRat:[6249513, 1048576], model:"iPhone 16 back dual wide camera 5.96mm f/1.6" },
+      { equiv:52, phys:5.96, f:1.6, fRat:[8, 5],  focalRat:[6249513, 1048576], model:"iPhone 16 back dual wide camera 5.96mm f/1.6" },
+    ],
+    isos:[32,40,50,64,80,100,125,160,200,250,400,640,800,1250],
+    shutters:SHUTTERS_PHONE_EXPORT },
+
   { make:"Apple", model:"iPhone 15 Pro", released:"2023-09-22", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_15,
@@ -100,6 +172,18 @@ export const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,100],[1,60],[1,40],[1,30],[1,15]] },
 
   // ── Samsung Snapdragon S-series: marketing-name Model on current firmware, ImageUniqueID per sensor ──
+  // Every S25 Ultra build seen, from the launch firmware on, writes the marketing name.
+  { make:"samsung", model:"Galaxy S25 Ultra", released:"2025-02-07", sw:"S938BXXSBCZG3", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+    exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:true,
+    lenses:[
+      { equiv:13,  phys:2.2,  f:1.9, focalRat:[220, 100],  fRat:[190, 100], apex:[185, 100], id:"J50XLRD00PM" },
+      { equiv:23,  phys:6.3,  f:1.7, focalRat:[630, 100],  fRat:[170, 100], apex:[153, 100], id:"JK0XLRD00SM" },
+      { equiv:69,  phys:7.9,  f:2.4, focalRat:[790, 100],  fRat:[240, 100], apex:[252, 100], id:"M12XSRD00PM", approx:true },
+      { equiv:115, phys:18.6, f:3.4, focalRat:[1860, 100], fRat:[340, 100], apex:[353, 100], id:"J50XSRD00SM" },
+    ],
+    isos:[20,25,32,40,50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200],
+    shutters:SHUTTERS_PHONE_EXPORT },
+
   { make:"samsung", model:"Galaxy S24 Ultra", released:"2024-01-31", firmwareDate:"2025-03-01", sw:"S928BXXU4BYCG", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:false,
     lenses:[
@@ -143,6 +227,27 @@ export const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1000],[1,602],[1,500],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15]] },
 
   // ── Google: fixed-denominator rationals throughout, GPSVersionID first, CustomRendered 1 ──
+  { make:"Google", model:"Pixel 9 Pro", released:"2024-09-04", sw:"HDR+ 1.0.702121622nd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4080,3072],[8160,6144]],
+    exifVersion:"0232", offset:'all', subsec:3, flash:true,
+    lenses:[
+      { equiv:12,  phys:2.02,   f:1.7,  focalRat:[2020, 1000],  fRat:[170, 100], apex:[153, 100], model:"Pixel 9 Pro back camera 2.02mm f/1.7" },
+      { equiv:24,  phys:6.9,    f:1.68, focalRat:[6900, 1000],  fRat:[168, 100], apex:[150, 100], model:"Pixel 9 Pro back camera 6.9mm f/1.68" },
+      { equiv:49,  phys:6.9,    f:1.68, focalRat:[6900, 1000],  fRat:[168, 100], apex:[150, 100], model:"Pixel 9 Pro back camera 6.9mm f/1.68" },
+      { equiv:110, phys:17.906, f:2.8,  focalRat:[17906, 1000], fRat:[280, 100], apex:[297, 100], model:"Pixel 9 Pro back camera 17.906mm f/2.8" },
+    ],
+    isos:[19,21,22,23,24,52,70,121,127,130,210,212,279,380,588,606,715,802,940,1910],
+    shutters:SHUTTERS_PHONE_EXPORT },
+
+  { make:"Google", model:"Pixel 9", released:"2024-08-22", sw:"HDR+ 1.0.702121622zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4080,3072]],
+    exifVersion:"0232", offset:'all', subsec:3, flash:true,
+    lenses:[
+      { equiv:12, phys:2.02, f:1.7,  focalRat:[2020, 1000], fRat:[170, 100], apex:[153, 100], model:"Pixel 9 back camera 2.02mm f/1.7" },
+      { equiv:24, phys:6.9,  f:1.68, focalRat:[6900, 1000], fRat:[168, 100], apex:[150, 100], model:"Pixel 9 back camera 6.9mm f/1.68" },
+      { equiv:49, phys:6.9,  f:1.68, focalRat:[6900, 1000], fRat:[168, 100], apex:[150, 100], model:"Pixel 9 back camera 6.9mm f/1.68" },
+    ],
+    isos:[18,19,20,21,22,23,26,37,47,51,55,64,150,158,190,235,350,468,477,651,837],
+    shutters:SHUTTERS_PHONE_EXPORT },
+
   { make:"Google", model:"Pixel 8 Pro", released:"2023-10-12", sw:"HDR+ 1.0.695519190zm", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4080,3072]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true,
     lenses:[
@@ -193,7 +298,28 @@ export const CAMERAS = [
     isos:[50,64,80,100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200,4000,5000,6400],
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,329],[1,250],[1,120],[1,100],[1,60],[1,50],[1,33],[1,30],[1,17],[1,15],[1,10],[1,8]] },
 
-  // ── Canon: no Software, APEX over 65536, LensInfo with 0/1 apertures, 12-digit serials ──
+  // ── Canon: no Software, APEX over 65536, LensInfo with empty apertures, 12-digit serials ──
+  // The camera writes "Canon EOS R5m2" and "Canon EOS R6m2" for the Mark II bodies.
+  // The R5 Mark II's launch firmware 1.0.0 is in an export of a 2024-08-25 capture.
+  { make:"Canon", model:"Canon EOS R5m2", released:"2024-08-20", acrMin:"16.4", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
+    exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.0.0",
+    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
+    sensor:{ px:[8192, 5464], inch:[1419, 947] },
+    apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
+    isos:[100,125,160,200,250,320,400,640,800,1600,3200,6400,12800,25600,51200],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,800],[1,640],[1,500],[1,250],[1,160],[1,125],[1,100],[1,60],[1,30],[1,15],[1,8],[1,4],[1,2],[1,1]],
+    focals:[24,35,50,85,100,135,200] },
+
+  // Camera Raw writes the R6 Mark II's FocalPlane per cm over 32768, not per inch.
+  { make:"Canon", model:"Canon EOS R6m2", released:"2022-11-30", firmwareDate:"2023-05-23", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
+    exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.1.1",
+    raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
+    sensor:{ px:[6000, 4000], perCmRat:[54718516, 32768] },
+    apertures:[1.2,1.4,1.8,2.0,2.8,4.0,5.6,8.0,11,16],
+    isos:[100,200,400,800,1600,3200,6400,12800,25600,51200,102400],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,160],[1,125],[1,100],[1,60],[1,30],[1,15],[1,8],[1,4]],
+    focals:[24,35,50,70,85,100,135,200] },
+
   { make:"Canon", model:"Canon EOS R5", released:"2020-07-30", firmwareDate:"2023-10-17", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
     exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.8.2",
     raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' },
@@ -222,6 +348,26 @@ export const CAMERAS = [
     focals:[18,24,35,50,85,100] },
 
   // ── Nikon: exposure compensation in sixths, FocalPlane over 32768 per cm, CFAPattern, GainControl, 7-digit serials ──
+  // The camera writes "NIKON Z6_3", without the space in the Z 6II's name, and
+  // ExifVersion 0232; Camera Raw's exports of both new bodies write 0231.
+  { make:"NIKON CORPORATION", model:"NIKON Z6_3", released:"2024-06-24", acrMin:"16.3", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
+    exifVersion:"0231", offset:'all', subsec:2, flash:false,
+    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
+    sensor:{ px:[6048, 4032], perCmRat:[55369938, 32768] },
+    apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
+    isos:[100,200,400,800,1000,1600,3200,6400,12800,25600,51200],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,800],[1,500],[1,250],[1,125],[1,60],[1,40],[1,30],[1,15]],
+    focals:[24,35,50,85,105,200] },
+
+  { make:"NIKON CORPORATION", model:"NIKON Z f", released:"2023-10-27", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
+    exifVersion:"0231", offset:'all', subsec:2, flash:false,
+    raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
+    sensor:{ px:[6048, 4032], perCmRat:[55369938, 32768] },
+    apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
+    isos:[100,200,400,800,1600,3200,6400,12800,25600,51200],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,160],[1,100],[1,60],[1,30],[1,15]],
+    focals:[24,35,50,85,105,135] },
+
   { make:"NIKON CORPORATION", model:"NIKON Z 9", released:"2021-12-24", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
     exifVersion:"0232", offset:'all', subsec:2, flash:false,
     raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
@@ -244,17 +390,26 @@ export const CAMERAS = [
   { make:"NIKON CORPORATION", model:"NIKON Z 6_2", released:"2020-11-05", type:"dslr", writer:"nikon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['Z','F'],
     exifVersion:"0231", offset:'all', subsec:2, flash:false,
     raw:{ mime:'image/x-nikon-nef', ext:'NEF', prefix:'DSC_' },
-    sensor:{ px:[6048, 4024], cm:[3.59, 2.39] },
+    sensor:{ px:[6048, 4024], perCmRat:[55150724, 32768] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[100,200,400,800,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,125],[1,60],[1,30],[1,15]],
     focals:[24,35,50,85,105] },
 
   // ── Sony: BrightnessValue over 2560, MaxApertureValue over 256, compensation in tenths, no serial in EXIF ──
+  { make:"SONY", model:"ILCE-7CM2", released:"2023-09-30", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, crop:1.0, mounts:['E'],
+    exifVersion:"0232", offset:'all', subsec:3, flash:false,
+    raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
+    sensor:{ px:[7008, 4672], perCmRat:[64449339, 32768] },
+    apertures:[1.4,1.8,2.0,2.8,4.0,5.6,6.3,8.0,11],
+    isos:[100,200,320,400,800,1600,3200,6400,12800,25600,51200],
+    shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,800],[1,500],[1,400],[1,320],[1,250],[1,200],[1,160],[1,125],[1,80],[1,60],[1,30],[1,15]],
+    focals:[24,35,50,70,85,135,200] },
+
   { make:"SONY", model:"ILCE-7M4", released:"2021-12-17", type:"dslr", writer:"sony", aspects:ASPECTS_DSLR, modes:[[4608,3072]], crop:1.0, mounts:['E'],
     exifVersion:"0232", offset:'all', subsec:3, flash:false,
     raw:{ mime:'image/x-sony-arw', ext:'ARW', prefix:'DSC0' },
-    sensor:{ px:[7008, 4672], cm:[3.56, 2.37] },
+    sensor:{ px:[7008, 4672], perCmRat:[64449339, 32768] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,6.3,8.0,11],
     isos:[50,100,200,400,800,1000,1250,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,160],[1,125],[1,60],[1,30],[1,15],[1,8]],
@@ -270,16 +425,25 @@ export const CAMERAS = [
     focals:[24,35,50,85,135] },
 
   // ── Fujifilm: everything over 100, SensitivityType 1 without an index, serials like 3B008051 ──
+  { make:"FUJIFILM", model:"X-T50", released:"2024-06-30", acrMin:"16.3", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
+    exifVersion:"0232", offset:'all', subsec:2, flash:false,
+    raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
+    sensor:{ px:[7728, 5152], perCmRat:[108260745, 32768] },
+    apertures:[1.4,2.0,2.8,4.0,5.6,8.0,11],
+    isos:[125,160,200,250,400,800,1600,3200,6400,12800],
+    shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,170],[1,125],[1,60],[1,30],[1,15]],
+    focals:[16,18,23,35,56] },
+
   { make:"FUJIFILM", model:"X-T5", released:"2022-11-17", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
     exifVersion:"0232", offset:'all', subsec:0, flash:false,
     raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
-    sensor:{ px:[7728, 5152], perCm:3289 },
+    sensor:{ px:[7728, 5152], perCmRat:[108260745, 32768] },
     apertures:[1.4,1.8,2.0,2.8,4.0,5.6,8.0,11],
     isos:[125,160,200,400,800,1000,1600,3200,6400,12800,25600,51200],
     shutters:[[1,8000],[1,4000],[1,2000],[1,1000],[1,500],[1,400],[1,250],[1,125],[1,60],[1,34],[1,30],[1,15]],
     focals:[16,18,23,35,56,90] },
 
-  { make:"FUJIFILM", model:"X100VI", released:"2024-02-28", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:[], fixedLens:true,
+  { make:"FUJIFILM", model:"X100VI", released:"2024-02-28", acrMin:"16.2", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:[], fixedLens:true,
     exifVersion:"0232", offset:'all', subsec:2, flash:true,
     raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' },
     sensor:{ px:[7728, 5152], perCm:3289 },
