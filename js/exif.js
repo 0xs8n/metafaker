@@ -547,6 +547,24 @@ function alignAsciiValues(p, px) {
 // ── Serial-number generators (shape matches the measured samples) ──
 
 const digits = n => Array.from({ length: n }, () => '0123456789'[Math.floor(rnd() * 10)]).join('');
+// An iPhone writes DigitalZoomRatio only when the photo was zoomed: 32.7% of
+// US-located iPhone photos on Commons (1,888 files, 194 uploaders, each
+// weighted once; read 2026-10-19). Its value is the frame's short side over the
+// cropped one, reduced (3024/1511; 387 of 462 values), and the 35 mm equivalent
+// is the lens's times it (254 of 290 within 1 mm). Ratio quantiles, uploader-
+// weighted over the 462 zoomed files from 95 uploaders.
+const APPLE_ZOOM_SHARE = 0.327;
+const APPLE_ZOOM = [[0, 1.0003], [0.05, 1.003], [0.1, 1.02], [0.2, 1.03], [0.3, 1.145], [0.4, 1.317], [0.5, 1.538],
+  [0.6, 1.728], [0.7, 1.843], [0.8, 2.541], [0.9, 3.39], [0.95, 4.16], [1, 5.232]];
+function drawAppleZoom(frameShort) {
+  const u = rnd();
+  let i = 1;
+  while (i < APPLE_ZOOM.length - 1 && APPLE_ZOOM[i][0] < u) i++;
+  const [q0, z0] = APPLE_ZOOM[i - 1], [q1, z1] = APPLE_ZOOM[i];
+  const ratio = z0 + (u - q0) / (q1 - q0) * (z1 - z0);
+  return reduce(frameShort, Math.min(frameShort - 1, Math.round(frameShort / ratio)));
+}
+
 function serialFor(writer) {
   if (writer.serial === 12) return digits(12);        // Canon
   if (writer.serial === 7)  return digits(7);         // Nikon
@@ -618,7 +636,9 @@ export function generateFake(options = {}) {
   if (!exportAt) exportAt = pickExport(capture, latest, earliestRelease(editorKind, acrMin));
   const editor = pickEditor(editorKind, exportAt, acrMin);
 
-  const { focalPhys, focalEquiv, lens } = pickOptics(cam);
+  const { focalPhys, focalEquiv: lensEquiv, lens } = pickOptics(cam);
+  const zoom = w.extras.digitalZoom === 'zoom' && rnd() < APPLE_ZOOM_SHARE ? drawAppleZoom(cam.modes[0][1]) : null;
+  const focalEquiv = zoom ? Math.round(lensEquiv * zoom[0] / zoom[1]) : lensEquiv;
   const widest = cam.type === 'phone' ? Math.min(...cam.lenses.map(l => l.f)) : Math.min(...cam.apertures);
   // The widest aperture the lens offers at this focal length; a variable zoom
   // closes down towards its long end.
@@ -788,7 +808,7 @@ export function generateFake(options = {}) {
   p["Exif"][E.WhiteBalance] = whiteBalance;
   if (Array.isArray(w.extras.digitalZoom)) p["Exif"][E.DigitalZoomRatio] = w.extras.digitalZoom;
   else if (w.extras.digitalZoom === 'always') p["Exif"][E.DigitalZoomRatio] = [1, 1];
-  else if (w.extras.digitalZoom === 'zoom' && rnd() < 0.25) p["Exif"][E.DigitalZoomRatio] = ratFloat32(1 + rnd());
+  else if (zoom) p["Exif"][E.DigitalZoomRatio] = zoom;
   if (w.extras.focalEquiv) p["Exif"][E.FocalLengthIn35mmFilm] = focalEquiv;
   p["Exif"][E.SceneCaptureType] = sceneCapture;
   if (w.extras.gainControl) p["Exif"][E.GainControl] = iso < 400 ? 0 : iso < 1600 ? 1 : 2;

@@ -774,6 +774,19 @@ async function exposureInBrowser(page, origin, n) {
         ssvOk: same(x.encodeExposureTime(et[0] / et[1]).shutterSpeedValue, `${e[E.ShutterSpeedValue][0]}/${e[E.ShutterSpeedValue][1]}`),
         avOk: same(x.adobeFNumber(f).apertureValue, `${e[E.ApertureValue][0]}/${e[E.ApertureValue][1]}`),
         rank: ranks(g, f, et[0] / et[1], iso),
+        ...(g.cam.type === 'phone' ? (() => {
+          // As the survey reads it: the photo's FocalLength against the
+          // model's main camera, the widest lens of 20 mm equivalent or more.
+          const main = g.cam.lenses.filter(l => l.equiv >= 20).reduce((a, b) => (b.equiv < a.equiv ? b : a));
+          const dz = e[E.DigitalZoomRatio];
+          return {
+            mainLens: Math.abs(g.display.FocalLength - main.phys) < 1e-6,
+            hasTele: g.cam.lenses.some(l => l.phys > 1.2 * main.phys),
+            zoom: dz && dz[1] && dz[0] / dz[1] > 1 ? dz[0] / dz[1] : null,
+            f35: e[E.FocalLengthIn35mmFilm],
+            lensEquivs: [...new Set(g.cam.lenses.filter(l => l.phys === g.display.FocalLength).map(l => l.equiv))],
+          };
+        })() : {}),
       });
     }
     return { examples, real, rows };
@@ -832,6 +845,26 @@ function exposureChecks(data) {
   const duskTol = 4 * Math.hypot(0.019, Math.sqrt(0.104 * 0.896 / phones.length));
   assert('(exposure)', 'batch: phones after civil dusk at the share real US phone photos are',
     Math.abs(dusk - 0.104) <= duskTol, `${(100 * dusk).toFixed(1)}% of ${phones.length}, allowed ${(100 * (0.104 - duskTol)).toFixed(1)}-${(100 * (0.104 + duskTol)).toFixed(1)}%`);
+
+  // Main-camera share of US-located iPhone photos on Commons (FocalLength per
+  // model, front cameras left out, each uploader weighted once; standard error
+  // by resampling uploaders): 69.3% (4.0) on models with a telephoto, 90.5%
+  // (2.4) on those without. The bound is 4 standard errors of that and of the
+  // batch together; drawing the lens uniformly gave 33-50% and 50-67%.
+  // Android phones are not asserted: 19 US uploaders, a standard error of 8.8.
+  for (const [label, tele, real, se] of [['with a telephoto', true, 0.693, 0.040], ['without one', false, 0.905, 0.024]]) {
+    const set = rows.filter(r => r.phone && r.apple && r.hasTele === tele);
+    const got = share(set, r => r.mainLens);
+    const tol = 4 * Math.hypot(se, Math.sqrt(real * (1 - real) / set.length));
+    assert('(exposure)', `batch: iPhones ${label} use the main camera as often as real ones`, Math.abs(got - real) <= tol,
+      `${(100 * got).toFixed(1)}% of ${set.length}, allowed ${(100 * (real - tol)).toFixed(1)}-${(100 * (real + tol)).toFixed(1)}%`);
+  }
+  // A zoomed iPhone photo's 35 mm equivalent is its lens's times the zoom, as
+  // in 254 of 290 real ones within 1 mm.
+  const zoomed = rows.filter(r => r.phone && r.apple && r.zoom);
+  const offZoom = zoomed.filter(r => !r.lensEquivs.some(q => Math.abs(r.f35 - q * r.zoom) <= 1));
+  assert('(exposure)', "batch: a zoomed iPhone photo's 35 mm equivalent follows its DigitalZoomRatio", zoomed.length > 0 && offZoom.length === 0,
+    `${offZoom.length} of ${zoomed.length}: ${offZoom.slice(0, 3).map(r => `${r.model} ${r.f35} mm at ${r.zoom.toFixed(2)}x`).join(', ')}`);
 
   // Each generated time and ISO against the real files at its EV and
   // f-number: with ties split at random, the share of real files below it is

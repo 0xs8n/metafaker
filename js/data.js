@@ -83,6 +83,7 @@
  */
 
 import { pick } from './helpers.js';
+import { rnd } from './rng.js';
 
 // Frame shapes each body can actually produce. A generated photo whose aspect
 // ratio matches no mode the camera offers is inconsistent with that camera.
@@ -511,17 +512,44 @@ export const DSLR_LENSES = {
   ],
 };
 
+// Percent of photos taken through each lens: US-located phone photos on
+// Wikimedia Commons (the survey of 2026-10-18, FocalLength and
+// FocalLengthIn35mmFormat read through the API on 2026-10-19, each uploader
+// weighted once, front cameras left out). Apple phones with a telephoto 1,142
+// files from 99 uploaders, without one 744 from 110; Android phones with one
+// 1,087 from 19 (Pixel 7 Pro and 8 Pro). Pixels without a telephoto (6a, 7a)
+// are from every location, 703 files from 36 uploaders, as too few are located
+// in the US, and their 35 mm equivalent was not read, so they have no main2x.
+// Samsung, OnePlus and Xiaomi take the Android shares: under ten uploaders of
+// each are located in the US. main2x is the main camera at twice its 35 mm
+// equivalent with no digital zoom; the 28 and 35 mm modes (1% of Apple photos
+// with a telephoto) are not among the lenses and are left out.
+const PHONE_LENS_SHARES = {
+  apple:   { tele: { ultrawide: 13.2, main: 58.5, main2x: 10.8, tele: 16.4 }, noTele: { ultrawide: 9.5, main: 90.5 } },
+  android: { tele: { ultrawide: 14.6, main: 62.4, main2x: 3.9, tele: 19.0 }, noTele: { ultrawide: 13.4, main: 86.6 } },
+};
+
+/** The main camera is the widest lens of 20 mm equivalent or more; a share is split among the lenses of its role. */
+function phoneLensRole(cam, l) {
+  const main = cam.lenses.filter(x => x.equiv >= 20).reduce((a, b) => (b.equiv < a.equiv ? b : a));
+  return l.equiv < 20 ? 'ultrawide' : l === main ? 'main' : l.phys === main.phys ? 'main2x' : 'tele';
+}
+
 /**
  * Choose focal length and lens as one consistent set.
  *
  * Phones: one of the phone's fixed lenses, carrying its own measured
- * rationals, f-number and model string. Bodies: the focal length is drawn and
+ * rationals, f-number and model string, as often as real photos use it. Bodies: the focal length is drawn and
  * any mountable lens that covers it is chosen; the f-number comes with the
  * exposure, among those the lens opens to.
  */
 export function pickOptics(cam) {
   if (cam.type === 'phone') {
-    const l = pick(cam.lenses);
+    const roles = cam.lenses.map(l => phoneLensRole(cam, l));
+    const shares = PHONE_LENS_SHARES[cam.writer === 'apple' ? 'apple' : 'android'][roles.includes('tele') ? 'tele' : 'noTele'];
+    const weights = roles.map(r => (shares[r] || 0) / roles.filter(x => x === r).length);
+    let u = rnd() * weights.reduce((a, b) => a + b, 0);
+    const l = cam.lenses.find((_, i) => (u -= weights[i]) < 0) || cam.lenses[0];
     return { focalPhys: l.phys, focalEquiv: l.equiv, lens: l };
   }
 
