@@ -171,6 +171,17 @@ Bodies: the same three of every Adobe export of a body photo. Files are grouped
 by uploader so the generator can weight each uploader once. Rerun it on a newer
 survey to refresh the tables.
 
+### `capture_times.js`
+
+    node tools/capture_times.js <phone-survey.jsonl>
+
+Prints `CAPTURE_DAYLIGHT` and `CAPTURE_AFTER_SUNSET` for `js/exif.js` from the
+same Commons phone survey `exposure_tables.py` reads: for every US-located
+phone photo, the sun at its own place and date (time zone from the nearest
+place in `js/places.js`), and its capture time as a fraction of the daylight,
+or as the time since sunset, each uploader weighted once. It also prints the
+share taken after civil dusk, which `check.js` asserts on.
+
 ### `stress.js`
 
     node tools/stress.js <inDir> <outDir>

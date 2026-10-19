@@ -823,6 +823,16 @@ function exposureChecks(data) {
     share(phones, r => near(50)(r) || near(100)(r)) < 0.04,
     `${(100 * share(phones, r => near(50)(r) || near(100)(r))).toFixed(1)}% of ${phones.length}`);
 
+  // 10.4% of US-located phone photos on Commons were taken after civil dusk at
+  // their own place and date (212 uploaders, each weighted once; 1.9 points
+  // standard error by resampling uploaders; tools/capture_times.js). The bound
+  // is 4 standard errors of that and of the batch together; a capture drawn
+  // from fixed clock-hour weights and back from the export hour put 26% there.
+  const dusk = share(phones, r => r.sun < -6);
+  const duskTol = 4 * Math.hypot(0.019, Math.sqrt(0.104 * 0.896 / phones.length));
+  assert('(exposure)', 'batch: phones after civil dusk at the share real US phone photos are',
+    Math.abs(dusk - 0.104) <= duskTol, `${(100 * dusk).toFixed(1)}% of ${phones.length}, allowed ${(100 * (0.104 - duskTol)).toFixed(1)}-${(100 * (0.104 + duskTol)).toFixed(1)}%`);
+
   // Each generated time and ISO against the real files at its EV and
   // f-number: with ties split at random, the share of real files below it is
   // uniform when the draw follows the measured distribution, so the shares
