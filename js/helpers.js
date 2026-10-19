@@ -995,6 +995,25 @@ function encodeExportPixels(ctx, width, height, minimal = false) {
   return normaliseAppSegments(url, { app14: ADOBE_APP14 });   // fallback: at least drop APP0/ICC
 }
 
+/**
+ * The crop the render applied, as Adobe records one: the output's top-left
+ * and bottom-right corners in normalised source coordinates, and CropAngle in
+ * degrees. Measured on real exports with a straightened crop (Lightroom
+ * Classic 13.5.1, 10.3): the TL-to-BR diagonal is R(CropAngle)·(w, h) for the
+ * output's own w × h, so the angle is the opposite of the canvas rotation.
+ */
+function appliedCrop(imgW, imgH, frame, W, H, angle = 0, scale = 1) {
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  const corner = (dx, dy) => {
+    const ux = W / 2 + (dx * cos + dy * sin) / scale;      // canvas → drawn-image coordinates
+    const uy = H / 2 + (-dx * sin + dy * cos) / scale;
+    return [(frame.x + ux * frame.w / W) / imgW, (frame.y + uy * frame.h / H) / imgH];
+  };
+  const [left, top] = corner(-W / 2, -H / 2);
+  const [right, bottom] = corner(W / 2, H / 2);
+  return { top, left, bottom, right, angle: -angle * 180 / Math.PI };
+}
+
 function privacyRender(img, cam = {}) {
   const cameraType = cam.type || 'phone';
   const cameraMake = cam.make || '';
@@ -1037,7 +1056,7 @@ function privacyRender(img, cam = {}) {
       applyLensOpticalEffects(ctx, c.width, c.height, cam);
       addPixelNoise(ctx, c.width, c.height, iso, cameraType);
     }
-    return { dataUrl: encodeExportPixels(ctx, c.width, c.height, minimal), width: c.width, height: c.height };
+    return { dataUrl: encodeExportPixels(ctx, c.width, c.height, minimal), width: c.width, height: c.height, crop: null };
   }
 
   // 3. Reshape to a frame the camera can produce, then size the output. A
@@ -1070,7 +1089,8 @@ function privacyRender(img, cam = {}) {
   if (minimal) {
     // Crop and downscale only, no rotation or sensor-pattern work.
     ctx.drawImage(img, frame.x, frame.y, frame.w, frame.h, 0, 0, size.width, size.height);
-    return { dataUrl: encodeExportPixels(ctx, size.width, size.height, minimal), width: size.width, height: size.height };
+    return { dataUrl: encodeExportPixels(ctx, size.width, size.height, minimal), width: size.width, height: size.height,
+             crop: appliedCrop(imgW, imgH, frame, size.width, size.height) };
   }
 
   // 2. Rotation on about two images in three, 0.3–2.0° either way. Rotating
@@ -1117,7 +1137,8 @@ function privacyRender(img, cam = {}) {
   // is the only setting at which the browser emits 4:4:4 chroma, which is what
   // an editor export uses. Everything lower is 4:2:0 and would contradict the
   // story the file tells. It is also the cleanest source for re-quantisation.
-  return { dataUrl: encodeExportPixels(ctx, size.width, size.height, minimal), width: size.width, height: size.height };
+  return { dataUrl: encodeExportPixels(ctx, size.width, size.height, minimal), width: size.width, height: size.height,
+           crop: appliedCrop(imgW, imgH, frame, size.width, size.height, angle, scale) };
 }
 
 /**

@@ -376,6 +376,7 @@ async function assembleAdobeExport(item, fake, pixelCam) {
     capture: fake.capture, exportAt: fake.exportAt,
     offsetCapture: fake.offset, offsetExport: fake.exportOffset, subsec: fake.subsec,
     lens: fake.lensMeta, editor: fake.editor, source: fake.source, scene: fake.scene, aux: fake.aux,
+    crop: canvasResult.crop,
   }));
   const modDataUrl = insertAfterSoi(cleanJpeg, [exifApp1, app13, iccApp2Segment(), xmp]);
   const verified = await readBackExifStrict(modDataUrl);
