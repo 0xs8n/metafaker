@@ -432,6 +432,12 @@ function exiftoolChecks(name, t, mode, info) {
   assert(name, 'exiftool: no JFIF tags', jfif.length === 0, jfif.join(','));
   const copyright = tag(t, 'ProfileCopyright', 'ICC-header') ?? tag(t, 'ProfileCopyright');
   assert(name, 'exiftool: ICC ProfileCopyright not Google', !(typeof copyright === 'string' && /Google/i.test(copyright)), `ProfileCopyright=${copyright}`);
+  // No real export pairs an sRGB ICC profile with ColorSpace Uncalibrated.
+  const colorSpace = tag(t, 'ColorSpace', 'ExifIFD');
+  const profileDesc = tag(t, 'ProfileDescription', 'ICC_Profile');
+  const isSrgbProfile = typeof profileDesc === 'string' && /sRGB/i.test(profileDesc);
+  assert(name, 'exiftool: ColorSpace is sRGB whenever the embedded ICC profile is sRGB',
+    !isSrgbProfile || colorSpace === 1, `ColorSpace=${colorSpace} ProfileDescription=${profileDesc}`);
   // Adobe drops ExifImageWidth/Height on export; they must be absent.
   assert(name, 'exiftool: no ExifImageWidth/Height (Adobe drops them)',
     keysNamed(t, 'ExifImageWidth').length === 0 && keysNamed(t, 'ExifImageHeight').length === 0, 'present');
