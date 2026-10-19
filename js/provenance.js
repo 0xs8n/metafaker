@@ -543,6 +543,12 @@ function crsAttributes({ editor, isRaw, scene, profileDigest, lensCorrection, cr
            ['crs:LensProfileIsEmbedded', 'False'], ['crs:LensProfileDistortionScale', '100'],
            ['crs:LensProfileVignettingScale', '100']);
   }
+  // Written when Auto was pressed: in 16 of 31 real desktop exports of a JPEG
+  // and 12 of 37 of a raw file, always as the pair, a different value in each
+  // file (a digest of that image's statistics), so a fresh one is drawn.
+  if (rnd() < (isRaw ? 12 / 37 : 16 / 31)) {
+    a.push(['crs:AutoToneDigest', hex(32).toUpperCase()], ['crs:AutoToneDigestNoSat', hex(32).toUpperCase()]);
+  }
   // The crop the pixels underwent, in Adobe's six-decimal form.
   const f6 = (v) => String(Number(v.toFixed(6)));
   a.push(
@@ -675,9 +681,10 @@ export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport,
   const derivedParams = isRaw
     ? `converted from ${source.mime} to image/jpeg, saved to new location`
     : 'saved to new location';
-  const derivedFrom = isRaw
-    ? `   <xmpMM:DerivedFrom\n    stRef:documentID="${original}"\n    stRef:originalDocumentID="${original}"/>`
-    : `   <xmpMM:DerivedFrom\n    stRef:instanceID="xmp.iid:${editor.platform === 'Macintosh' || rnd() < 0.4 ? uuidV4() : uuidPlain()}"\n    stRef:documentID="xmp.did:${uuidV4()}"\n    stRef:originalDocumentID="${original}"/>`;
+  // The source's own ID twice and no instance ID: every raw export, and 25 of
+  // 31 desktop exports of a JPEG. The xmp.did form appears only where the
+  // source had been saved by another Adobe app first (2 of 31).
+  const derivedFrom = `   <xmpMM:DerivedFrom\n    stRef:documentID="${original}"\n    stRef:originalDocumentID="${original}"/>`;
   return `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="${XMP_TOOLKIT}">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">

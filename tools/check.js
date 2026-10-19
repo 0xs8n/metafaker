@@ -690,6 +690,31 @@ function packetChecks({ digests, lcp, rawLp, out }) {
   const badUnit = out.filter(p => /crs:CropConstrainToUnitSquare=/.test(p.xmp) !== verAtLeast(xmpAttr(p.xmp, 'crs:Version'), '17.3'));
   assert(F, 'packets: CropConstrainToUnitSquare present exactly from crs 17.3', badUnit.length === 0,
     badUnit.slice(0, 3).map(p => p.software).join(' | '));
+
+  // DerivedFrom names the source file by the ID the packet gives it, with no
+  // instance ID, as real exports of a phone JPEG and of a raw file do.
+  const badDerived = out.filter(p => {
+    const df = (p.xmp.match(/<xmpMM:DerivedFrom([\s\S]*?)\/>/) || [])[1] || '';
+    const orig = xmpAttr(p.xmp, 'xmpMM:OriginalDocumentID');
+    return !/^[0-9A-F]{32}$/.test(orig || '') || xmpAttr(df, 'stRef:documentID') !== orig
+      || xmpAttr(df, 'stRef:originalDocumentID') !== orig || /stRef:instanceID=/.test(df);
+  });
+  assert(F, 'packets: DerivedFrom is the source ID twice, no instance ID', badDerived.length === 0,
+    badDerived.slice(0, 2).map(p => `${p.model}: ${(p.xmp.match(/<xmpMM:DerivedFrom[\s\S]*?\/>/) || [''])[0].replace(/\s+/g, ' ')}`).join(' | '));
+
+  // Auto tone: written at the share real exports show (JPEG 16/31, raw
+  // 12/37), always as a pair, with a value of its own in every file.
+  for (const [label, set, lo, hi] of [['phone JPEG', out.filter(p => p.type === 'phone'), 0.35, 0.70],
+                                      ['raw', bodies, 0.15, 0.50]]) {
+    const withAt = set.filter(p => xmpAttr(p.xmp, 'crs:AutoToneDigest'));
+    const share = withAt.length / Math.max(1, set.length);
+    assert(F, `packets: AutoToneDigest share on ${label} exports in [${lo}, ${hi}]`, share >= lo && share <= hi,
+      `${withAt.length} of ${set.length}`);
+  }
+  const digestsAt = out.map(p => xmpAttr(p.xmp, 'crs:AutoToneDigest')).filter(Boolean);
+  const unpaired = out.filter(p => !xmpAttr(p.xmp, 'crs:AutoToneDigest') !== !xmpAttr(p.xmp, 'crs:AutoToneDigestNoSat'));
+  assert(F, 'packets: AutoToneDigest always paired with NoSat and never repeated',
+    unpaired.length === 0 && new Set(digestsAt).size === digestsAt.length, `${unpaired.length} unpaired`);
 }
 
 /**
