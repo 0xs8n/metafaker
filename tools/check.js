@@ -812,6 +812,81 @@ function exposureChecks(data) {
   }
 }
 
+// ── Keep original date ───────────────────────────────────────────
+//
+// A kept date and time is the capture exactly, and every other date fits
+// after it: the export follows the capture by a drawn delay and neither has
+// happened later than now in the generated place's own zone.
+
+const KEEP_DRAWS = 150;
+
+async function keepDateInBrowser(page) {
+  return page.evaluate(async n => {
+    const { generateFake } = await import('/js/exif.js');
+    const { wallClockToUtc } = await import('/js/helpers.js');
+    const now = Date.now(), DAY = 864e5;
+    const at = ms => { const d = new Date(ms); d.setMilliseconds(0); return d; };
+    const fixtures = {
+      old: at(now - 2 * 365 * DAY), recent: at(now - 30 * 36e5),
+      future: at(now + DAY), ancient: new Date(2001, 5, 1, 12, 0, 0),
+    };
+    const out = {};
+    for (const [k, kept] of Object.entries(fixtures)) {
+      out[k] = Array.from({ length: k === 'old' || k === 'recent' ? n : 20 }, () => {
+        const g = generateFake({ originalDate: kept });
+        return {
+          kept: kept.getTime(), capture: g.capture.getTime(), exportAt: g.exportAt.getTime(),
+          captureUtc: wallClockToUtc(g.capture, g.loc.tz).getTime(), exportUtc: wallClockToUtc(g.exportAt, g.loc.tz).getTime(),
+          released: g.cam.released, dropped: g.keepDateDropped,
+        };
+      });
+    }
+    return { now: Date.now(), out };
+  }, KEEP_DRAWS);
+}
+
+function keepDateChecks({ now, out }) {
+  const F = '(keep date)';
+  for (const k of ['old', 'recent']) {
+    const rows = out[k];
+    const bad = rows.filter(r => r.dropped || r.capture !== r.kept);
+    assert(F, `keep date (${k}): Date Taken is the original date and time exactly`, bad.length === 0, `${bad.length} of ${rows.length} differ`);
+    const order = rows.filter(r => !(r.exportAt > r.capture) || r.captureUtc > now || r.exportUtc > now);
+    assert(F, `keep date (${k}): exported after capture, neither later than now in the place's zone`, order.length === 0,
+      order.slice(0, 2).map(r => `capture ${new Date(r.capture).toISOString()} export ${new Date(r.exportAt).toISOString()}`).join(' | '));
+    const early = rows.filter(r => new Date(`${r.released}T00:00:00`).getTime() > r.capture);
+    assert(F, `keep date (${k}): camera released by the kept date`, early.length === 0, early.map(r => r.released).join(','));
+    const lags = new Set(rows.map(r => Math.round((r.exportAt - r.capture) / 60000)));
+    assert(F, `keep date (${k}): export delay is drawn, not fixed`, lags.size > rows.length / 2, `${lags.size} distinct delays in ${rows.length}`);
+  }
+  for (const [k, why] of [['future', 'future'], ['ancient', 'old']]) {
+    const bad = out[k].filter(r => r.dropped !== why || r.capture === r.kept || r.captureUtc > now);
+    assert(F, `keep date (${k}): replaced by a drawn date and reported as '${why}'`, bad.length === 0, `${bad.length} of ${out[k].length}`);
+  }
+}
+
+/** The real UI path: one of this run's own outputs, loaded again with the box ticked. */
+async function keepDateEndToEnd(page) {
+  return page.evaluate(async () => {
+    const src = S.items.find(it => it.modBlob && it.fakeExif && it.inputClass?.isPhoto);
+    if (!src) return { error: 'no randomized photo output to reload' };
+    const { parseFileExif } = await import('/js/exif.js');
+    const blob = src.modBlob;                  // reset() releases the item's outputs
+    const want = (await parseFileExif(blob)).DateTimeOriginal;
+    App.reset();
+    await App.loadFiles([new File([blob], 'keep-date-input.jpg', { type: 'image/jpeg' })]);
+    const it = S.items[S.items.length - 1];
+    App.select(it.id);
+    document.getElementById('chkKeepDate').checked = true;
+    await App.randomize();
+    document.getElementById('chkKeepDate').checked = false;
+    const out = await parseFileExif(it.modBlob);
+    const got = out.DateTimeOriginal, modified = out.ModifyDate;
+    const t = d => d instanceof Date ? d.getTime() : NaN;
+    return { want: t(want), got: t(got), modified: t(modified), dropped: it.keepDateDropped, error: it.error };
+  });
+}
+
 // ── Generated packets, in bulk ───────────────────────────────────
 //
 // The test images give a handful of outputs per run, too few to see a field
@@ -994,6 +1069,16 @@ async function main() {
       packetChecks(await samplePackets(page));
     } catch (e) {
       assert('(packets)', 'packets: sampling ran without throwing', false, e.message);
+    }
+    try {
+      keepDateChecks(await keepDateInBrowser(page));
+      const e2e = await keepDateEndToEnd(page);
+      assert('(keep date)', "keep date: the UI keeps the input's exact Date Taken", !e2e.error && !e2e.dropped && e2e.got === e2e.want,
+        e2e.error || `want ${new Date(e2e.want).toISOString()} got ${new Date(e2e.got).toISOString()} (${e2e.dropped})`);
+      assert('(keep date)', "keep date: the UI output's Date Modified is after its Date Taken", e2e.modified > e2e.got,
+        `taken ${new Date(e2e.got).toISOString()} modified ${new Date(e2e.modified).toISOString()}`);
+    } catch (e) {
+      assert('(keep date)', 'keep date: checks ran without throwing', false, e.stack || e.message);
     }
 
     // Network privacy: everything must be local.

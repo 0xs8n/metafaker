@@ -123,6 +123,25 @@ function randomStem(n = 8) {
  * (`processClearItem` sets `fakeStem` for exactly this reason). The fallback
  * below only runs if some future caller forgets to set a stem.
  */
+/**
+ * The original's capture date and time, as its camera's clock wrote them.
+ * exifr revives EXIF dates as local Date objects whose fields are that wall
+ * clock; a string that slipped through unrevived is read the same way.
+ * ModifyDate is the last resort: it names the last save, not the capture.
+ */
+function originalCaptureDate(exif) {
+  const raw = exif && (exif.DateTimeOriginal || exif.CreateDate || exif.DateTimeDigitized || exif.ModifyDate || exif.DateTime);
+  if (raw instanceof Date) return isNaN(raw) ? null : raw;
+  const m = typeof raw === 'string' && raw.match(/(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+}
+
+const KEEP_DATE_DROPPED = {
+  missing: 'its metadata carries no capture date to keep',
+  old: 'its original date is older than every camera the tool can name',
+  future: 'its original date and time have not happened yet in a US time zone',
+};
+
 function getOutputName(item) {
   if (item?.fakeStem) return `${item.fakeStem}.jpg`;
   return `img_${randomStem()}.jpg`;
@@ -448,19 +467,11 @@ async function processRandomizeItem(item, options = {}) {
   if (!deferRender) renderCurrentItem();
 
   try {
-    let originalDate = null;
-    if (document.getElementById('chkKeepDate')?.checked && item.origExif) {
-      const raw = item.origExif.DateTimeOriginal || item.origExif.DateTime || item.origExif.CreateDate;
-      if (raw instanceof Date) {
-        originalDate = raw;
-      } else if (typeof raw === 'string') {
-        const parts = raw.match(/(\d{4}):(\d{2}):(\d{2})/);
-        if (parts) originalDate = new Date(parseInt(parts[1], 10), parseInt(parts[2], 10) - 1, parseInt(parts[3], 10));
-      }
-    }
+    const keepDate = !!document.getElementById('chkKeepDate')?.checked;
+    const originalDate = keepDate ? originalCaptureDate(item.origExif) : null;
 
     const fake = generateFake({ originalDate });
-    item.keepDateDropped = !!fake.keepDateDropped;
+    item.keepDateDropped = keepDate ? (originalDate ? fake.keepDateDropped : 'missing') : null;
     // Render the pixel container and wrap the Adobe metadata segments around it.
     const { verified, modDataUrl, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
     fake.display.PixelXDimension = width;
@@ -491,7 +502,7 @@ async function processRandomizeItem(item, options = {}) {
     if (verified.warning) {
       showToast(`${verified.warning} Some sites strip metadata on upload.`, 'warning');
     } else if (item.keepDateDropped && !quiet) {
-      showToast(`${item.file.name}: its original date is older than every camera the tool can name, so a new date was generated instead.`, 'warning');
+      showToast(`${item.file.name}: ${KEEP_DATE_DROPPED[item.keepDateDropped]}, so a new date was generated instead.`, 'warning');
     } else if (!quiet) {
       showToast(`Randomized ${item.file.name}${locTxt}`, 'info');
     }
@@ -651,7 +662,7 @@ export const App = {
       showToast(msg.charAt(0).toUpperCase() + msg.slice(1) + '.', 'success');
     }
     if (dropped) {
-      showToast(`${dropped} image${dropped === 1 ? ' has' : 's have'} an original date older than every camera the tool can name, so new dates were generated for ${dropped === 1 ? 'it' : 'them'}.`, 'warning');
+      showToast(`${dropped} image${dropped === 1 ? '' : 's'} could not keep ${dropped === 1 ? 'its' : 'their'} original date (none in the metadata, older than every camera the tool can name, or not yet reached in a US time zone), so new dates were generated.`, 'warning');
     }
     // "Keep original date" was ticked: images from the same day keep that
     // day, which links them to each other, not only to their originals.

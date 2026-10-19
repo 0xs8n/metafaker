@@ -87,6 +87,12 @@ export function wallClockToUtc(d, tz) {
   }
 }
 
+/** The wall clock `tz` showed at a UTC instant, as a Date whose local fields are that reading. */
+export function utcToWallClock(utcMs, tz) {
+  const w = new Date(utcMs + tzOffsetMs(utcMs, tz));
+  return new Date(w.getUTCFullYear(), w.getUTCMonth(), w.getUTCDate(), w.getUTCHours(), w.getUTCMinutes(), w.getUTCSeconds());
+}
+
 /** The zone's offset at that instant as an EXIF OffsetTime string, "+09:00". */
 export function tzOffsetString(utcDate, tz) {
   if (!tz) return null;

@@ -13,7 +13,7 @@ import { ICONS } from './icons.js';
 import {
   pick, randInt, clamp, cryptoRandInt,
   pickLocation, fmtDate, fmtGpsDate,
-  wallClockToUtc, tzOffsetString, sunElevation,
+  wallClockToUtc, utcToWallClock, tzOffsetString, sunElevation,
   dmsToDec, dataUrlToBlob,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
@@ -437,29 +437,24 @@ function pickTimes(anchor) {
   return { capture, exportAt };
 }
 
-/** A capture on the kept original calendar day, at a drawn hour. */
-function keptCapture(originalDate) {
-  return new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate(),
-                  pickHour(), randInt(0, 59), randInt(0, 59));
-}
-
 /**
  * The export time for a kept original date: the capture plus a measured
  * delay, at a measured hour of the day when the delay is a day or more, never
- * before the editor's first release and never after the anchor. A capture too
+ * before the editor's first release and never after `latest`. A capture too
  * old for the editor is exported at some point between its first release and
- * the anchor, as people re-export old photos.
+ * `latest`, as people re-export old photos. A capture only minutes before
+ * `latest` gets a shorter minimum delay rather than an export after it.
  */
-function pickExport(capture, anchor, earliest) {
-  const MIN = 30 * 60000;
-  for (let tries = 0; tries < 30; tries++) {
+function pickExport(capture, latest, earliest) {
+  const MIN = Math.min(30 * 60000, (latest - capture.getTime()) / 2);
+  for (let tries = 0; tries < 200; tries++) {
     const lag = drawExportLagMs();
     const t = new Date(capture.getTime() + lag);
     if (lag >= DAY) t.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
-    if (t.getTime() >= capture.getTime() + MIN && t.getTime() <= anchor && t >= earliest) return t;
+    if (t.getTime() >= capture.getTime() + MIN && t.getTime() <= latest && t >= earliest) return t;
   }
   const lo = Math.max(capture.getTime() + MIN, earliest.getTime());
-  const hi = Math.max(lo, anchor);
+  const hi = Math.max(lo, latest);
   return new Date(lo + rnd() * (hi - lo));
 }
 
@@ -544,16 +539,34 @@ export function generateFake(options = {}) {
   const px = window.piexif;
   registerTags(px);
   // The capture comes first, so the camera can be one that existed by then.
-  // A kept original date older than every camera here (a photo from 2001)
-  // cannot be told consistently, so a fresh date is drawn instead and the
-  // caller is told (keepDateDropped).
+  // A kept original date and time is the capture exactly; every other date is
+  // drawn to fit after it. One that cannot be told consistently (older than
+  // every camera here, or later than now) is replaced by a drawn date and the
+  // caller is told why (keepDateDropped).
   const anchor = pickAnchor();
   const kept = options.originalDate instanceof Date && !isNaN(options.originalDate) ? options.originalDate : null;
-  let capture = null, exportAt = null, pool = [], keepDateDropped = false;
+  let capture = null, exportAt = null, pool = [], keepDateDropped = null, latest = anchor, loc = null;
   if (kept) {
-    capture = keptCapture(kept);
-    pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, anchor));
-    if (!pool.length) keepDateDropped = true;
+    if (kept.getTime() >= Date.now()) keepDateDropped = 'future';
+    else if (kept.getTime() < anchor - DAY) capture = new Date(kept.getTime());
+    else {
+      // The anchor keeps the newest date from saying when the tool ran, but a
+      // photo taken after it has to be exported after it, so the bound is now,
+      // read in the place's own zone: the kept wall clock must already have
+      // happened there, or the file would claim a capture in the future.
+      for (let i = 0; i < 200 && !loc; i++) {
+        const l = pickLocation();
+        if (wallClockToUtc(kept, l.tz).getTime() < Date.now() - 60000) loc = l;
+      }
+      if (loc) {
+        capture = new Date(kept.getTime());
+        latest = utcToWallClock(Date.now(), loc.tz).getTime();
+      } else keepDateDropped = 'future';
+    }
+    if (capture) {
+      pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, new Date(latest)));
+      if (!pool.length) { keepDateDropped = 'old'; capture = null; loc = null; latest = anchor; }
+    }
   }
   // A long measured delay can put the capture before every camera here; draw
   // again until at least one existed.
@@ -563,11 +576,11 @@ export function generateFake(options = {}) {
   }
   const cam = pick(pool);
   const w   = WRITERS[cam.writer];
-  const loc = pickLocation();
+  if (!loc) loc = pickLocation();
   const isBody = w.kind === 'body';
   const editorKind = isBody ? 'acr' : 'lr';
   const acrMin = isBody ? cam.acrMin || null : null;
-  if (!exportAt) exportAt = pickExport(capture, anchor, earliestRelease(editorKind, acrMin));
+  if (!exportAt) exportAt = pickExport(capture, latest, earliestRelease(editorKind, acrMin));
   const editor = pickEditor(editorKind, exportAt, acrMin);
 
   const { focalPhys, focalEquiv, lens } = pickOptics(cam);
