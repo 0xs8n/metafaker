@@ -45,6 +45,11 @@
  *                 made of its ARWs). A body without one is never offered: a
  *                 random digest matches no real profile, and two outputs of one
  *                 body with different digests contradict each other.
+ *   rawLensProfile — the body's raw files carry their own lens-correction
+ *                 data, which Camera Raw names "Camera Settings" with a record
+ *                 of that shot's distortion model (every export with correction
+ *                 on: 5 X-T5, 1 X-T50, 2 R5 Mark II). That record cannot be
+ *                 generated faithfully, so these export with correction off.
  *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution;
  *                 `perCmRat` is the exact per-cm rational Camera Raw's exports
  *                 of that body carry (64449339/32768 for an A7 IV or A7C II).
@@ -310,7 +315,7 @@ export const CAMERAS = [
   // ── Canon: no Software, APEX over 65536, LensInfo with empty apertures, 12-digit serials ──
   // The camera writes "Canon EOS R5m2" and "Canon EOS R6m2" for the Mark II bodies.
   // The R5 Mark II's launch firmware 1.0.0 is in an export of a 2024-08-25 capture.
-  { make:"Canon", model:"Canon EOS R5m2", released:"2024-08-20", acrMin:"16.4", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'],
+  { make:"Canon", model:"Canon EOS R5m2", released:"2024-08-20", acrMin:"16.4", type:"dslr", writer:"canon", aspects:ASPECTS_DSLR, crop:1.0, mounts:['RF','EF'], rawLensProfile:true,
     exifVersion:"0231", offset:'all', subsec:2, flash:false, firmware:"1.0.0",
     raw:{ mime:'image/x-canon-cr3', ext:'CR3', prefix:'IMG_' }, profileDigest:'34CFA4AC8E3861352E9AE36290FF5B0C',
     sensor:{ px:[8192, 5464], inch:[1419, 947] },
@@ -434,7 +439,7 @@ export const CAMERAS = [
     focals:[24,35,50,85,135] },
 
   // ── Fujifilm: everything over 100, SensitivityType 1 without an index, serials like 3B008051 ──
-  { make:"FUJIFILM", model:"X-T50", released:"2024-06-30", acrMin:"16.3", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
+  { make:"FUJIFILM", model:"X-T50", released:"2024-06-30", acrMin:"16.3", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'], rawLensProfile:true,
     exifVersion:"0232", offset:'all', subsec:2, flash:false,
     raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' }, profileDigest:'6DA0A6EFA8823F485E37B03DDCBA7D3D',
     sensor:{ px:[7728, 5152], perCmRat:[108260745, 32768] },
@@ -443,7 +448,7 @@ export const CAMERAS = [
     shutters:[[1,4000],[1,2000],[1,1000],[1,500],[1,250],[1,170],[1,125],[1,60],[1,30],[1,15]],
     focals:[16,18,23,35,56] },
 
-  { make:"FUJIFILM", model:"X-T5", released:"2022-11-17", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'],
+  { make:"FUJIFILM", model:"X-T5", released:"2022-11-17", type:"dslr", writer:"fuji", aspects:ASPECTS_DSLR, crop:1.5, mounts:['X'], rawLensProfile:true,
     exifVersion:"0232", offset:'all', subsec:0, flash:false,
     raw:{ mime:'image/x-fuji-raf', ext:'RAF', prefix:'DSCF' }, profileDigest:'937A7BEEC058D87FEBE4AE4633E885D6',
     sensor:{ px:[7728, 5152], perCmRat:[108260745, 32768] },
@@ -548,18 +553,27 @@ export const LOCATIONS = [
 // `tele` is the maximum aperture at the long end of a variable zoom.
 // `adobe` is the name Camera Raw writes for an F-mount Nikon lens, whose
 // identity reaches it through the raw file's MakerNote rather than a string.
+// `lcp` is the lens-correction profile Camera Raw names when its profile
+// correction is on, copied from a real raw export with that lens (Camera Raw
+// 16.3 and 16.4, Lightroom Classic 8.4, 9.4 and 14.0.1). A lens without one
+// is exported with profile correction off: the profile is lens-specific and
+// none is invented. A `rawLensProfile` body never names one (see CAMERAS).
 
 export const DSLR_LENSES = {
   'Canon': [
     { model: 'RF24-70mm F2.8 L IS USM',             range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'RF' },
     { model: 'RF50mm F1.8 STM',                     range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'RF' },
     { model: 'RF85mm F1.2 L USM',                   range: [85, 85],   wide: 1.2, tele: 1.2, mount: 'RF' },
-    { model: 'RF24-105mm F4 L IS USM',              range: [24, 105],  wide: 4.0, tele: 4.0, mount: 'RF' },
+    { model: 'RF24-105mm F4 L IS USM',              range: [24, 105],  wide: 4.0, tele: 4.0, mount: 'RF',
+      lcp: { name: 'Adobe (Canon RF 24-105mm F4 L IS USM)', file: 'Canon (Canon RF 24-105mm F4L IS USM) - RAW.lcp', digest: 'ADDA69217AE7A042DAE5913B0FCF6F52' } },
     { model: 'RF35mm F1.8 MACRO IS STM',            range: [35, 35],   wide: 1.8, tele: 1.8, mount: 'RF' },
     { model: 'RF100-400mm F5.6-8 IS USM',           range: [100, 400], wide: 5.6, tele: 8.0, mount: 'RF' },
-    { model: 'RF100-500mm F4.5-7.1 L IS USM',       range: [100, 500], wide: 4.5, tele: 7.1, mount: 'RF' },
-    { model: 'EF24-70mm f/2.8L II USM',             range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'EF' },
-    { model: 'EF50mm f/1.8 STM',                    range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'EF' },
+    { model: 'RF100-500mm F4.5-7.1 L IS USM',       range: [100, 500], wide: 4.5, tele: 7.1, mount: 'RF',
+      lcp: { name: 'Adobe (Canon RF 100-500mm F4.5-7.1 L IS USM)', file: 'Canon (Canon RF 100-500mm F4.5-7.1 L IS USM) - RAW.lcp', digest: '60528901A40D44097DC962288DAACACD' } },
+    { model: 'EF24-70mm f/2.8L II USM',             range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'EF',
+      lcp: { name: 'Adobe (Canon EF 24-70mm f/2.8 L II USM)', file: 'Canon EOS 5D Mark II (Canon EF 24-70mm f2.8 L II USM) - RAW.lcp', digest: 'AFEEACDA8777F259982DCD59A5178FC0' } },
+    { model: 'EF50mm f/1.8 STM',                    range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'EF',
+      lcp: { name: 'Adobe (Canon EF 50mm f/1.8 STM)', file: 'Canon EOS-1Ds Mark III (Canon EF 50mm f1.8 STM) - RAW.lcp', digest: 'B23331240701D3B28825B46A4802290C' } },
     { model: 'EF85mm f/1.4L IS USM',                range: [85, 85],   wide: 1.4, tele: 1.4, mount: 'EF' },
     { model: 'EF70-200mm f/2.8L IS III USM',        range: [70, 200],  wide: 2.8, tele: 2.8, mount: 'EF' },
     { model: 'EF35mm f/1.4L II USM',                range: [35, 35],   wide: 1.4, tele: 1.4, mount: 'EF' },
@@ -588,7 +602,8 @@ export const DSLR_LENSES = {
   ],
   'SONY': [
     { model: 'FE 24-70mm F2.8 GM II',               range: [24, 70],   wide: 2.8, tele: 2.8, mount: 'E' },
-    { model: 'FE 24-240mm F3.5-6.3 OSS',            range: [24, 240],  wide: 3.5, tele: 6.3, mount: 'E' },
+    { model: 'FE 24-240mm F3.5-6.3 OSS',            range: [24, 240],  wide: 3.5, tele: 6.3, mount: 'E',
+      lcp: { name: 'Adobe (Sony FE 24-240mm F3.5-6.3 OSS)', file: 'SONY (Sony FE 24-240mm F3.5-6.3 OSS) - RAW.lcp', digest: '0E0E0483ED048452CE6CC01CB9D7D893' } },
     { model: 'FE 50mm F1.8',                        range: [50, 50],   wide: 1.8, tele: 1.8, mount: 'E' },
     { model: 'FE 85mm F1.4 GM',                     range: [85, 85],   wide: 1.4, tele: 1.4, mount: 'E' },
     { model: 'FE 70-200mm F2.8 GM OSS II',          range: [70, 200],  wide: 2.8, tele: 2.8, mount: 'E' },

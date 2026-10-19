@@ -619,9 +619,13 @@ const verAtLeast = (v, min) => {
 };
 
 async function samplePackets(page) {
-  const digests = await page.evaluate(async () => {
+  const { digests, lcp, rawLp } = await page.evaluate(async () => {
     const data = await import('/js/data.js');
-    return Object.fromEntries(data.CAMERAS.filter(c => c.profileDigest).map(c => [c.model, c.profileDigest]));
+    return {
+      digests: Object.fromEntries(data.CAMERAS.filter(c => c.profileDigest).map(c => [c.model, c.profileDigest])),
+      rawLp: data.CAMERAS.filter(c => c.rawLensProfile).map(c => c.model),
+      lcp: Object.fromEntries(Object.values(data.DSLR_LENSES).flat().filter(l => l.lcp).map(l => [l.model, l.lcp])),
+    };
   });
   const out = [];
   while (out.length < PACKET_SAMPLE) {           // in batches: one reply of every packet is too big
@@ -634,14 +638,16 @@ async function samplePackets(page) {
           capture: g.capture, exportAt: g.exportAt, offsetCapture: g.offset, offsetExport: g.exportOffset, subsec: g.subsec,
           lens: g.lensMeta, editor: g.editor, source: g.source, scene: g.scene, aux: g.aux,
         });
-        return { model: g.cam.model, type: g.cam.type, software: g.editor.software, xmp: xmp.slice(0, xmp.indexOf('</x:xmpmeta>')) };
+        return { model: g.cam.model, type: g.cam.type, software: g.editor.software,
+                 lens: g.lens?.model || null,
+                 xmp: xmp.slice(0, xmp.indexOf('</x:xmpmeta>')) };
       });
     }, 40));
   }
-  return { digests, out };
+  return { digests, lcp, rawLp, out };
 }
 
-function packetChecks({ digests, out }) {
+function packetChecks({ digests, lcp, rawLp, out }) {
   const F = '(packets)';
   const bodies = out.filter(p => p.type !== 'phone');
   assert(F, 'packets: sample includes camera bodies', bodies.length >= out.length / 10, bodies.length);
@@ -667,6 +673,44 @@ function packetChecks({ digests, out }) {
   });
   assert(F, 'packets: ColorVariance present exactly from crs 17.5', badCv.length === 0,
     badCv.slice(0, 3).map(p => p.software).join(' | '));
+
+  // Lens-profile correction names a profile, and that profile is specific to
+  // the lens: it is on only where a real export showed which one Camera Raw
+  // names, and then names exactly that one.
+  const on = bodies.filter(p => xmpAttr(p.xmp, 'crs:LensProfileEnable') === '1');
+  const badLens = out.filter(p => {
+    const name = xmpAttr(p.xmp, 'crs:LensProfileName');
+    if (xmpAttr(p.xmp, 'crs:LensProfileEnable') !== '1') return name !== null;
+    const want = !rawLp.includes(p.model) && lcp[p.lens];
+    return !want || name !== want.name.replace(/&/g, '&amp;') || xmpAttr(p.xmp, 'crs:LensProfileDigest') !== want.digest;
+  });
+  assert(F, 'packets: lens-profile correction on only with the profile measured for that lens', badLens.length === 0,
+    badLens.slice(0, 3).map(p => `${p.model} + ${p.lens}: ${xmpAttr(p.xmp, 'crs:LensProfileName')}`).join(' | '));
+  assert(F, 'packets: some body exports have lens-profile correction on', on.length > 0, `${on.length} of ${bodies.length}`);
+  const badUnit = out.filter(p => /crs:CropConstrainToUnitSquare=/.test(p.xmp) !== verAtLeast(xmpAttr(p.xmp, 'crs:Version'), '17.3'));
+  assert(F, 'packets: CropConstrainToUnitSquare present exactly from crs 17.3', badUnit.length === 0,
+    badUnit.slice(0, 3).map(p => p.software).join(' | '));
+}
+
+/**
+ * The XMP crop must describe what was done to the pixels: the corners it
+ * names, in the input's pixel space and turned back by CropAngle, span a
+ * rectangle with the output's own shape. Adobe's convention, measured on real
+ * straightened exports, is a TL-to-BR diagonal of R(CropAngle)·(w, h).
+ */
+function cropChecks(name, t, info, src) {
+  const g = k => num(tag(t, k, 'XMP-crs'));
+  const hasCrop = String(tag(t, 'HasCrop', 'XMP-crs'));
+  if (!assert(name, 'exiftool: XMP HasCrop is True (the pixels were cropped)', /^(True|1|true)$/.test(hasCrop), `HasCrop=${hasCrop}`)) return;
+  const [L, T, R, B, A] = ['CropLeft', 'CropTop', 'CropRight', 'CropBottom', 'CropAngle'].map(g);
+  const inside = [L, T, R, B].every(v => v >= 0 && v <= 1) && L < R && T < B && Math.abs(A) <= 2.0;
+  assert(name, 'exiftool: crop rectangle inside the frame, angle within the rotation range', inside, `L=${L} T=${T} R=${R} B=${B} A=${A}`);
+  if (!src || !info.width) return;
+  const th = A * Math.PI / 180, dx = (R - L) * src.width, dy = (B - T) * src.height;
+  const w = dx * Math.cos(th) + dy * Math.sin(th), h = -dx * Math.sin(th) + dy * Math.cos(th);
+  const err = Math.abs(Math.log((w / h) / (info.width / info.height)));
+  assert(name, 'exiftool: crop rectangle and angle give the output shape (±1%)', err < 0.01,
+    `crop ${fmt(w, 0)}x${fmt(h, 0)} at ${A}° vs output ${info.width}x${info.height}`);
 }
 
 // ── Main ─────────────────────────────────────────────────────────
@@ -739,6 +783,9 @@ async function main() {
       row.layout = info.layout;
       row.dims = info.width ? `${info.width}x${info.height}` : '?';
       row.info = info;
+      const srcFile = path.join(TESTIMG, it.noExtCase ? names[0] : it.name);
+      const srcSof = fs.existsSync(srcFile) && walkJpeg(fs.readFileSync(srcFile)).segments.find(s => s.marker === 0xC0 || s.marker === 0xC2);
+      row.src = srcSof ? parseSof(srcSof) : null;
     }
   } finally {
     if (chrome) await chrome.close();
@@ -760,6 +807,7 @@ async function main() {
         if (!assert(row.name, 'exiftool: produced output for file', !!t, 'no JSON object for this file')) continue;
         row.exif = t;
         exiftoolChecks(row.name, t, row.mode, row.info);
+        if (row.mode === 'randomized') cropChecks(row.name, t, row.info, row.src);
       }
     } catch (e) {
       assert('(exiftool)', 'exiftool: ran successfully', false, e.message);

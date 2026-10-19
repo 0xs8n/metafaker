@@ -421,7 +421,7 @@ const signed = (n) => (n > 0 ? `+${n}` : String(n));
  * and IncrementalTint, the three legacy keys Shadows/Brightness/Contrast, and
  * sharpening at zero. A few sliders are moved at random, as people do.
  */
-function crsAttributes({ editor, isRaw, scene, profileDigest }) {
+function crsAttributes({ editor, isRaw, scene, profileDigest, lensCorrection, crop }) {
   const kelvin = { daylight: [5200, 5900], overcast: [5800, 6800], indoor: [2900, 3800],
                    dim: [2800, 3600], night: [2600, 3600] }[scene] || [5000, 5600];
   const temp = kelvin[0] + Math.floor(rnd() * (kelvin[1] - kelvin[0]));
@@ -498,8 +498,8 @@ function crsAttributes({ editor, isRaw, scene, profileDigest }) {
     ['crs:ColorGradeGlobalHue', '0'],
     ['crs:ColorGradeGlobalSat', '0'],
     ['crs:ColorGradeGlobalLum', '0'],
-    ['crs:AutoLateralCA', '0'],
-    ['crs:LensProfileEnable', '0'],
+    ['crs:AutoLateralCA', lensCorrection?.autoCA ? '1' : '0'],
+    ['crs:LensProfileEnable', lensCorrection?.profile ? '1' : '0'],
     ['crs:LensManualDistortionAmount', '0'],
     ['crs:VignetteAmount', '0'],
     ['crs:DefringePurpleAmount', '0'],
@@ -535,14 +535,30 @@ function crsAttributes({ editor, isRaw, scene, profileDigest }) {
     ['crs:ToneCurveName2012', 'Linear'],
     ['crs:CameraProfile', isRaw ? 'Adobe Standard' : 'Embedded'],
     ['crs:CameraProfileDigest', isRaw ? profileDigest : '54650A341B5B5CCAE8442D0B43A92BCE'],
+  );
+  const lp = lensCorrection?.profile;
+  if (lp) {
+    a.push(['crs:LensProfileSetup', 'LensDefaults'], ['crs:LensProfileName', xml(lp.name)],
+           ['crs:LensProfileFilename', xml(lp.file)], ['crs:LensProfileDigest', lp.digest],
+           ['crs:LensProfileIsEmbedded', 'False'], ['crs:LensProfileDistortionScale', '100'],
+           ['crs:LensProfileVignettingScale', '100']);
+  }
+  // The crop the pixels underwent, in Adobe's six-decimal form.
+  const f6 = (v) => String(Number(v.toFixed(6)));
+  a.push(
     ['crs:HasSettings', 'True'],
-    ['crs:CropTop', '0'],
-    ['crs:CropLeft', '0'],
-    ['crs:CropBottom', '1'],
-    ['crs:CropRight', '1'],
-    ['crs:CropAngle', '0'],
+    ['crs:CropTop', crop ? f6(crop.top) : '0'],
+    ['crs:CropLeft', crop ? f6(crop.left) : '0'],
+    ['crs:CropBottom', crop ? f6(crop.bottom) : '1'],
+    ['crs:CropRight', crop ? f6(crop.right) : '1'],
+    ['crs:CropAngle', crop ? f6(crop.angle) : '0'],
     ['crs:CropConstrainToWarp', '0'],
-    ['crs:HasCrop', 'False'],
+  );
+  // Written from crs 17.3.1 on (12 of 12 real exports), never before (0 of 30
+  // up to 17.2); 17.3.0 itself was not seen and is taken with its patch.
+  if (versionAtLeast(editor.crsVersion, '17.3')) a.push(['crs:CropConstrainToUnitSquare', '1']);
+  a.push(
+    ['crs:HasCrop', crop ? 'True' : 'False'],
     ['crs:AlreadyApplied', 'True'],
   );
   return a.map(([k, v]) => `   ${k}="${v}"`).join('\n');
@@ -618,7 +634,7 @@ const XMP_PADDING = '\n' + (' '.repeat(100) + '\n').repeat(40) + ' '.repeat(55) 
  * curves and PointColors, then the padding.
  */
 export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport, subsec,
-                                 lens, editor, source, scene, aux = {} }) {
+                                 lens, editor, source, scene, aux = {}, crop = null }) {
   const id = uuidFor(editor.platform);
   const created  = xmpDate(capture, offsetCapture, subsec);
   const modified = xmpDate(exportAt, offsetExport);
@@ -654,7 +670,8 @@ export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport,
          ['dc:format', 'image/jpeg'],
          ['crs:RawFileName', xml(source.fileName)]);
   const attrs = A.map(([k, v]) => `   ${k}="${v}"`).join('\n');
-  const crs = crsAttributes({ editor, isRaw, scene, profileDigest: source.profileDigest });
+  const crs = crsAttributes({ editor, isRaw, scene, profileDigest: source.profileDigest,
+                             lensCorrection: source.lensCorrection, crop });
   const derivedParams = isRaw
     ? `converted from ${source.mime} to image/jpeg, saved to new location`
     : 'saved to new location';

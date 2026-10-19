@@ -757,7 +757,7 @@ export function generateFake(options = {}) {
   };
   const source = isBody
     ? { raw: true, mime: cam.raw.mime, fileName: `${rawFileStem(cam)}.${cam.raw.ext}`,
-        profileDigest: cam.profileDigest }
+        profileDigest: cam.profileDigest, lensCorrection: drawLensCorrection(cam, lens) }
     // Always a generated name in the phone's own convention: the user's real
     // filename would identify them or the original photo.
     : { raw: false, fileName: `${phoneStem(cam, capture, subsec)}.jpg` };
@@ -774,6 +774,25 @@ export function generateFake(options = {}) {
     scene: scene.name, ev: Number(ev.toFixed(2)),
     lensMeta, source, aux,
   };
+}
+
+// Lens corrections in the 40 raw-source exports on disk (one uploader's
+// repeats counted once): profile correction and lateral CA removal both on in
+// 27, both off in 10, the profile alone in 2, CA removal alone in 1.
+const LENS_CORRECTION = [[true, true, 27], [false, false, 10], [true, false, 2], [false, true, 1]];
+
+/**
+ * Whether the export has lens-profile correction and lateral CA removal on.
+ * Profile correction is on only for a lens whose Camera Raw profile was copied
+ * from a real export (data.js `lcp`), on a body that does not carry its own;
+ * otherwise it is off, drawn from the measured cells with it off.
+ */
+function drawLensCorrection(cam, lens) {
+  const profile = (!cam.rawLensProfile && lens?.lcp) || null;
+  const cells = profile ? LENS_CORRECTION : LENS_CORRECTION.filter(([on]) => !on);
+  let r = rnd() * cells.reduce((n, c) => n + c[2], 0);
+  const [on, autoCA] = cells.find(c => (r -= c[2]) <= 0) || cells[0];
+  return { profile: on ? profile : null, autoCA };
 }
 
 /** A camera-raw-style file stem, like "4E4A0122" or "DSC_1234". */
