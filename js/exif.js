@@ -337,6 +337,8 @@ const EXPOSURES = {
 const ISO_THIRDS = [10, 12, 16, 20, 25, 32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500,
   640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800];
 const nearestThird = iso => ISO_THIRDS.reduce((a, b) => Math.abs(Math.log(b / iso)) < Math.abs(Math.log(a / iso)) ? b : a);
+/** The ISO camera `cam` writes for a measured file's `iso`. */
+export const writtenIso = (cam, iso) => cam.type === 'phone' && cam.writer !== 'apple' && cam.writer !== 'google' ? nearestThird(iso) : iso;
 
 const evOf = (f, t, iso) => Math.log2(f * f / t) - Math.log2(iso / 100);
 
@@ -369,8 +371,7 @@ function drawExposure(cam, lens, apertureAtFocal, ev) {
     if (!near.length) continue;
     let r = rnd() * near.reduce((n, x) => n + x.w, 0);
     const x = near.find(c => (r -= c.w) <= 0) || near[near.length - 1];
-    const iso = phone && cam.writer !== 'apple' && cam.writer !== 'google' ? nearestThird(x.iso) : x.iso;
-    return { aperture: fOf(x), exposureSec: x.t, iso };
+    return { aperture: fOf(x), exposureSec: x.t, iso: writtenIso(cam, x.iso) };
   }
   throw new Error(`no measured exposure fits ${cam.model}`);
 }
