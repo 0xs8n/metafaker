@@ -7,7 +7,7 @@
 
 import {
   fmtBytes, escapeHtml, makeId, rnd,
-  dataUrlToBlob, stripViaCanvas, makeAdobeThumbnail, insertAfterSoi, iccApp2Segment,
+  stripViaCanvas, makePreviewBlob, insertAfterSoi, iccApp2Segment,
 } from './helpers.js';
 import { dumpExifSafe } from './exif-writer.js';
 import { buildXmpPacket, xmpSegment, buildPhotoshopApp13 } from './provenance.js';
@@ -41,9 +41,8 @@ function createItem(file) {
   return {
     id: makeId(),
     file,
-    previewUrl: (typeof URL !== 'undefined' && URL.createObjectURL) ? URL.createObjectURL(file) : '',
+    previewUrl: '',
     origExif: {},
-    modDataUrl: null,
     modBlob: null,
     modPreviewUrl: '',
     fakeExif: null,
@@ -57,18 +56,19 @@ function createItem(file) {
 }
 
 /**
- * Decode an image once to read its dimensions and the content signals the
- * classifier uses. Resolves { width, height, content }; content is null when
- * the browser cannot decode the file here (HEIC in Chrome, SVG).
+ * Decode an image once to read the content signals the classifier uses and to
+ * make the small copy the page displays. Resolves { content, preview }; both
+ * are null when the browser cannot decode the file here (HEIC in Chrome, SVG).
  */
 async function readImageInfo(file) {
-  if (typeof createImageBitmap !== 'function') return { width: 0, height: 0, content: null };
+  if (typeof createImageBitmap !== 'function') return { content: null, preview: null };
   let bmp;
-  try { bmp = await createImageBitmap(file); } catch { return { width: 0, height: 0, content: null }; }
+  try { bmp = await createImageBitmap(file); } catch { return { content: null, preview: null }; }
   try {
-    let content = null;
+    let content = null, preview = null;
     try { content = measureContent(bmp); } catch { content = null; }
-    return { width: bmp.width, height: bmp.height, content };
+    try { preview = await makePreviewBlob(bmp); } catch { preview = null; }
+    return { content, preview };
   } finally {
     if (bmp.close) bmp.close();
   }
@@ -89,15 +89,15 @@ function getActiveItem() {
 }
 
 function getProcessedItems() {
-  return S.items.filter(item => item.modBlob || item.modDataUrl);
+  return S.items.filter(item => item.modBlob);
 }
 
 function getDisplayUrl(item) {
-  return item?.modPreviewUrl || item?.modDataUrl || item?.previewUrl || '';
+  return item?.modPreviewUrl || item?.previewUrl || '';
 }
 
 function hasProcessedOutput(item) {
-  return !!(item?.modBlob || item?.modDataUrl);
+  return !!item?.modBlob;
 }
 
 /** A random hex stem carrying no time information, for an output with no generated capture date to name itself after. */
@@ -159,7 +159,6 @@ function releaseProcessedResources(item) {
   }
   item.modPreviewUrl = '';
   item.modBlob = null;
-  item.modDataUrl = null;
 }
 
 function describeItemStatus(item) {
@@ -334,19 +333,14 @@ async function hydrateItem(file, format) {
   item.format = format;
   item.origExif = await parseFileExif(file);
   const info = await readImageInfo(file);
+  // SVG has no bitmap decode here, but an <img> shows it at any size.
+  item.previewUrl = URL.createObjectURL(info.preview || file);
   item.inputClass = classifyInput({ format, exif: item.origExif, content: info.content });
   item.processing = false;
   return item;
 }
 
 const IMAGE_FORMATS = new Set(['jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'tiff', 'avif', 'heic', 'svg']);
-
-async function ensureBlob(item) {
-  if (item.modBlob) return item.modBlob;
-  if (!item.modDataUrl) throw new Error('No processed file available yet.');
-  item.modBlob = dataUrlToBlob(item.modDataUrl);
-  return item.modBlob;
-}
 
 function downloadBlob(blob, name) {
   const url = URL.createObjectURL(blob);
@@ -368,14 +362,13 @@ function downloadBlob(blob, name) {
  * it (Exif, Photoshop APP13, ICC, XMP), the same way for a photo and for
  * an exported graphic. `fake` is a generateFake or generateGraphic result;
  * `pixelCam` drives the pixel pipeline (camera colour for a photo, {} for a
- * graphic). Returns { verified, modDataUrl, width, height }.
+ * graphic). Returns { verified, preview, width, height }.
  */
 async function assembleAdobeExport(item, fake, pixelCam) {
-  const canvasResult = await stripViaCanvas(item.file, pixelCam);
-  const cleanJpeg = canvasResult.dataUrl;
+  const canvasResult = await stripViaCanvas(item.file, { ...pixelCam, thumbnail: true });
   const px = window.piexif;
 
-  const thumb = await makeAdobeThumbnail(cleanJpeg);
+  const thumb = canvasResult.thumb;
   if (thumb) {
     fake.piexif.thumbnail = thumb.binary;
     fake.piexif['1st'][px.ImageIFD.Compression]    = 6;
@@ -397,9 +390,15 @@ async function assembleAdobeExport(item, fake, pixelCam) {
     lens: fake.lensMeta, editor: fake.editor, source: fake.source, scene: fake.scene, aux: fake.aux,
     crop: canvasResult.crop,
   }));
-  const modDataUrl = insertAfterSoi(cleanJpeg, [exifApp1, app13, iccApp2Segment(), xmp]);
-  const verified = await readBackExifStrict(modDataUrl);
-  return { verified, modDataUrl, width: canvasResult.width, height: canvasResult.height };
+  const out = insertAfterSoi(canvasResult.bytes, [exifApp1, app13, iccApp2Segment(), xmp]);
+  const verified = await readBackExifStrict(out);
+  return { verified, preview: canvasResult.preview, width: canvasResult.width, height: canvasResult.height };
+}
+
+function setOutput(item, blob, preview) {
+  releaseProcessedResources(item);
+  item.modBlob = blob;
+  item.modPreviewUrl = URL.createObjectURL(preview || blob);
 }
 
 /**
@@ -415,12 +414,8 @@ async function processGraphicItem(item, options = {}) {
   if (!deferRender) renderCurrentItem();
   try {
     const fake = generateGraphic();
-    const { verified, modDataUrl } = await assembleAdobeExport(item, fake, { minimal: true });
-    releaseProcessedResources(item);
-    item.modBlob = verified.blob;
-    item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL)
-      ? URL.createObjectURL(verified.blob) : modDataUrl;
-    item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
+    const { verified, preview } = await assembleAdobeExport(item, fake, { minimal: true });
+    setOutput(item, verified.blob, preview);
     item.fakeExif = { ...verified.exif };      // editor provenance, no camera, no GPS
     item.fakePiexif = fake.piexif;
     item.fakeCamera = null;
@@ -473,16 +468,11 @@ async function processRandomizeItem(item, options = {}) {
     const fake = generateFake({ originalDate });
     item.keepDateDropped = keepDate ? (originalDate ? fake.keepDateDropped : 'missing') : null;
     // Render the pixel container and wrap the Adobe metadata segments around it.
-    const { verified, modDataUrl, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
+    const { verified, preview, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
     fake.display.PixelXDimension = width;
     fake.display.PixelYDimension = height;
 
-    releaseProcessedResources(item);
-    item.modBlob = verified.blob;
-    item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL)
-      ? URL.createObjectURL(verified.blob)
-      : modDataUrl;
-    item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
+    setOutput(item, verified.blob, preview);
     item.fakeExif = {
       ...verified.exif,
       GPSLatitude:    fake.loc.lat,
@@ -533,14 +523,7 @@ async function processClearItem(item, options = {}) {
     // (the sensor-pattern protection still applies); a non-photo uses the
     // light path, since a screenshot has no sensor fingerprint to remove.
     const canvasResult = await stripViaCanvas(item.file, { minimal: !item.inputClass?.isPhoto });
-    const newBlob = dataUrlToBlob(canvasResult.dataUrl);
-
-    releaseProcessedResources(item);
-    item.modBlob = newBlob;
-    item.modPreviewUrl = (typeof URL !== 'undefined' && URL.createObjectURL)
-      ? URL.createObjectURL(item.modBlob)
-      : canvasResult.dataUrl;
-    item.modDataUrl = item.modPreviewUrl ? null : canvasResult.dataUrl;
+    setOutput(item, new Blob([canvasResult.bytes], { type: 'image/jpeg' }), canvasResult.preview);
     item.fakeExif = null;
     item.fakePiexif = null;
     item.fakeCamera = null;
@@ -698,7 +681,7 @@ export const App = {
     const item = getActiveItem();
     if (!hasProcessedOutput(item)) return;
     try {
-      downloadBlob(await ensureBlob(item), getOutputName(item));
+      downloadBlob(item.modBlob, getOutputName(item));
     } catch (e) {
       showToast(`Download failed: ${e.message}`, 'error');
     }
@@ -712,7 +695,7 @@ export const App = {
   async downloadAll() {
     for (const item of getProcessedItems()) {
       try {
-        downloadBlob(await ensureBlob(item), getOutputName(item));
+        downloadBlob(item.modBlob, getOutputName(item));
         await new Promise(resolve => setTimeout(resolve, 180));
       } catch (e) {
         showToast(`Download failed for ${item.file.name}: ${e.message}`, 'error');

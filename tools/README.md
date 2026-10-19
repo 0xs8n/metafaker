@@ -194,6 +194,19 @@ Loads `index.html` over `file://` — the scenario browsers block ES modules in 
 and asserts that `js/boot-check.js` shows its guidance overlay rather than
 leaving a dead page.
 
+### `peak.js`
+
+    node tools/peak.js <image> [randomize|strip] [out.jpg]
+
+Peak renderer memory and time for one image, in a fresh headless Chrome. The
+file goes in through the page's own file input, as a user's does, and the
+script prints one JSON line: load and render times, output size and
+dimensions, and the renderer's peak working set after loading and after the
+render. Windows only (it reads the peak from `Get-Process`). Run it three
+times per input: the spread between runs is tens of MiB, more when other
+programs compete for memory. The figures in the README's "Large photos" come
+from it.
+
 ### `prnu.py` and `prnu-process.js`
 
     python tools/prnu.py

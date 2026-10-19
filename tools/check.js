@@ -35,6 +35,7 @@ const EXIFTOOL_FALLBACKS = [
 ];
 
 const LOCATION_DRAWS = 3000;
+const SIZE_DRAWS = 200;
 
 // US land, 50 states and DC, as boundary polylines from tools/build-places.js.
 const US_LAND = JSON.parse(fs.readFileSync(path.join(__dirname, 'us-land.json'), 'utf8')).lines.map(l => {
@@ -562,7 +563,18 @@ async function processInBrowser(page, origin, names) {
     const noExtItem = await loadOne(new File([noExt], 'no-extension-photo', { type: '' }), null);
     const noExtId = noExtItem ? noExtItem.id : null;
 
+    const longEdge = url => new Promise(res => {
+      if (!url) return res(0);
+      const im = new Image();
+      im.onload = () => res(Math.max(im.naturalWidth, im.naturalHeight));
+      im.onerror = () => res(0);
+      im.src = url;
+    });
+    const shown = [];
+    for (const it of S.items) shown.push(Math.max(await longEdge(it.previewUrl), await longEdge(it.modPreviewUrl)));
+
     return S.items.map((it, i) => ({
+      shownEdge: shown[i],
       index: i,
       name: it.file.name,
       error: it.error,
@@ -620,6 +632,11 @@ async function processInBrowser(page, origin, names) {
     assert(`(${label})`, 'classify: flagged non-photo', it.isPhoto === false, `isPhoto=${it.isPhoto} (${it.reason})`);
     assert(`(${label})`, 'classify: no camera or location', !it.camera && !it.city, `camera=${it.camera} city=${it.city}`);
   }
+  // The page displays small copies: a full-size image on screen is decoded
+  // whole and held while visible, which at 60 MP was most of the renderer.
+  const bigShown = summary.filter(x => x.shownEdge > 1600);
+  assert('(page)', 'memory: previews are at most 1600 px on the long edge', bigShown.length === 0,
+    bigShown.map(x => `${x.name}: ${x.shownEdge}`).join(' | '));
   // Real photos are not mistaken for screenshots by the content check.
   const photosIn = summary.filter(x => !x.nonPhotoCase);
   const misread = photosIn.filter(x => x.isPhoto === false);
@@ -865,6 +882,27 @@ function keepDateChecks({ now, out }) {
   }
 }
 
+// Uploader-weighted share of real Adobe exports longer than 3,200 px
+// (Commons, 2026-10-18; the survey behind EXPORT_LONG_EDGE in provenance.js).
+const REAL_SHARE_ABOVE_3200 = { phone: 0.68, dslr: 0.69 };
+
+function sizeChecks(rows) {
+  const F = '(size)';
+  const long = r => Math.max(r.w, r.h);
+  const notDown = rows.filter(r => long(r) > 0.92 * Math.max(r.fw, r.fh) + 1);
+  assert(F, `size: ${rows.length} draws at each camera's own frame all downscaled by at least 8%`, notDown.length === 0,
+    notDown.slice(0, 3).map(r => `${r.model} ${r.w}x${r.h} from ${r.fw}x${r.fh}`).join(' | '));
+  const huge = rows.filter(r => r.w * r.h > 16e6);
+  assert(F, 'size: no output above 16 MP', huge.length === 0, huge.slice(0, 3).map(r => `${r.model} ${r.w}x${r.h}`).join(' | '));
+  const skew = rows.filter(r => Math.abs(Math.log((r.w / r.h) / (r.fw / r.fh))) > 0.01);
+  assert(F, 'size: the frame keeps its aspect ratio', skew.length === 0, skew.slice(0, 3).map(r => `${r.model} ${r.w}x${r.h}`).join(' | '));
+  for (const [type, real] of Object.entries(REAL_SHARE_ABOVE_3200)) {
+    const of = rows.filter(r => r.type === type);
+    const share = of.filter(r => long(r) > 3200).length / of.length;
+    assert(F, `size (${type}): share longer than 3,200 px near real exports' ${real}`, Math.abs(share - real) <= 0.15, share.toFixed(2));
+  }
+}
+
 /** The real UI path: one of this run's own outputs, loaded again with the box ticked. */
 async function keepDateEndToEnd(page) {
   return page.evaluate(async () => {
@@ -1065,6 +1103,24 @@ async function main() {
     const offLand = draws.filter(([lat, lon]) => !onUsLand(lat, lon));
     assert('(page)', `gps: ${draws.length} generated locations all on US land`, offLand.length === 0,
       `${offLand.length} off US land, e.g. ${offLand.slice(0, 4).map(p => p.join(', ')).join(' | ')}`);
+    try {
+      sizeChecks(await page.evaluate(async n => {
+        const { exportSize } = await import('/js/helpers.js');
+        const { CAMERAS } = await import('/js/data.js');
+        const out = [];
+        for (const cam of CAMERAS) {
+          const px = cam.sensor?.px || cam.modes[0];
+          const frame = { w: Math.max(...px), h: Math.min(...px) };
+          for (let i = 0; i < n; i++) {
+            const s = exportSize(frame, cam);
+            out.push({ model: cam.model, type: cam.type, fw: frame.w, fh: frame.h, w: s.width, h: s.height });
+          }
+        }
+        return out;
+      }, SIZE_DRAWS));
+    } catch (e) {
+      assert('(size)', 'size: checks ran without throwing', false, e.stack || e.message);
+    }
     try {
       packetChecks(await samplePackets(page));
     } catch (e) {
