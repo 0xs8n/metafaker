@@ -220,6 +220,32 @@ export const THUMB_QTABLE = {
 };
 
 /**
+ * The long edge of real Adobe exports, in pixels, at the 5th, 10th, ... 100th
+ * percentile. Measured 2026-10-18 through the Wikimedia Commons API (image
+ * width and height, no download) on every Lightroom or Camera Raw export in
+ * the "Taken with <model>" categories surveyed: 679 phone exports from 64
+ * uploaders and 2,521 camera-body exports from 121, each uploader weighted
+ * equally so a few prolific accounts do not set the shape. The bottom 5% (down
+ * to 262 px) is left out: an output that small would spoil the photo for the
+ * person sharing it. Exports at the camera's native size (4032, 5472, 6000)
+ * are a large share; the caller reproduces them by holding the draw to the
+ * claimed camera's own frame.
+ */
+const EXPORT_LONG_EDGE = {
+  phone: [1179, 2048, 2415, 2754, 3024, 3153, 3434, 3563, 3668, 3775,
+          3906, 4019, 4032, 4032, 4032, 4032, 4080, 5712, 7982, 16382],
+  dslr:  [1000, 1589, 1920, 2080, 2700, 3072, 4160, 4757, 5031, 5472,
+          5472, 5477, 5824, 6000, 6000, 6192, 6775, 7200, 7752, 35076],
+};
+
+/** A long edge drawn from real exports of this kind of camera ('phone' or 'dslr'). */
+export function pickExportLongEdge(type) {
+  const q = EXPORT_LONG_EDGE[type] || EXPORT_LONG_EDGE.phone;
+  const t = rnd() * (q.length - 1), i = Math.floor(t);
+  return Math.round(q[i] + (q[Math.min(i + 1, q.length - 1)] - q[i]) * (t - i));
+}
+
+/**
  * The exporter. Every release measured (Camera Raw 14.5 to 17.5, Lightroom
  * 7.1.2 to 9.5.1) writes the same tables, profile and APP14, so the version and
  * platform are drawn per image: a single fixed Software string on every file

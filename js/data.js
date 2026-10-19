@@ -50,6 +50,16 @@
  *                 of that shot's distortion model (every export with correction
  *                 on: 5 X-T5, 1 X-T50, 2 R5 Mark II). That record cannot be
  *                 generated faithfully, so these export with correction off.
+ *   modes       — for phones, native frames [w, h] at 4:3, the default first:
+ *                 the largest frame the stock camera writes without a
+ *                 high-resolution mode, read from unedited originals on
+ *                 Commons (image sizes through the API, 2026-10-18; at least
+ *                 two uploaders per model, except the S23+, S24 Ultra and S25
+ *                 Ultra, one each, matching the 4000x3000 of six S23
+ *                 uploaders, and the A54, whose 4080-wide 16:9 frames give the
+ *                 width). The iPhone 15 Pro to 17 Pro write 5712x4284 from the
+ *                 main camera and 4032x3024 from the others. No export of the
+ *                 model is larger; a body's limit is its sensor's `px`.
  *   sensor      — native pixel size and sensor size, for FocalPlane*Resolution;
  *                 `perCmRat` is the exact per-cm rational Camera Raw's exports
  *                 of that body carry (64449339/32768 for an A7 IV or A7C II).
@@ -91,7 +101,7 @@ const APPLE_LENSINFO_11 = [[807365, 524263], [17, 4], [9, 5], [12, 5]];
 
 export const CAMERAS = [
   // ── Apple: HostComputer, SubjectArea, CompositeImage, continued-fraction rationals ──
-  { make:"Apple", model:"iPhone 17 Pro", released:"2025-09-19", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 17 Pro", released:"2025-09-19", type:"phone", writer:"apple", aspects:ASPECTS_PHONE, modes:[[5712,4284]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_17P,
     lenses:[
@@ -102,7 +112,7 @@ export const CAMERAS = [
       { equiv:200, phys:16.891, f:2.8,  fRat:[1433, 512],        focalRat:[1081, 64],        model:"iPhone 17 Pro back triple camera 16.891mm f/2.8" },
     ] },
 
-  { make:"Apple", model:"iPhone 16 Pro", released:"2024-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 16 Pro", released:"2024-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE, modes:[[5712,4284]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_16P,
     lenses:[
@@ -112,7 +122,7 @@ export const CAMERAS = [
       { equiv:120, phys:15.66, f:2.8,  fRat:[14, 5],            focalRat:[2052196, 131047], model:"iPhone 16 Pro back triple camera 15.66mm f/2.8" },
     ] },
 
-  { make:"Apple", model:"iPhone 16", released:"2024-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 16", released:"2024-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE, modes:[[5712,4284]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_16,
     lenses:[
@@ -121,7 +131,7 @@ export const CAMERAS = [
       { equiv:52, phys:5.96, f:1.6, fRat:[8, 5],  focalRat:[6249513, 1048576], model:"iPhone 16 back dual wide camera 5.96mm f/1.6" },
     ] },
 
-  { make:"Apple", model:"iPhone 15 Pro", released:"2023-09-22", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 15 Pro", released:"2023-09-22", type:"phone", writer:"apple", aspects:ASPECTS_PHONE, modes:[[5712,4284]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_15,
     lenses:[
@@ -131,7 +141,7 @@ export const CAMERAS = [
       { equiv:77, phys:9,     f:2.8,  fRat:[14, 5],            focalRat:[9, 1],          model:"iPhone 15 Pro back triple camera 9mm f/2.8" },
     ] },
 
-  { make:"Apple", model:"iPhone 14 Pro Max", released:"2022-09-16", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 14 Pro Max", released:"2022-09-16", type:"phone", writer:"apple", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_15,
     lenses:[
@@ -141,7 +151,7 @@ export const CAMERAS = [
       { equiv:77, phys:9,    f:2.8,  fRat:[14, 5], focalRat:[9, 1],    model:"iPhone 14 Pro Max back triple camera 9mm f/2.8" },
     ] },
 
-  { make:"Apple", model:"iPhone 13 Pro", released:"2021-09-24", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 13 Pro", released:"2021-09-24", type:"phone", writer:"apple", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:[35, 1],
     lensInfo:APPLE_LENSINFO_13,
     lenses:[
@@ -150,7 +160,7 @@ export const CAMERAS = [
       { equiv:77, phys:9,    f:2.8, fRat:[14, 5], focalRat:[9, 1],     model:"iPhone 13 Pro back triple camera 9mm f/2.8" },
     ] },
 
-  { make:"Apple", model:"iPhone 12", released:"2020-10-23", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 12", released:"2020-10-23", type:"phone", writer:"apple", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'T', hpos:'cf',
     lensInfo:APPLE_LENSINFO_12,
     lenses:[
@@ -158,7 +168,7 @@ export const CAMERAS = [
       { equiv:26, phys:4.2,  f:1.6, fRat:[8, 5],  focalRat:[21, 5],  model:"iPhone 12 back dual wide camera 4.2mm f/1.6" },
     ] },
 
-  { make:"Apple", model:"iPhone 11", released:"2019-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE,
+  { make:"Apple", model:"iPhone 11", released:"2019-09-20", type:"phone", writer:"apple", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true, dirRef:'M', hpos:'cf',
     lensInfo:APPLE_LENSINFO_11,
     lenses:[
@@ -168,7 +178,7 @@ export const CAMERAS = [
 
   // ── Samsung Snapdragon S-series: marketing-name Model on current firmware, ImageUniqueID per sensor ──
   // Every S25 Ultra build seen, from the launch firmware on, writes the marketing name.
-  { make:"samsung", model:"Galaxy S25 Ultra", released:"2025-02-07", sw:"S938BXXSBCZG3", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"Galaxy S25 Ultra", released:"2025-02-07", sw:"S938BXXSBCZG3", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE, modes:[[4000,3000]],
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:true,
     lenses:[
       { equiv:13,  phys:2.2,  f:1.9, focalRat:[220, 100],  fRat:[190, 100], apex:[185, 100], id:"J50XLRD00PM" },
@@ -177,7 +187,7 @@ export const CAMERAS = [
       { equiv:115, phys:18.6, f:3.4, focalRat:[1860, 100], fRat:[340, 100], apex:[353, 100], id:"J50XSRD00SM" },
     ] },
 
-  { make:"samsung", model:"Galaxy S24 Ultra", released:"2024-01-31", firmwareDate:"2025-03-01", sw:"S928BXXU4BYCG", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"Galaxy S24 Ultra", released:"2024-01-31", firmwareDate:"2025-03-01", sw:"S928BXXU4BYCG", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE, modes:[[4000,3000]],
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:false,
     lenses:[
       { equiv:13,  phys:2.2,  f:2.2, focalRat:[220, 100],  fRat:[220, 100], apex:[227, 100], id:"H12XSQE01PM", approx:true },
@@ -186,7 +196,7 @@ export const CAMERAS = [
       { equiv:111, phys:13.0, f:3.4, focalRat:[1300, 100], fRat:[340, 100], apex:[353, 100], id:"HK0XLQE00VM", approx:true },
     ] },
 
-  { make:"samsung", model:"Galaxy S23+", released:"2023-02-17", firmwareDate:"2024-11-01", sw:"S916BXXS7CXK6", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"Galaxy S23+", released:"2023-02-17", firmwareDate:"2024-11-01", sw:"S916BXXS7CXK6", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE, modes:[[4000,3000]],
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:false,
     lenses:[
       { equiv:13, phys:2.2, f:2.2, focalRat:[220, 100], fRat:[220, 100], apex:[227, 100], id:"F12XSQE01PM", approx:true },
@@ -194,7 +204,7 @@ export const CAMERAS = [
       { equiv:70, phys:8.2, f:2.4, focalRat:[820, 100], fRat:[240, 100], apex:[253, 100], id:"F50XSQE00SM", approx:true },
     ] },
 
-  { make:"samsung", model:"SM-G991B", released:"2021-01-29", sw:"G991BXXS9FWL9", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"SM-G991B", released:"2021-01-29", sw:"G991BXXS9FWL9", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:true,
     lenses:[
       { equiv:13, phys:1.8, f:2.2, focalRat:[180, 100], fRat:[220, 100], apex:[227, 100], id:"R12LLMF05VM", approx:true },
@@ -204,7 +214,7 @@ export const CAMERAS = [
 
   // Exynos A54: a different writer (Android ExifInterface): 4-digit SubSecTime, no OffsetTime,
   // no ImageUniqueID, Contrast/Saturation/Sharpness, LightSource, GPSVersionID present.
-  { make:"samsung", model:"SM-A546B", released:"2023-03-24", sw:"A546BXXSHEZA3", type:"phone", writer:"samsungA", aspects:ASPECTS_PHONE,
+  { make:"samsung", model:"SM-A546B", released:"2023-03-24", sw:"A546BXXSHEZA3", type:"phone", writer:"samsungA", aspects:ASPECTS_PHONE, modes:[[4080,3060]],
     exifVersion:"0220", offset:'none', subsec:4, flash:true, altitude:true,
     lenses:[
       { equiv:13, phys:1.9,  f:2.2, focalRat:[190, 100], fRat:[220, 100], apex:[220, 100], approx:true },
@@ -252,7 +262,7 @@ export const CAMERAS = [
     ] },
 
   // ── OnePlus: Model "OnePlus 12", no Software, OffsetTimeOriginal only, SensingMethod 1, DigitalZoomRatio /10000 ──
-  { make:"OnePlus", model:"OnePlus 12", released:"2024-01-23", type:"phone", writer:"oneplus", aspects:ASPECTS_PHONE,
+  { make:"OnePlus", model:"OnePlus 12", released:"2024-01-23", type:"phone", writer:"oneplus", aspects:ASPECTS_PHONE, modes:[[4096,3072]],
     exifVersion:"0220", offset:'orig', subsec:3, flash:true,
     lenses:[
       { equiv:14, phys:2.2,  f:2.2, focalRat:[2200, 1000], fRat:[22, 10], apex:[227, 100], model:"OnePlus 12 back camera 2.2mm f/2.2", approx:true },
@@ -261,7 +271,7 @@ export const CAMERAS = [
     ] },
 
   // ── Xiaomi: Model is the device code, ExifVersion 0230, ISOSpeed with SensitivityType 3, LightSource 21, no LensModel ──
-  { make:"Xiaomi", model:"23127PN0CG", released:"2024-02-25", type:"phone", writer:"xiaomi", aspects:ASPECTS_PHONE,
+  { make:"Xiaomi", model:"23127PN0CG", released:"2024-02-25", type:"phone", writer:"xiaomi", aspects:ASPECTS_PHONE, modes:[[4080,3060]],
     exifVersion:"0230", offset:'two', subsec:3, flash:true,
     lenses:[
       { equiv:14, phys:2.2,  f:2.2, focalRat:[2200, 1000], fRat:[220, 100], apex:[227, 100], approx:true },

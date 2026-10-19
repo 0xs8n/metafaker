@@ -3,7 +3,7 @@
  */
 
 import { requantize } from './jpeg-requantize.js';
-import { pickEditorQtable, THUMB_QTABLE, ADOBE_APP14, editorIcc, xmpSegment } from './provenance.js';
+import { pickEditorQtable, pickExportLongEdge, THUMB_QTABLE, ADOBE_APP14, editorIcc, xmpSegment } from './provenance.js';
 import { rnd, pick, randInt } from './rng.js';
 import { PLACES, ZONES } from './places.js';
 
@@ -174,13 +174,7 @@ export function dmsToDec(dms, ref) {
 
 // ── Canvas / Image Processing ────────────────────────────────────
 
-export function randomMaxEdge() {
-  const edges = [2048, 2160, 2400, 2560, 2880, 3200];
-  return edges[Math.floor(rnd() * edges.length)];
-}
-
-export function getExportDimensions(width, height, maxEdge) {
-  maxEdge = maxEdge || randomMaxEdge();
+function scaleToLongEdge(width, height, maxEdge) {
   const longestEdge = Math.max(width, height);
   if (!longestEdge || longestEdge <= maxEdge) return { width, height };
   const scale = maxEdge / longestEdge;
@@ -188,6 +182,59 @@ export function getExportDimensions(width, height, maxEdge) {
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
   };
+}
+
+/**
+ * The claimed camera's own frame at aspect ratio `a` (width / height): the
+ * largest its default native frame holds, which is what an uncropped export
+ * of it measures (4032x3024 and 4032x2268 from an iPhone 13 Pro on Commons).
+ * Null for a camera with no measured frame.
+ */
+function nativeFrame(cam, a) {
+  const px = cam.sensor?.px || cam.modes?.[0];
+  if (!px) return null;
+  const W = Math.max(px[0], px[1]), H = Math.min(px[0], px[1]), r = Math.max(a, 1 / a);
+  let long = W, short = H;
+  if (Math.abs(r - W / H) >= 0.01) {
+    if (r > W / H) short = Math.round(W / r);
+    else long = Math.round(H * r);
+  }
+  return a >= 1 ? { w: long, h: short } : { w: short, h: long };
+}
+
+// The largest output: 16 MP (4899x3266 at 3:2, 4618x3464 at 4:3). Measured on
+// a 60 MP input with tools/peak.js, the renderer's peak grows by about 50 MiB
+// per output megapixel (1,226-1,553 MiB at 24 MP, 2,205-2,211 at 45 MP);
+// at 16 MP it is 968-975 MiB, within the worst the tool reached at its old
+// 3,200-pixel cap (1,072 MiB), rather than double it.
+const MAX_OUTPUT_PIXELS = 16e6;
+
+/**
+ * The output size for a frame. A photo's long edge is drawn from real Adobe
+ * exports of its kind of camera (provenance.js), within three limits:
+ * 80 to 92% of the frame, so the image is always downscaled (see the
+ * pipeline); the claimed camera's own frame, which no export of it exceeds,
+ * so a draw above it lands on the native size, as so many real exports do;
+ * and MAX_OUTPUT_PIXELS, where a draw above it lands anywhere in the top 10%
+ * below it, so outputs do not pile up on one size no camera takes. Redrawing
+ * instead would keep only the smaller exports: half of real body exports are
+ * larger than 5472. Non-photos are capped at 1600: they keep the exporter's
+ * 4:4:4 container, so the quality-1.0 encode must stay bounded (a large,
+ * near-incompressible frame of fine noise can exhaust the renderer at quality
+ * 1.0), and no real screenshot needs more.
+ */
+export function exportSize(frame, cam) {
+  const fit = Math.round(Math.max(frame.w, frame.h) * (0.80 + rnd() * 0.12));
+  if (cam.minimal) return scaleToLongEdge(frame.w, frame.h, Math.min(1600, fit));
+  const a = frame.w / frame.h;
+  const ceiling = Math.floor(Math.sqrt(MAX_OUTPUT_PIXELS * Math.max(a, 1 / a)));
+  const native = nativeFrame(cam, a);
+  const nativeLong = native && Math.max(native.w, native.h) <= ceiling ? Math.max(native.w, native.h) : Infinity;
+  let drawn = pickExportLongEdge(cam.type || 'phone');
+  if (drawn > ceiling && ceiling < Math.min(fit, nativeLong)) drawn = Math.round(ceiling * (0.9 + rnd() * 0.1));
+  const edge = Math.min(drawn, fit, nativeLong, ceiling);
+  if (edge === nativeLong) return { width: native.w, height: native.h };
+  return scaleToLongEdge(frame.w, frame.h, edge);
 }
 
 // ── Gaussian noise (Box-Muller with caching) ─────────────────────
@@ -1057,14 +1104,7 @@ async function privacyRender(input, cam = {}) {
   // (iPhone 6, Huawei P9), outputs at these scales still match the camera's
   // fingerprint, and offline even a 0.3 scale did. See the README threat model.
   const frame = snapToCameraFrame(srcX, srcY, srcW, srcH, cam);
-  const longest = Math.max(frame.w, frame.h);
-  // Non-photos are capped at 1600 on the long edge. They keep the exporter's
-  // 4:4:4 container like everything else, so the quality-1.0 encode must stay
-  // bounded: a very large, near-incompressible frame (fine noise) can exhaust
-  // the renderer at quality 1.0, and no real screenshot needs more than 1600.
-  const maxEdge = minimal ? Math.min(1600, Math.round(longest * (0.80 + rnd() * 0.12)))
-                          : Math.min(randomMaxEdge(), Math.round(longest * (0.80 + rnd() * 0.12)));
-  const size = getExportDimensions(frame.w, frame.h, maxEdge);
+  const size = exportSize(frame, cam);
 
   const c   = document.createElement('canvas');
   c.width   = size.width;
