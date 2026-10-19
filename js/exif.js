@@ -352,6 +352,28 @@ const EXPOSURES = {
   body:    parseExposures(BODY_ADOBE, ['f', 'inv', 'iso']),
 };
 
+// With every uploader counted once, a file from a single-file uploader weighs
+// as much as all of another uploader's files, and where few uploaders shot a
+// given EV it carries most of the draws there: 89% of the Android weight at
+// EV 8, so most outputs at that brightness repeated one exposure.
+const MAX_FILE_SHARE = 0.2;
+
+/**
+ * Weights `w` with none above MAX_FILE_SHARE of their total, the excess spread
+ * over the others in proportion to their weight. Needs at least
+ * 1 / MAX_FILE_SHARE weights.
+ */
+export function capShares(w) {
+  const sorted = [...w].sort((a, b) => b - a);
+  let rest = sorted.reduce((n, v) => n + v, 0);
+  for (let k = 0; ; k++) {
+    const cap = MAX_FILE_SHARE * rest / (1 - k * MAX_FILE_SHARE);
+    // At k = 4 the cap is the rest itself; the tolerance keeps rounding from passing it.
+    if (sorted[k] <= cap * (1 + 1e-12)) return w.map(v => Math.min(v, cap));
+    rest -= sorted[k];
+  }
+}
+
 // Samsung, OnePlus and Xiaomi write ISO on the nominal third-stop scale, as
 // their files in the survey do; a Pixel writes any integer.
 const ISO_THIRDS = [10, 12, 16, 20, 25, 32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500,
@@ -371,29 +393,39 @@ function filesNearAperture(files, f) {
 }
 
 /**
- * The exposure of a photo of a scene of brightness `ev`: a real file's
- * exposure that gives that EV within half a stop, widened a half stop at a
- * time when none does. A phone takes the time and ISO of a file shot through
- * a lens of about its lens's f-number, since a phone exposes its telephoto
- * and ultra-wide differently from its main camera; a body takes the file's
- * f-number, time and ISO, among those its lens opens to and its shutter and
- * ISO range allow.
+ * The real files the exposure of a photo of a scene of brightness `ev` is
+ * drawn from, with their weights: those whose exposure gives that EV within
+ * half a stop, widened a quarter stop at a time until five do and, up to a
+ * stop, until no file carries more than a fifth of their weight; past that
+ * the weights are capped (capShares). A phone takes the time and
+ * ISO of a file shot through a lens of about its lens's f-number, since a
+ * phone exposes its telephoto and ultra-wide differently from its main camera;
+ * a body takes the file's f-number, time and ISO, among those its lens opens
+ * to and its shutter and ISO range allow.
  */
-function drawExposure(cam, lens, apertureAtFocal, ev) {
+export function exposureCandidates(cam, lens, apertureAtFocal, ev) {
   const phone = cam.type === 'phone';
   const files = phone ? (cam.writer === 'apple' ? EXPOSURES.apple : EXPOSURES.android) : EXPOSURES.body;
   const usable = phone ? filesNearAperture(files, lens.f) : files.filter(x =>
     x.f >= apertureAtFocal - 0.05 && x.t >= 1 / cam.fastest && x.iso >= cam.isoRange[0] && x.iso <= cam.isoRange[1] &&
     (!cam.fixedLens || x.f <= Math.max(...cam.apertures)));
-  const fOf = x => phone ? lens.f : x.f;
-  for (let tol = 0.5; tol <= 30; tol += 0.5) {
-    const near = usable.filter(x => Math.abs(evOf(fOf(x), x.t, x.iso) - ev) <= tol);
-    if (!near.length) continue;
-    let r = rnd() * near.reduce((n, x) => n + x.w, 0);
-    const x = near.find(c => (r -= c.w) <= 0) || near[near.length - 1];
-    return { aperture: fOf(x), exposureSec: x.t, iso: writtenIso(cam, x.iso) };
+  for (let tol = 0.5; tol <= 30; tol += 0.25) {
+    const near = usable.filter(x => Math.abs(evOf(phone ? lens.f : x.f, x.t, x.iso) - ev) <= tol);
+    if (near.length < 1 / MAX_FILE_SHARE) continue;
+    const w = near.map(x => x.w), total = w.reduce((n, v) => n + v, 0);
+    if (tol < 1 && w.some(v => v > MAX_FILE_SHARE * total)) continue;
+    return { files: near, weights: capShares(w) };
   }
   throw new Error(`no measured exposure fits ${cam.model}`);
+}
+
+function drawExposure(cam, lens, apertureAtFocal, ev) {
+  const { files, weights } = exposureCandidates(cam, lens, apertureAtFocal, ev);
+  let r = rnd() * weights.reduce((n, v) => n + v, 0);
+  let i = 0;
+  while (i < files.length - 1 && (r -= weights[i]) > 0) i++;
+  const x = files[i];
+  return { aperture: cam.type === 'phone' ? lens.f : x.f, exposureSec: x.t, iso: writtenIso(cam, x.iso) };
 }
 
 function apexBrightness(aperture, exposureSec, iso) {
