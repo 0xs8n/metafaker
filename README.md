@@ -18,14 +18,35 @@ Everything runs locally in your browser. There is no backend, no upload step and
 - Tells a camera photo from a non-photo before generating any metadata. A
   screenshot or exported graphic never passed through a lens, so giving it a
   camera, lens and GPS would make it inconsistent with what it is. The decision
-  uses the file's real format (read from its first bytes, not its name or
-  MIME type), transparency, and its content: screens and graphics are full of
+  uses a "Screenshot" label in the file's metadata (iOS and macOS write one),
+  the file's real format (read from its first bytes, not its name or MIME
+  type), transparency, and its content: screens and graphics are full of
   perfectly uniform areas and sharp text edges on uniform backgrounds, which a
-  camera sensor's noise never produces. Calibrated on 298 real camera photos
-  and 26 real screenshots, each also as a messaging-app copy and as this tool's
-  own output: no photo variant was taken for a screenshot, and 94% of
-  screenshot variants were caught. Non-photos are cleaned of any identifying
-  metadata instead — either a plain strip or an Adobe-exported graphic
+  camera sensor's noise never produces. Pure black or white areas count for
+  less, since a photo's clipped shadows and highlights are uniform too. A
+  screen that is mostly a wallpaper or a blur has little of either, so a
+  portrait image of a phone screen's proportions with a status bar along the
+  top, or one at a phone's exact screen size (Apple's and Google's published
+  sizes), needs far fewer UI edges. Measured with `tools/classify-eval.js` on
+  253 real camera photos (150 Commons originals and Adobe exports from 29
+  cameras and phones, 20 phone exports, and 83 hard cases: night skies, the
+  moon, studio backdrops, snow, sky, documents and photos of screens) and 295
+  screenshots (95 real phone, tablet and Mac screenshots from Commons
+  categories, 200 rendered locally: browser pages, apps, lock and home screens
+  over wallpapers), each with its metadata stripped and as nine messaging-app
+  and editor copies (JPEG q70 to q90 at 1280 px to full size, WebP, a
+  phone-shaped and a panorama crop). No photo variant is taken for a
+  screenshot; the previous rule took 94 of 2,783, mostly night, moon and
+  studio shots on clipped black. Held out by source category and not tuned
+  on, JPEG and WebP copies of the real screenshots are caught 60% of the time
+  (210 of 352, previously 57%), those of lock screens 17% (previously 3%),
+  and those of the real screenshots used for tuning 65% (previously 59%). One
+  held-out photo copy, a Milky Way sky as WebP, was taken for a screenshot by
+  the first tuned rule and set the final threshold for clipped areas, so the
+  held-out photo result is not blind. A screenshot that is mostly a wallpaper
+  or a blur, without a status bar, is still often treated as a photo.
+  Non-photos are cleaned of any identifying metadata instead — either a plain
+  strip or an Adobe-exported graphic
   carrying editor provenance only, chosen at random so they do not share one
   signature, and never a camera or a location.
 - Builds a local batch queue with previews (small copies, so large photos do not fill the tab's memory) and per-image state.
@@ -89,7 +110,7 @@ The application is split into small browser modules:
 For each loaded file:
 
 1. The browser reads the input locally and decodes it once, to measure the content signals below and to make the preview the page shows, at most 1600 pixels on the long edge. Displaying the original itself made the browser decode it whole and keep it while it was on screen.
-2. `exifr` parses the original metadata, and `js/classify.js` decides whether the input is a camera photo or a non-photo (a screenshot or exported graphic) from whether it names a camera, its real format, transparency and its content.
+2. `exifr` parses the original metadata, and `js/classify.js` decides whether the input is a camera photo or a non-photo (a screenshot or exported graphic) from a "Screenshot" label in its metadata, whether it names a camera, its real format, transparency, its content and its shape.
 3. On `Randomize`, a photo gets a generated camera, lens, timestamps, exposure, location and editor identity from `generateFake()`, and the XMP packet is built from the same values. A non-photo is cleaned instead, as described above, and never given a camera or a location.
 4. The image goes through the canvas pipeline in `js/helpers.js` and is exported as a fresh JPEG with the exporter's container.
 5. `js/exif-writer.js` serialises the EXIF block and it is inserted into the JPEG.

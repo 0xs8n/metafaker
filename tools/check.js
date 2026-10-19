@@ -558,6 +558,26 @@ async function processInBrowser(page, origin, names) {
     if (shotPng && shotPng.modBlob) {
       await loadOne(new File([shotPng.modBlob], 'reprocessed-output.jpg', { type: 'image/jpeg' }), 'own screenshot output reloaded');
     }
+    // A screenshot's own label, kept by a conversion to JPEG, decides even when
+    // the picture looks like a photo (a lock screen over a wallpaper).
+    const photoCanvas = async (clipTo) => {
+      const bmp = await createImageBitmap(await toFile(names[0]));
+      const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+      const cx = c.getContext('2d');
+      cx.fillStyle = '#000'; cx.fillRect(0, 0, c.width, c.height);
+      if (clipTo) { cx.beginPath(); cx.ellipse(c.width / 2, c.height / 2, c.width * clipTo, c.height * clipTo, 0, 0, 7); cx.clip(); }
+      cx.drawImage(bmp, 0, 0);
+      bmp.close();
+      return c;
+    };
+    const px = window.piexif;
+    const labelled = px.insert(px.dump({ '0th': {}, Exif: { [px.ExifIFD.UserComment]: 'ASCII\0\0\0Screenshot' } }),
+      (await photoCanvas(0)).toDataURL('image/jpeg', 0.9));
+    await loadOne(new File([Uint8Array.from(atob(labelled.split(',')[1]), ch => ch.charCodeAt(0))], 'shared-capture.jpg',
+      { type: 'image/jpeg' }), 'JPEG labelled Screenshot');
+    // A photo whose background clips to pure black (the moon, a studio
+    // backdrop), its metadata gone: mostly perfectly flat, and still a photo.
+    await loadOne(new File([await toBlob(await photoCanvas(0.15), 'image/jpeg', 0.9)], 'night-sky.jpg', { type: 'image/jpeg' }), null);
     // A camera JPEG with no extension and no MIME type (how Windows Chrome
     // hands over such files) must be accepted and treated as a photo.
     const noExt = await toFile(names[0]);
@@ -626,7 +646,7 @@ async function processInBrowser(page, origin, names) {
 
   // Non-photos: classified non-photo and cleaned by Randomize, never given a camera.
   const EXPECTED_NON_PHOTO = ['PNG screenshot', 'JPEG screenshot', 'PNG renamed .jpg', 'SVG graphic',
-    'WebP with transparency', 'own screenshot output reloaded'];
+    'WebP with transparency', 'own screenshot output reloaded', 'JPEG labelled Screenshot'];
   for (const label of EXPECTED_NON_PHOTO) {
     const it = summary.find(x => x.nonPhotoCase === label);
     if (!assert(`(${label})`, 'classify: case loaded', !!it, 'item missing or rejected at load')) continue;

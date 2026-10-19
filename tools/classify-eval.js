@@ -91,7 +91,7 @@ function serve(corpus) {
 /** Runs in the page: build each variant of one source and classify it as the app does. */
 async function classifySource(url, variants) {
   const { sniffFormat, measureContent, classifyInput } = await import('/js/classify.js');
-  const { parseFileExif } = await import('/js/exif.js');
+  const { parseFileExif, readUserComment } = await import('/js/exif.js');
   const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
   const isJpeg = bytes[0] === 0xFF && bytes[1] === 0xD8;
 
@@ -140,8 +140,9 @@ async function classifySource(url, variants) {
       const bmp = await createImageBitmap(file);
       try { content = measureContent(bmp); } finally { bmp.close(); }
     } catch {}
-    const v = classifyInput({ format, exif, content });
-    return { format, isPhoto: v.isPhoto, kind: v.kind, reason: v.reason, content };
+    const userComment = await readUserComment(file);
+    const v = classifyInput({ format, exif, userComment, content });
+    return { format, isPhoto: v.isPhoto, kind: v.kind, reason: v.reason, userComment, content };
   };
 
   const out = [];
