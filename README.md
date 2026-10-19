@@ -28,7 +28,7 @@ Everything runs locally in your browser. There is no backend, no upload step and
   metadata instead — either a plain strip or an Adobe-exported graphic
   carrying editor provenance only, chosen at random so they do not share one
   signature, and never a camera or a location.
-- Builds a local batch queue with previews and per-image state.
+- Builds a local batch queue with previews (small copies, so large photos do not fill the tab's memory) and per-image state.
 - Parses original EXIF locally in the browser.
 - Re-encodes each processed image as a new JPEG through a privacy pipeline that removes identifying traces from the pixels, not only from the metadata.
 - Either removes the metadata entirely or replaces it with a generated metadata set whose location is always inside the United States.
@@ -88,7 +88,7 @@ The application is split into small browser modules:
 
 For each loaded file:
 
-1. The browser reads the input locally and creates an object URL for previewing.
+1. The browser reads the input locally and decodes it once, to measure the content signals below and to make the preview the page shows, at most 1600 pixels on the long edge. Displaying the original itself made the browser decode it whole and keep it while it was on screen.
 2. `exifr` parses the original metadata, and `js/classify.js` decides whether the input is a camera photo or a non-photo (a screenshot or exported graphic) from whether it names a camera, its real format, transparency and its content.
 3. On `Randomize`, a photo gets a generated camera, lens, timestamps, exposure, location and editor identity from `generateFake()`, and the XMP packet is built from the same values. A non-photo is cleaned instead, as described above, and never given a camera or a location.
 4. The image goes through the canvas pipeline in `js/helpers.js` and is exported as a fresh JPEG with the exporter's container.
@@ -114,6 +114,10 @@ The canvas export is not a plain re-encode. Each photo passes through these stag
 A non-photo (a screenshot or exported graphic) takes a light path: crop, downscale (capped at 1600 pixels on the long edge) and a clean re-encode in the same export container. It has no sensor and no lens, so sensor noise, lens effects or a warp would only make it less like what it is.
 
 Every random draw in the tool, from the camera down to the per-pixel noise, comes from `crypto.getRandomValues` through `js/rng.js`, refilled in blocks so the pixel loops stay fast.
+
+### Large photos
+
+The pipeline never holds the full-resolution picture while it works. It reads the input's size from its header, then asks the browser for the picture already scaled to twice the size it will be drawn at (`createImageBitmap` with resize options), and crops and scales it the rest of the way in one draw. Against drawing from the full-resolution decode, measured on 12 and 60 MP inputs at 2,048 to 7,000 pixels, an unrotated output is equally sharp and a rotated one 3 to 11% less sharp by the mean Laplacian, with no difference visible in 100% crops. Decoding only the cropped frame (a source rectangle) was lighter still but cost 8 to 26% of the sharpness, and Chrome placed the rectangle mirrored on a photo with EXIF orientation 6, so it is not used. The encoded file stays in byte arrays and Blobs from the encoder to the download, with no base64 copies, and the Adobe thumbnail is drawn from the finished canvas instead of decoding the output again. Measured in headless Chrome 155 on Windows 11 with `tools/peak.js` (the file handed to the page's own file input, one Randomize, the renderer's peak working set, three runs each, at the old size limit): a 12 MP iPhone photo went from 561 to 563 MiB down to 314 to 494, a 48 MP image from 970 to 1,072 MiB down to 455 to 555, and a 60 MP Sony A7R V export from 809 to 953 MiB down to 542 to 565. Most of the old peak was the page's own preview: an `<img>` showing the original decoded it whole and kept it while it was on screen. Chrome still decodes the whole file for a moment when the file is loaded and when it is rendered, so a 60 MP input still costs about 450 MiB at load. The time for one Randomize did not change measurably (9 to 18 s at 12 MP and 11 to 14 s at 60 MP after, 9 to 15 s and 10 to 36 s before, with other work running on the machine).
 
 ## Metadata generation
 

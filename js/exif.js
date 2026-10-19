@@ -14,7 +14,7 @@ import {
   pick, randInt, clamp, cryptoRandInt,
   pickLocation, fmtDate, fmtGpsDate,
   wallClockToUtc, utcToWallClock, tzOffsetString, sunElevation,
-  dmsToDec, dataUrlToBlob,
+  dmsToDec,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
 import { CAMERAS, pickOptics } from './data.js';
@@ -84,8 +84,8 @@ export function piexifToDisplay(pxData) {
   return out;
 }
 
-export async function readBackExifStrict(dataUrl) {
-  const blob = dataUrlToBlob(dataUrl);
+export async function readBackExifStrict(bytes) {
+  const blob = new Blob([bytes], { type: 'image/jpeg' });
   let exifrErr = null;
   try {
     const parsed = await exifr.parse(blob, { all: true, gps: true, tiff: true, exif: true });
@@ -97,7 +97,9 @@ export async function readBackExifStrict(dataUrl) {
     exifrErr = e;
   }
   try {
-    const parsed = piexifToDisplay(window.piexif.load(dataUrl));
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    const parsed = piexifToDisplay(window.piexif.load(bin));
     if (Object.keys(parsed).length) {
       return { blob, exif: parsed, parser: 'piexif',
                warning: `EXIF was written, but exifr readback failed (${exifrErr?.message || 'unknown error'}).` };

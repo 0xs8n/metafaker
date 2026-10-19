@@ -562,7 +562,18 @@ async function processInBrowser(page, origin, names) {
     const noExtItem = await loadOne(new File([noExt], 'no-extension-photo', { type: '' }), null);
     const noExtId = noExtItem ? noExtItem.id : null;
 
+    const longEdge = url => new Promise(res => {
+      if (!url) return res(0);
+      const im = new Image();
+      im.onload = () => res(Math.max(im.naturalWidth, im.naturalHeight));
+      im.onerror = () => res(0);
+      im.src = url;
+    });
+    const shown = [];
+    for (const it of S.items) shown.push(Math.max(await longEdge(it.previewUrl), await longEdge(it.modPreviewUrl)));
+
     return S.items.map((it, i) => ({
+      shownEdge: shown[i],
       index: i,
       name: it.file.name,
       error: it.error,
@@ -620,6 +631,11 @@ async function processInBrowser(page, origin, names) {
     assert(`(${label})`, 'classify: flagged non-photo', it.isPhoto === false, `isPhoto=${it.isPhoto} (${it.reason})`);
     assert(`(${label})`, 'classify: no camera or location', !it.camera && !it.city, `camera=${it.camera} city=${it.city}`);
   }
+  // The page displays small copies: a full-size image on screen is decoded
+  // whole and held while visible, which at 60 MP was most of the renderer.
+  const bigShown = summary.filter(x => x.shownEdge > 1600);
+  assert('(page)', 'memory: previews are at most 1600 px on the long edge', bigShown.length === 0,
+    bigShown.map(x => `${x.name}: ${x.shownEdge}`).join(' | '));
   // Real photos are not mistaken for screenshots by the content check.
   const photosIn = summary.filter(x => !x.nonPhotoCase);
   const misread = photosIn.filter(x => x.isPhoto === false);
