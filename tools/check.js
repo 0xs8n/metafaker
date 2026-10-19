@@ -311,22 +311,16 @@ function runExiftool(exe, files) {
   const out = (r.stdout || '').trim();
   if (!out) throw new Error(`exiftool produced no output (status ${r.status}): ${(r.stderr || '').slice(0, 500)}`);
   const json = JSON.parse(out);
-  // exiftool repeats the "ExifTool:Warning" key for every warning, and
-  // JSON.parse keeps only the last. Recover them all from the raw text, one
-  // chunk per SourceFile, and attach them as a proper array.
-  const starts = [];
-  const re = /"SourceFile":\s*"((?:[^"\\]|\\.)*)"/g;
-  let m;
-  while ((m = re.exec(out))) starts.push({ at: m.index, file: JSON.parse(`"${m[1]}"`) });
-  const warnRe = /"(?:[^"\\]*:)?Warning(?: \(\d+\))?":\s*"((?:[^"\\]|\\.)*)"/g;
-  starts.forEach((s, i) => {
-    const chunk = out.slice(s.at, i + 1 < starts.length ? starts[i + 1].at : out.length);
-    const warnings = [];
-    let w;
-    while ((w = warnRe.exec(chunk))) warnings.push(JSON.parse(`"${w[1]}"`));
-    const obj = json.find(o => o.SourceFile === s.file);
-    if (obj) obj.__warnings = warnings;
-  });
+  // The JSON output carries only the first validation warning of a file, so
+  // the full list comes from a second, plain-text run, one block per file.
+  const tr = spawnSync(exe, ['-a', '-validate', '-warning', '-charset', 'filename=utf8', ...files],
+    { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 300000, maxBuffer: 64 * 1024 * 1024, windowsHide: true });
+  const blocks = files.length === 1 ? [[files[0], tr.stdout || '']]
+    : (tr.stdout || '').split(/^======== /m).slice(1).map(b => [b.slice(0, b.indexOf('\n')).trim(), b]);
+  for (const [file, text] of blocks) {
+    const obj = json.find(o => path.resolve(String(o.SourceFile)) === path.resolve(file));
+    if (obj) obj.__warnings = [...text.matchAll(/^Warning\s*: (.*)$/gm)].map(w => w[1].trim());
+  }
   return json;
 }
 
@@ -409,12 +403,18 @@ function exiftoolChecks(name, t, mode, info) {
   ]);
   const unexpected = warnings.filter(w => !ADOBE_WARNINGS.has(w) && !/^\[minor\]/.test(w));
   assert(name, 'exiftool: only the Adobe-export validation warnings', unexpected.length === 0, unexpected.join(' | '));
+  // The four omissions are the same for every editor the output can name:
+  // measured on real exports, Camera Raw 13 of 13, Lightroom 13 of 13 and
+  // Lightroom Classic 13 to 15 in 33 of 33 (YCbCrPositioning 32 of 33).
+  const omissions = [...ADOBE_WARNINGS].filter(w => w.startsWith('Missing required'));
+  const absent = omissions.filter(w => !warnings.includes(w));
+  assert(name, "exiftool: all four of an Adobe export's missing-tag warnings", absent.length === 0, absent.join(' | '));
 
   const make = tag(t, 'Make', 'IFD0'), model = tag(t, 'Model', 'IFD0');
   assert(name, 'exiftool: Make/Model present', !!make && !!model, `Make=${make} Model=${model}`);
   const software = tag(t, 'Software', 'IFD0');
-  assert(name, 'exiftool: Software is Adobe Camera Raw or Lightroom',
-    typeof software === 'string' && (software.startsWith('Adobe Photoshop Camera Raw') || software.startsWith('Adobe Lightroom')),
+  assert(name, 'exiftool: Software is Adobe Camera Raw, Lightroom or Lightroom Classic',
+    typeof software === 'string' && /^Adobe (Photoshop Camera Raw|Lightroom|Photoshop Lightroom Classic) [\d.]+ \((Macintosh|Windows)\)$/.test(software),
     `Software=${software}`);
 
   const dto = tag(t, 'DateTimeOriginal', 'ExifIFD');
@@ -903,11 +903,12 @@ const verAtLeast = (v, min) => {
 };
 
 async function samplePackets(page) {
-  const { digests, lcp, rawLp } = await page.evaluate(async () => {
+  const { digests, lcp, rawLp, acrMin } = await page.evaluate(async () => {
     const data = await import('/js/data.js');
     return {
       digests: Object.fromEntries(data.CAMERAS.filter(c => c.profileDigest).map(c => [c.model, c.profileDigest])),
       rawLp: data.CAMERAS.filter(c => c.rawLensProfile).map(c => c.model),
+      acrMin: Object.fromEntries(data.CAMERAS.filter(c => c.acrMin).map(c => [c.model, c.acrMin])),
       lcp: Object.fromEntries(Object.values(data.DSLR_LENSES).flat().filter(l => l.lcp).map(l => [l.model, l.lcp])),
     };
   });
@@ -922,16 +923,16 @@ async function samplePackets(page) {
           capture: g.capture, exportAt: g.exportAt, offsetCapture: g.offset, offsetExport: g.exportOffset, subsec: g.subsec,
           lens: g.lensMeta, editor: g.editor, source: g.source, scene: g.scene, aux: g.aux,
         });
-        return { model: g.cam.model, type: g.cam.type, software: g.editor.software,
+        return { model: g.cam.model, type: g.cam.type, make: g.cam.make, software: g.editor.software,
                  lens: g.lens?.model || null,
                  xmp: xmp.slice(0, xmp.indexOf('</x:xmpmeta>')) };
       });
     }, 40));
   }
-  return { digests, lcp, rawLp, out };
+  return { digests, lcp, rawLp, acrMin, out };
 }
 
-function packetChecks({ digests, lcp, rawLp, out }) {
+function packetChecks({ digests, lcp, rawLp, acrMin, out }) {
   const F = '(packets)';
   const bodies = out.filter(p => p.type !== 'phone');
   assert(F, 'packets: sample includes camera bodies', bodies.length >= out.length / 10, bodies.length);
@@ -997,6 +998,65 @@ function packetChecks({ digests, lcp, rawLp, out }) {
   }
   const digestsAt = out.map(p => xmpAttr(p.xmp, 'crs:AutoToneDigest')).filter(Boolean);
   const unpaired = out.filter(p => !xmpAttr(p.xmp, 'crs:AutoToneDigest') !== !xmpAttr(p.xmp, 'crs:AutoToneDigestNoSat'));
+  // The editor family, drawn per image at the shares real exports show
+  // (renormalised over the three editors modelled); never Camera Raw for a
+  // phone JPEG. Bounds are 4.5 standard errors of the sample.
+  const family = p => /Lightroom Classic/.test(p.software) ? 'lrc' : /Camera Raw/.test(p.software) ? 'acr' : 'lr';
+  const phones = out.filter(p => p.type === 'phone');
+  const shareOf = (set, f) => set.filter(p => family(p) === f).length / Math.max(1, set.length);
+  const near = (set, f, want) => Math.abs(shareOf(set, f) - want) <= 4.5 * Math.sqrt(want * (1 - want) / Math.max(1, set.length));
+  const fam = s => ['lrc', 'lr', 'acr'].map(f => `${f} ${shareOf(s, f).toFixed(2)}`).join(', ') + ` of ${s.length}`;
+  assert(F, 'packets: phone editors 85% Lightroom Classic, 15% Lightroom, no Camera Raw',
+    near(phones, 'lrc', 0.849) && shareOf(phones, 'acr') === 0, fam(phones));
+  assert(F, 'packets: body editors 61% Lightroom Classic, 28% Lightroom, 10% Camera Raw',
+    near(bodies, 'lrc', 0.614) && near(bodies, 'lr', 0.281) && shareOf(bodies, 'acr') > 0, fam(bodies));
+  // Lightroom Classic records the imported file's name, and from 13.2 an unset
+  // pick flag with its namespace; the other editors write none of these.
+  const badLrc = out.filter(p => {
+    const lrc = family(p) === 'lrc';
+    const pres = xmpAttr(p.xmp, 'xmpMM:PreservedFileName');
+    const pick = /xmpDM:pick="0"/.test(p.xmp), ns = /xmlns:xmpDM=/.test(p.xmp);
+    const wantPick = lrc && verAtLeast(p.software.match(/ ([\d.]+) \(/)[1], '13.2');
+    return (lrc ? pres !== xmpAttr(p.xmp, 'crs:RawFileName') : pres !== null) || pick !== wantPick || ns !== wantPick;
+  });
+  assert(F, 'packets: PreservedFileName and the pick flag exactly on Lightroom Classic exports', badLrc.length === 0,
+    badLrc.slice(0, 2).map(p => p.software).join(' | '));
+  // Lightroom on Windows records an edit between capture and export (8 of 10
+  // real ones); no other editor or platform does.
+  const lrWin = out.filter(p => /^Adobe Lightroom [\d.]+ \(Windows\)$/.test(p.software));
+  const edited = p => (p.xmp.match(/stEvt:action="edited"\s+stEvt:when="([^"]*)"/) || [])[1];
+  const stray = out.filter(p => edited(p) && !lrWin.includes(p));
+  const misplaced = lrWin.filter(p => edited(p) && !(new Date(edited(p)) >= new Date(xmpAttr(p.xmp, 'xmp:CreateDate'))
+    && new Date(edited(p)) < new Date(xmpAttr(p.xmp, 'xmp:ModifyDate'))));
+  const editedShare = lrWin.filter(edited).length / Math.max(1, lrWin.length);
+  assert(F, "packets: Lightroom on Windows, and only it, records an edit between capture and export",
+    stray.length === 0 && misplaced.length === 0 && (lrWin.length < 8 || editedShare >= 0.4),
+    `${stray.length} stray, ${misplaced.length} misplaced, ${editedShare.toFixed(2)} of ${lrWin.length}`);
+  // The look's Copyright line: Camera Raw, Lightroom Classic from 14, Lightroom from 9.
+  const badCopy = out.filter(p => p.xmp.includes('<crs:Look>')).filter(p => {
+    const major = Number(p.software.match(/ (\d+)[\d.]* \(/)[1]);
+    const want = family(p) === 'acr' || major >= { lrc: 14, lr: 9 }[family(p)];
+    return /crs:Copyright=/.test(p.xmp) !== want;
+  });
+  assert(F, "packets: the look's Copyright line exactly where the editor writes it", badCopy.length === 0,
+    badCopy.slice(0, 2).map(p => p.software).join(' | '));
+  // A raw file opens only in an editor whose Camera Raw engine supports the body.
+  const tooOld = bodies.filter(p => acrMin[p.model] && !verAtLeast(xmpAttr(p.xmp, 'crs:Version'), acrMin[p.model]));
+  assert(F, "packets: a body's editor is new enough to open its raws", tooOld.length === 0,
+    tooOld.slice(0, 3).map(p => `${p.model} ${p.software}`).join(' | '));
+  // An iPhone source is IMG_nnnn.HEIC, .JPG, .jpeg or .JPEG, never .jpg, and
+  // a HEIC is recorded as converted.
+  const iphones = out.filter(p => p.make === 'Apple');
+  const badIphone = iphones.filter(p => {
+    const name = xmpAttr(p.xmp, 'crs:RawFileName') || '';
+    const conv = /converted from image\/heic to image\/jpeg/.test(p.xmp);
+    return !/^IMG_\d{4}\.(HEIC|JPG|jpeg|JPEG)$/.test(name) || conv !== name.endsWith('.HEIC');
+  });
+  assert(F, 'packets: iPhone source is IMG_nnnn.HEIC/JPG/jpeg/JPEG, HEIC recorded as converted', badIphone.length === 0,
+    badIphone.slice(0, 3).map(p => xmpAttr(p.xmp, 'crs:RawFileName')).join(' | '));
+  const heic = iphones.filter(p => /\.HEIC"/.test(p.xmp)).length / Math.max(1, iphones.length);
+  assert(F, 'packets: iPhone sources include HEIC at about the measured 40%', heic >= 0.15 && heic <= 0.7,
+    `${heic.toFixed(2)} of ${iphones.length}`);
   assert(F, 'packets: AutoToneDigest always paired with NoSat and never repeated',
     unpaired.length === 0 && new Set(digestsAt).size === digestsAt.length, `${unpaired.length} unpaired`);
 }

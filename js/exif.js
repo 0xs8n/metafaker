@@ -474,6 +474,16 @@ const rawSupportedBy = (cam, date) => {
   return !!first && first <= date;
 };
 
+/**
+ * Which editor exported the photo, as often as real exports name each one:
+ * dated 2024 on, weighting each Wikimedia Commons uploader equally (391 phone
+ * exports from 36 uploaders, 1,510 body exports from 64). Left out, and the
+ * rest renormalised: Lightroom mobile (9.1% of phone exports, 8.7% of body
+ * exports) and, for phones, Camera Raw (8.3%), whose packets were not
+ * measured, and the discontinued Lightroom 6 (2.8% of phone exports).
+ */
+const EDITOR_SHARES = { phone: { lrc: 67.7, lr: 12.0 }, body: { lrc: 56.1, lr: 25.7, acr: 9.5 } };
+
 /** The cameras offered: every phone, and the bodies whose profile digest was measured (see data.js). */
 const OFFERED = CAMERAS.filter(c => c.type === 'phone' || c.profileDigest);
 
@@ -578,8 +588,13 @@ export function generateFake(options = {}) {
   const w   = WRITERS[cam.writer];
   if (!loc) loc = pickLocation();
   const isBody = w.kind === 'body';
-  const editorKind = isBody ? 'acr' : 'lr';
   const acrMin = isBody ? cam.acrMin || null : null;
+  // Only an editor that had a release able to open the body's raws by then.
+  const editors = Object.entries(EDITOR_SHARES[isBody ? 'body' : 'phone']).filter(([k]) => {
+    const first = earliestRelease(k, acrMin);
+    return first && first <= (exportAt || new Date(latest));
+  });
+  const editorKind = editors.length ? weightedPick(Object.fromEntries(editors)) : 'acr';
   if (!exportAt) exportAt = pickExport(capture, latest, earliestRelease(editorKind, acrMin));
   const editor = pickEditor(editorKind, exportAt, acrMin);
 
@@ -767,8 +782,9 @@ export function generateFake(options = {}) {
   if (lensSerial) p["Exif"][TAG_LENS_SERIAL] = lensSerial;
 
   // GPS, in the exporter's coordinate encoding. The exporter normalises
-  // GPSVersionID: Camera Raw writes 2.3.0.0, Lightroom 2.2.0.0 (measured).
-  p["GPS"][G.GPSVersionID] = isBody ? [2, 3, 0, 0] : [2, 2, 0, 0];
+  // GPSVersionID: Camera Raw writes 2.3.0.0 (7 of 7 real exports), Lightroom
+  // 2.2.0.0 (3 of 3) and Lightroom Classic 2.2.0.0 (14 of 16).
+  p["GPS"][G.GPSVersionID] = editorKind === 'acr' ? [2, 3, 0, 0] : [2, 2, 0, 0];
   p["GPS"][G.GPSLatitudeRef]  = latRef;
   p["GPS"][G.GPSLatitude]     = adobeGps(Math.abs(loc.lat));
   p["GPS"][G.GPSLongitudeRef] = lonRef;
@@ -792,7 +808,7 @@ export function generateFake(options = {}) {
         profileDigest: cam.profileDigest, lensCorrection: drawLensCorrection(cam, lens) }
     // Always a generated name in the phone's own convention: the user's real
     // filename would identify them or the original photo.
-    : { raw: false, fileName: `${phoneStem(cam, capture, subsec)}.jpg` };
+    : phoneSource(cam, capture, subsec);
   const aux = isBody ? {
     serialNumber, lensSerial,
     firmware: cam.firmware || null,
@@ -832,6 +848,20 @@ function rawFileStem(cam) {
   if (cam.writer === 'canon') return hex(4).toUpperCase() + digits(4);
   return `${cam.raw.prefix}${digits(4)}`;
 }
+
+// The iPhone source a desktop export names, IMG_nnnn with these extensions:
+// 16 exports from 10 Wikimedia Commons uploaders (2024 on, each uploader
+// weighted equally, ProRAW DNGs left out). None had a lowercase .jpg.
+const IPHONE_EXT = { HEIC: 4.0, JPG: 2.5, jpeg: 2.5, JPEG: 1.0 };
+
+/** The phone's original file, in its own naming; an iPhone's may be HEIC. */
+function phoneSource(cam, capture, subsec) {
+  const stem = phoneStem(cam, capture, subsec);
+  if (cam.make !== 'Apple') return { raw: false, fileName: `${stem}.jpg` };
+  const ext = weightedPick(IPHONE_EXT);
+  return { raw: false, fileName: `${stem}.${ext}`, mime: ext === 'HEIC' ? 'image/heic' : 'image/jpeg' };
+}
+
 /** A phone's original JPEG stem, matching its own naming. */
 function phoneStem(cam, d, subsec) {
   const p = n => String(n).padStart(2, '0');
