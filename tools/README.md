@@ -190,6 +190,25 @@ largest full-pipeline photos can exhaust Chrome's heap and drop the DevTools
 socket, which is an environmental limit, not a pipeline fault — the same file
 processes cleanly given its own Chrome.
 
+### `classify-eval.js`
+
+    node tools/classify-eval.js <corpus> [--holdout g1,g2] [--json rows.jsonl] [--misses]
+
+Measures `js/classify.js` on a labelled corpus laid out as
+`<corpus>/photo/<group>/*` (real camera photos) and `<corpus>/screen/<group>/*`
+(screenshots), JPEG, PNG or WebP. Each file is classified in headless Chrome
+through the same calls the page makes: as it is, with its metadata stripped,
+and as copies a messaging app or an editor would make (JPEG q70 to q90 at 1280,
+1600 px and full size, WebP, a phone-screen-shaped and a panorama crop, and a
+JPEG copy that keeps the metadata). It prints, per copy, the share of
+screenshots caught and the number of photos taken for a screenshot, and exits 1
+if any photo copy is. Groups named in `--holdout` are reported apart, so a
+threshold tuned on the other groups is checked on sources it never saw: hold
+out whole categories (a camera, a Commons category), never copies of one image.
+`--json` writes every measurement, for trying a threshold change offline before
+running it again. No corpus is committed; the useful files are other people's
+images. The corpus behind the README's figures is described there.
+
 ### `filecheck.js`
 
     node tools/filecheck.js
