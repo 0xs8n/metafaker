@@ -138,12 +138,14 @@ extensionless JPEG with no MIME type. Outputs go to `tools/out/`
   identity's time and ISO, ranked among the real files of its table at the
   same EV and f-number, puts 25%, 50% and 75% of the batch below the real
   quartiles within four standard errors plus 4 points.
+- **gps** — 3,000 locations drawn from the shipped generator all lie on US
+  land, tested against `tools/us-land.json`.
 - **exiftool** (when found on PATH or at the known Windows install path;
   otherwise SKIPPED) — `-validate` reports only the warnings a real Adobe
   export produces and no others; Make/Model present; Software is Adobe Camera
   Raw or Lightroom; ModifyDate >= DateTimeOriginal; the XMP CreateDate matches
-  DateTimeOriginal; GPS latitude within 18-72° N and longitude within 65-180° W
-  (the United States); the exposure triangle agrees with the APEX tags within
+  DateTimeOriginal; the GPS position on US land, tested against
+  `tools/us-land.json`; the exposure triangle agrees with the APEX tags within
   0.75 EV; an IFD1 thumbnail present; no JFIF or Google ICC tags;
   ExifImageWidth/Height absent, as Adobe drops them; and the sun is not below
   -6° at the GPS position and time when the exposure indicates bright daylight
@@ -209,6 +211,24 @@ fingerprint (VISION dataset: iPhone 6 and Huawei P9, maximum-likelihood
 fingerprints from flat-field shots): processed photos still match their camera
 (22 of 22 iPhone 6 outputs), and the downscale, warp, denoise and noise weaken
 the pattern only about twofold. The README's threat model reports the numbers.
+
+### `build-places.js`
+
+    node tools/build-places.js [--src DIR]
+
+Generates `js/places.js`, the US place table every generated GPS position is
+drawn from, and `tools/us-land.json`, the land mask `check.js` tests positions
+against. No browser. It downloads its public-domain sources into `DIR`
+(default `<tmp>/metafaker-places`) when missing and reuses them after: the
+Census 2024 Gazetteer, place and state boundaries and population estimates,
+the ACS 2020-2024 place populations, the NWS forecast zones with their time
+zones, the GNIS Federal Codes town points, the IANA zone list, and one USGS
+Elevation Point Query Service lookup per place, cached in `DIR/epqs.json`.
+The first run takes about 80 minutes, almost all of it elevation lookups; a
+rerun with the cache takes about 5 and writes identical files. It refuses to
+write if any sampled point of any disk leaves its place, US land, its time
+zone or the simplified mask, or if a US time zone stops matching the zone the
+table uses for it.
 
 ### `build.js`
 

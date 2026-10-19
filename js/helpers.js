@@ -5,6 +5,7 @@
 import { requantize } from './jpeg-requantize.js';
 import { pickEditorQtable, THUMB_QTABLE, ADOBE_APP14, editorIcc, xmpSegment } from './provenance.js';
 import { rnd, pick, randInt } from './rng.js';
+import { PLACES, ZONES } from './places.js';
 
 /** The exporter's sRGB ICC profile as a ready-to-insert APP2 segment. */
 export function iccApp2Segment() {
@@ -20,29 +21,32 @@ export const cryptoRandInt = randInt;
 
 // ── GPS Utilities ────────────────────────────────────────────────
 
+const M_PER_DEG = 6371008.8 * Math.PI / 180;
+let placesTotal = 0;
+const PLACE_CUMULATIVE = PLACES.map(p => (placesTotal += p[4]));
+
 /**
- * Jitter a location within its own metro area.
+ * A US place drawn by population, and a point drawn uniformly in its disk.
+ * tools/build-places.js sizes each disk so every point in it is inside the
+ * place, on land and in one time zone; the sampling here uses the same local
+ * projection the build checked.
  *
- * ±0.05° is roughly ±5 km. The previous ±0.3° moved a point up to 33 km, which
- * for a coastal city dropped it in open water — Miami came out 30 km into the
- * Atlantic, Boston into Massachusetts Bay. A photo whose GPS lands at sea is a
- * far louder signal than one that repeats a city, and a few km of spread is
- * what a real set of photos taken around a city looks like anyway.
- *
- * Altitude is jittered by ±20 m around the city's ground elevation rather than
- * randomised, so it stays consistent with the terrain at the coordinates. The
- * timezone is carried through because GPSTimeStamp has to be derived from the
- * photographed city's clock, not the machine's.
+ * Altitude is ±20 m around the ground elevation at the disk's centre, so it
+ * stays near the terrain. The time zone is carried through because
+ * GPSTimeStamp has to be derived from the place's clock, not the machine's.
  */
-export function jitterLocation(base) {
-  const lat = base.lat + (rnd() - 0.5) * 0.1;
-  const lon = base.lon + (rnd() - 0.5) * 0.1;
+export function pickLocation() {
+  const x = rnd() * placesTotal;
+  let lo = 0, hi = PLACES.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (PLACE_CUMULATIVE[mid] > x) hi = mid; else lo = mid + 1; }
+  const [city, lat0, lon0, radius, , elevation, zone] = PLACES[lo];
+  const d = radius * Math.sqrt(rnd()), a = 2 * Math.PI * rnd();
   return {
-    city: base.city,
-    tz: base.tz,
-    lat: Number(clamp(lat, -89.99, 89.99).toFixed(6)),
-    lon: Number(clamp(lon, -179.99, 179.99).toFixed(6)),
-    alt: Math.max(0, Math.round((base.alt ?? 0) + (rnd() - 0.5) * 40)),
+    city,
+    tz: ZONES[zone],
+    lat: Number((lat0 + d * Math.cos(a) / M_PER_DEG).toFixed(6)),
+    lon: Number((lon0 + d * Math.sin(a) / (M_PER_DEG * Math.cos(lat0 * Math.PI / 180))).toFixed(6)),
+    alt: Math.round(elevation + (rnd() - 0.5) * 40),
   };
 }
 

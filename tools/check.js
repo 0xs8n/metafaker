@@ -34,6 +34,29 @@ const EXIFTOOL_FALLBACKS = [
   '/opt/homebrew/bin/exiftool',
 ];
 
+const LOCATION_DRAWS = 3000;
+
+// US land, 50 states and DC, as boundary polylines from tools/build-places.js.
+const US_LAND = JSON.parse(fs.readFileSync(path.join(__dirname, 'us-land.json'), 'utf8')).lines.map(l => {
+  const pts = Float64Array.from(l, v => v / 1e5);
+  let xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  for (let i = 0; i < pts.length; i += 2) { xMax = Math.max(xMax, pts[i]); yMin = Math.min(yMin, pts[i + 1]); yMax = Math.max(yMax, pts[i + 1]); }
+  return { pts, xMax, yMin, yMax };
+});
+
+/** Even-odd test of a ray to the east against every boundary segment. */
+function onUsLand(lat, lon) {
+  let inside = false;
+  for (const { pts, xMax, yMin, yMax } of US_LAND) {
+    if (lat < yMin || lat > yMax || lon > xMax) continue;
+    for (let i = 2; i < pts.length; i += 2) {
+      const ax = pts[i - 2], ay = pts[i - 1], bx = pts[i], by = pts[i + 1];
+      if ((ay > lat) !== (by > lat) && lon < ax + (lat - ay) * (bx - ax) / (by - ay)) inside = !inside;
+    }
+  }
+  return inside;
+}
+
 // ── Result collection ────────────────────────────────────────────
 
 const results = [];                     // { file, check, ok, detail }
@@ -405,8 +428,7 @@ function exiftoolChecks(name, t, mode, info) {
   let lon = num(tag(t, 'GPSLongitude', 'Composite'));
   if (!Number.isFinite(lat)) { lat = num(tag(t, 'GPSLatitude', 'GPS')); if (tag(t, 'GPSLatitudeRef', 'GPS') === 'S') lat = -Math.abs(lat); }
   if (!Number.isFinite(lon)) { lon = num(tag(t, 'GPSLongitude', 'GPS')); if (tag(t, 'GPSLongitudeRef', 'GPS') === 'W') lon = -Math.abs(lon); }
-  assert(name, 'exiftool: GPSLatitude in [18, 72]', lat >= 18 && lat <= 72, `lat=${lat}`);
-  assert(name, 'exiftool: GPSLongitude in [-180, -65]', lon >= -180 && lon <= -65, `lon=${lon}`);
+  assert(name, 'exiftool: GPS on US land', onUsLand(lat, lon), `lat=${lat} lon=${lon}`);
 
   // Exposure triangle vs APEX tags. With -n exiftool has already converted
   // ApertureValue to an f-number and ShutterSpeedValue to seconds.
@@ -803,6 +825,14 @@ async function main() {
     } catch (e) {
       assert('(exposure)', 'exposure checks ran without throwing', false, e.stack || e.message);
     }
+
+    const draws = await page.evaluate(async n => {
+      const { generateFake } = await import('/js/exif.js');
+      return Array.from({ length: n }, () => { const { loc } = generateFake({}); return [loc.lat, loc.lon]; });
+    }, LOCATION_DRAWS);
+    const offLand = draws.filter(([lat, lon]) => !onUsLand(lat, lon));
+    assert('(page)', `gps: ${draws.length} generated locations all on US land`, offLand.length === 0,
+      `${offLand.length} off US land, e.g. ${offLand.slice(0, 4).map(p => p.join(', ')).join(' | ')}`);
 
     // Network privacy: everything must be local.
     const allowed = u => u.startsWith(`${server.origin}/`) || u.startsWith('blob:') || u.startsWith('data:');

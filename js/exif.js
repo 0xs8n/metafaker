@@ -11,13 +11,13 @@
 import exifr from '../vendor/exifr.esm.js';
 import { ICONS } from './icons.js';
 import {
-  pick, randInt, cryptoRandInt,
-  jitterLocation, fmtDate, fmtGpsDate,
+  pick, randInt, clamp, cryptoRandInt,
+  pickLocation, fmtDate, fmtGpsDate,
   wallClockToUtc, tzOffsetString, sunElevation,
   dmsToDec, dataUrlToBlob,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
-import { CAMERAS, LOCATIONS, pickOptics } from './data.js';
+import { CAMERAS, pickOptics } from './data.js';
 import { PHONE_APPLE, PHONE_ANDROID, BODY_ADOBE } from './exposure-tables.js';
 import { adobeExposure, adobeFNumber } from './exposure.js';
 import { pickEditor, earliestRelease } from './provenance.js';
@@ -560,7 +560,7 @@ export function generateFake(options = {}) {
   }
   const cam = pick(pool);
   const w   = WRITERS[cam.writer];
-  const loc = jitterLocation(pick(LOCATIONS));
+  const loc = pickLocation();
   const isBody = w.kind === 'body';
   const editorKind = isBody ? 'acr' : 'lr';
   const acrMin = isBody ? cam.acrMin || null : null;
@@ -755,8 +755,8 @@ export function generateFake(options = {}) {
   p["GPS"][G.GPSLatitude]     = adobeGps(Math.abs(loc.lat));
   p["GPS"][G.GPSLongitudeRef] = lonRef;
   p["GPS"][G.GPSLongitude]    = adobeGps(Math.abs(loc.lon));
-  p["GPS"][G.GPSAltitudeRef]  = 0;
-  p["GPS"][G.GPSAltitude]     = [Math.round(loc.alt * 100), 100];
+  p["GPS"][G.GPSAltitudeRef]  = loc.alt < 0 ? 1 : 0;
+  p["GPS"][G.GPSAltitude]     = [Math.round(Math.abs(loc.alt) * 100), 100];
   p["GPS"][G.GPSTimeStamp]    = [[utc.getUTCHours(), 1], [utc.getUTCMinutes(), 1], [utc.getUTCSeconds(), 1]];
   if (w.extras.status)   p["GPS"][G.GPSStatus]   = "A";
   if (w.extras.mapDatum) p["GPS"][G.GPSMapDatum] = "WGS-84";
