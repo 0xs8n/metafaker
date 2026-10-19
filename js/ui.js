@@ -100,20 +100,32 @@ function hasProcessedOutput(item) {
   return !!(item?.modBlob || item?.modDataUrl);
 }
 
+/** A random hex stem carrying no time information, for an output with no generated capture date to name itself after. */
+function randomStem(n = 8) {
+  const chars = '0123456789abcdef';
+  let s = '';
+  for (let i = 0; i < n; i++) s += chars[Math.floor(rnd() * 16)];
+  return s;
+}
+
 /**
  * The name Camera Raw or Lightroom gives an export: the source file's own stem
  * with a lowercase .jpg extension. A photo's source file is the generated one
  * its XMP records as crs:RawFileName (DSC_4821.NEF, PXL_20240612_141503123.jpg,
  * IMG_0734.jpg …), so the download name and the metadata tell the same story.
- * The user's real filename is never used. A cleaned file with no generated
- * camera gets a plain date-based name. Uppercase .JPG is what the camera
+ * The user's real filename is never used. Uppercase .JPG is what the camera
  * writes, not what an editor writes.
+ *
+ * A metadata-stripped file carries no EXIF timestamp to echo, so naming it
+ * from a date (even a generated one) would assert a capture time the file
+ * doesn't have, and the only date actually available then would be the real
+ * clock the tool ran on. It gets a random, time-free stem instead
+ * (`processClearItem` sets `fakeStem` for exactly this reason). The fallback
+ * below only runs if some future caller forgets to set a stem.
  */
 function getOutputName(item) {
   if (item?.fakeStem) return `${item.fakeStem}.jpg`;
-  const d  = (item?.fakeDate instanceof Date && !isNaN(item.fakeDate)) ? item.fakeDate : new Date();
-  const p = n => String(n).padStart(2, '0');
-  return `IMG_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`;
+  return `img_${randomStem()}.jpg`;
 }
 
 function releaseItemResources(item) {
@@ -391,7 +403,8 @@ async function processGraphicItem(item, options = {}) {
     item.modDataUrl = item.modPreviewUrl ? null : modDataUrl;
     item.fakeExif = { ...verified.exif };      // editor provenance, no camera, no GPS
     item.fakePiexif = fake.piexif;
-    item.fakeCamera = null; item.fakeStem = null;
+    item.fakeCamera = null;
+    item.fakeStem = fake.source.fileName.replace(/\.[^.]+$/, '');
     item.fakeDate = fake.capture;
     item.fakeLocation = null;
   } catch (e) {
@@ -518,7 +531,10 @@ async function processClearItem(item, options = {}) {
     item.modDataUrl = item.modPreviewUrl ? null : canvasResult.dataUrl;
     item.fakeExif = null;
     item.fakePiexif = null;
-    item.fakeCamera = null; item.fakeStem = null;
+    item.fakeCamera = null;
+    // No EXIF survives the strip, so the download name carries no date either
+    // — a random stem, not the real clock the tool ran on.
+    item.fakeStem = `img_${randomStem()}`;
     item.fakeLocation = null;
     showToast(`Metadata stripped from ${item.file.name}.`, 'success');
   } catch (e) {
@@ -660,6 +676,11 @@ export const App = {
     } catch (e) {
       showToast(`Download failed: ${e.message}`, 'error');
     }
+  },
+
+  /** The name Download would give this item. Exposed for tools/check.js. */
+  outputName(id) {
+    return getOutputName(getItem(id));
   },
 
   async downloadAll() {

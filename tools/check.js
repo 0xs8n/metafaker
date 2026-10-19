@@ -550,6 +550,7 @@ async function processInBrowser(page, origin, names) {
       city: it.fakeLocation ? it.fakeLocation.city : '',
       date: it.fakeDate ? new Date(it.fakeDate).toISOString() : '',
       stem: it.fakeStem ?? null,
+      downloadName: App.outputName(it.id),
     }));
   }, origin, names, BATCH_SIZE);
 
@@ -565,6 +566,21 @@ async function processInBrowser(page, origin, names) {
     const stems = b.map(it => it.stem);
     assert('(batch)', 'batch: each image has its own generated filename',
       stems.every(s => typeof s === 'string' && s) && new Set(stems).size === stems.length, stems.join(','));
+  }
+
+  // Privacy: a download name must never leak when (or in which time zone)
+  // this session ran. Stripped and cleaned outputs carry no EXIF timestamp to
+  // echo, so a date embedded in their filename could only come from the real
+  // clock, which a getOutputName fallback to `new Date()` used to do.
+  const runTime = Date.now();
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  for (const it of summary) {
+    const m = it.downloadName && it.downloadName.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+    if (!m) continue;
+    const [, y, mo, d, h, mi, s] = m.map(Number);
+    const named = new Date(y, mo - 1, d, h, mi, s).getTime();
+    assert(it.downloadName, 'privacy: download name carries no date within a day of the run',
+      Math.abs(named - runTime) > ONE_DAY_MS, `name=${it.downloadName} runTime=${new Date(runTime).toISOString()}`);
   }
 
   // Non-photos: classified non-photo and cleaned by Randomize, never given a camera.
