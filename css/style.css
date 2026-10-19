@@ -379,6 +379,16 @@
     [data-theme="dark"] .option-warning {
       background: rgba(245,158,11,0.12);
     }
+    .option-note {
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--text-muted);
+      margin-top: 8px;
+    }
+    .option-note code {
+      font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+      font-size: 10.5px;
+    }
 
     /* --- Buttons --- */
     .btn {

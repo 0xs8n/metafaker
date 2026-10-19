@@ -83,3 +83,8 @@ if (chkKeepDate && keepDateWarning) {
   chkKeepDate.addEventListener('change', sync);
   sync();
 }
+
+// A file:// page was already opened from disk, so the origin-tracking note
+// next to Download has nothing to warn about.
+const downloadOriginNote = document.getElementById('downloadOriginNote');
+if (downloadOriginNote && location.protocol === 'file:') downloadOriginNote.hidden = true;
