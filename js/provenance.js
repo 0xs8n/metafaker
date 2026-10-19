@@ -254,10 +254,9 @@ export function pickExportLongEdge(type) {
 import { rnd } from './rng.js';
 import { md5 } from './md5.js';
 
-// Two Adobe identities, both on XMP Core 7.0, process version 15.4, and the
-// same container: Camera Raw, which is how a raw file from a camera body gets
-// exported, and Lightroom (desktop), which is how a phone JPEG does. Camera Raw
-// writes 300 ppi, Lightroom 240.
+// Three Adobe identities, all on XMP Core 7.0, process version 15.4, and the
+// same container: Lightroom Classic, Lightroom (desktop) and Camera Raw, drawn
+// per image in generateFake. Camera Raw writes 300 ppi, Lightroom 240.
 //
 // The versions are the ones seen in real exports on Wikimedia Commons
 // (5,248 files from 169 uploaders, measured 2026-10-17), each with the
@@ -286,10 +285,36 @@ const LR_RELEASES = [
   ['9.3.2', '18.3', '2026-06-01'], ['9.4', '18.4', '2026-06-21'], ['9.4.1', '18.4', '2026-07-08'],
   ['9.5', '18.5', '2026-08-06'], ['9.5.1', '18.5.1', '2026-08-30'], ['9.6', '18.6', '2026-10-04'],
 ].map(([version, crsVersion, date]) => ({ version, crsVersion, date: new Date(`${date}T00:00:00`) }));
+// Lightroom Classic M.N writes crs:Version (M+3).N, measured on 13.1, 13.2,
+// 13.3, 13.4, 13.5, 14.0, 14.2, 15.1 and 15.2. Its patch releases follow no
+// one rule (13.5.1 writes 16.5, 14.3.1 17.3.1, 15.2.1 18.2.2, 15.4.1 18.4), so
+// a patch is listed only where a real export of it was read; 15.1.1, whose
+// one export read carries no develop settings, is left out. Dates are the earliest export date each
+// version was seen on in the Commons surveys (2026-10-18); a few are later
+// than the next release's, as first sightings can be.
+const LRC_RELEASES = [
+  ['13.0.1', '16.0', '2023-10-17'], ['13.1', '16.1', '2023-12-20'], ['13.2', '16.2', '2024-03-30'],
+  ['13.3', '16.3', '2024-06-04'], ['13.3.1', '16.3.1', '2024-06-23'], ['13.4', '16.4', '2024-07-06'],
+  ['13.5', '16.5', '2024-08-17'], ['13.5.1', '16.5', '2024-09-13'], ['14.0', '17.0', '2024-10-18'],
+  ['14.0.1', '17.0', '2024-10-18'], ['14.1.1', '17.1', '2024-12-19'], ['14.2', '17.2', '2025-03-05'],
+  ['14.3', '17.3', '2025-05-03'], ['14.3.1', '17.3.1', '2025-05-18'], ['14.4', '17.4', '2025-06-17'],
+  ['14.5', '17.5', '2025-08-14'], ['14.5.1', '17.5', '2025-08-28'], ['15.0', '18.0', '2025-12-26'],
+  ['15.0.1', '18.0', '2025-11-17'], ['15.1', '18.1', '2026-03-28'], ['15.2', '18.2', '2026-03-07'],
+  ['15.2.1', '18.2.2', '2026-03-27'], ['15.3', '18.3', '2026-04-23'], ['15.3.1', '18.3', '2026-06-05'],
+  ['15.4.1', '18.4', '2026-08-03'], ['15.5.1', '18.5.1', '2026-09-06'], ['15.6', '18.6', '2026-10-02'],
+].map(([version, crsVersion, date]) => ({ version, crsVersion, date: new Date(`${date}T00:00:00`) }));
+const RELEASES = { acr: ACR_RELEASES, lr: LR_RELEASES, lrc: LRC_RELEASES };
 
 // Share of exports made on Windows, weighting every uploader equally:
-// Camera Raw 21%, Lightroom 36% (the rest Macintosh).
-const WINDOWS_SHARE = { acr: 0.21, lr: 0.36 };
+// Camera Raw 21%, Lightroom 36%, Lightroom Classic 38% (61 uploaders, 2024
+// on); the rest Macintosh.
+const WINDOWS_SHARE = { acr: 0.21, lr: 0.36, lrc: 0.38 };
+
+// Lightroom Classic exports at the user's resolution setting: in its 1,144
+// Commons exports dated 2024 on, weighting each of 61 uploaders equally, 240
+// ppi (its default) 51.5%, 300 29.0%, 72 8.2%, 100 4.9%; the rarer values
+// (6.4%) are left out.
+const LRC_DPI = [[240, 51.5], [300, 29.0], [72, 8.2], [100, 4.9]];
 
 /** Whether dotted version `v` is `min` or later ("17.0.1" >= "17"). */
 function versionAtLeast(v, min) {
@@ -304,11 +329,12 @@ function versionAtLeast(v, min) {
 /**
  * The earliest date an export by this editor can carry. With `minVersion` (a
  * body's first supporting Camera Raw), the first release seen in real exports
- * at or after it, or null when the table has none yet.
+ * whose Camera Raw engine (crs:Version) is at or after it, or null when the
+ * table has none yet.
  */
 export function earliestRelease(kind = 'acr', minVersion = null) {
-  const list = kind === 'lr' ? LR_RELEASES : ACR_RELEASES;
-  const r = minVersion ? list.find(x => versionAtLeast(x.version, minVersion)) : list[0];
+  const list = RELEASES[kind];
+  const r = minVersion ? list.find(x => versionAtLeast(x.crsVersion, minVersion)) : list[0];
   return r ? r.date : null;
 }
 
@@ -319,7 +345,7 @@ export function earliestRelease(kind = 'acr', minVersion = null) {
  * earlier one.
  */
 function releaseAt(list, when, minVersion = null) {
-  const avail = list.filter(r => r.date <= when && (!minVersion || versionAtLeast(r.version, minVersion)));
+  const avail = list.filter(r => r.date <= when && (!minVersion || versionAtLeast(r.crsVersion, minVersion)));
   if (!avail.length) return list[0];
   const groups = [];                       // consecutive releases sharing major.minor
   for (const r of avail) {
@@ -336,9 +362,16 @@ function releaseAt(list, when, minVersion = null) {
 export function pickEditor(kind = 'acr', when = new Date(), minVersion = null) {
   const platform = rnd() < (WINDOWS_SHARE[kind] ?? 0.3) ? 'Windows' : 'Macintosh';
   if (kind === 'lr') {
-    const { version, crsVersion } = releaseAt(LR_RELEASES, when);
+    const { version, crsVersion } = releaseAt(LR_RELEASES, when, minVersion);
     return { kind, version, crsVersion, platform, dpi: 240,
              software: `Adobe Lightroom ${version} (${platform})` };
+  }
+  if (kind === 'lrc') {
+    const { version, crsVersion } = releaseAt(LRC_RELEASES, when, minVersion);
+    let r = rnd() * LRC_DPI.reduce((n, [, w]) => n + w, 0);
+    const dpi = (LRC_DPI.find(([, w]) => (r -= w) <= 0) || LRC_DPI[0])[0];
+    return { kind, version, crsVersion, platform, dpi,
+             software: `Adobe Photoshop Lightroom Classic ${version} (${platform})` };
   }
   const { version, crsVersion } = releaseAt(ACR_RELEASES, when, minVersion);
   return { kind: 'acr', version, crsVersion, platform, dpi: 300,
@@ -619,9 +652,14 @@ const indent = (block, n) => block.replace(/^/gm, ' '.repeat(n));
  * from them: name, UUID, LookTable and tone curve are the same in every one
  * (Camera Raw 11.4.1 to Lightroom Classic 15.1); the parameters' Version is
  * the export's own crs:Version, and from crs 17.5 they carry PointColors and
- * ColorVariance too. Camera Raw writes the Copyright line (4 of 4 exports).
+ * ColorVariance too. The look's Copyright line is written by Camera Raw (5 of
+ * 5 exports with a look), Lightroom Classic from 14 (13 of 15) and Lightroom
+ * from 9 (2 of 2), not by Lightroom Classic 13 or earlier (0 of 18) or
+ * Lightroom 6 to 8 (0 of 5).
  */
 function lookBlock(editor) {
+  const major = Number(editor.version.split('.')[0]);
+  const copyright = editor.kind === 'acr' || major >= { lrc: 14, lr: 9 }[editor.kind];
   const tail = hasColorVariance(editor) ? `\n${indent(POINT_COLORS, 2)}\n${indent(COLOR_VARIANCE, 2)}` : '';
   return `   <crs:Look>
     <rdf:Description
@@ -630,8 +668,7 @@ function lookBlock(editor) {
      crs:UUID="B952C231111CD8E0ECCF14B86BAA7077"
      crs:SupportsAmount="false"
      crs:SupportsMonochrome="false"
-     crs:SupportsOutputReferred="false"
-     crs:Copyright="© 2018 Adobe Systems, Inc.">
+     crs:SupportsOutputReferred="false"${copyright ? '\n     crs:Copyright="© 2018 Adobe Systems, Inc."' : ''}>
     <crs:Group>
      <rdf:Alt>
       <rdf:li xml:lang="x-default">Profiles</rdf:li>
@@ -654,16 +691,44 @@ ${indent(LOOK_CURVES, 2)}${tail}
 /** Adobe pads every packet with whitespace: 40 lines of 100 spaces and a short last line, 4097 bytes in all. */
 const XMP_PADDING = '\n' + (' '.repeat(100) + '\n').repeat(40) + ' '.repeat(55) + '\n';
 
+/** A wall-clock date at a "+HH:MM" offset, as epoch milliseconds. */
+const utcMs = (d, offset) => {
+  const m = /^([+-])(\d\d):(\d\d)$/.exec(offset || '');
+  const off = m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()) - off * 60000;
+};
+
+/**
+ * Lightroom on Windows records the edit before the export as an `edited`
+ * event: 8 of 10 of its real Windows exports, 0 of 4 on Macintosh, and no
+ * Lightroom Classic or Camera Raw export. Its time is UTC, after the capture
+ * and 46 seconds to 20 hours before the save in those files, with
+ * milliseconds in 4 of the 8.
+ */
+function editedEvent(editor, capture, offsetCapture, exportAt, offsetExport) {
+  if (editor.kind !== 'lr' || editor.platform !== 'Windows' || rnd() >= 0.8) return '';
+  const end = utcMs(exportAt, offsetExport);
+  const gap = end - utcMs(capture, offsetCapture);
+  const lo = Math.min(45000, gap / 2), hi = Math.max(lo, Math.min(20 * 3600000, gap));
+  const when = new Date(end - lo - rnd() * (hi - lo)).toISOString();
+  return `
+     <rdf:li
+      stEvt:action="edited"
+      stEvt:when="${rnd() < 0.5 ? when : when.replace(/\.\d{3}Z$/, 'Z')}"/>`;
+}
+
 /**
  * Build the XMP packet an export carries, in the measured form.
  *
- * Two sources were measured: a Camera Raw export of a raw file, whose packet
- * leads with xmp:ModifyDate and carries the aux: block the raw supplied, and
- * a Lightroom export of a phone JPEG, which leads with xmp:CreatorTool. The
- * capture time goes to CreateDate and DateCreated; the export time to
- * ModifyDate, MetadataDate and the history entry. History entries are in
- * Adobe's compact attribute form, followed by DerivedFrom, the four tone
- * curves and PointColors, then the padding.
+ * Two sources were measured: an export of a raw file, whose packet leads with
+ * xmp:ModifyDate and carries the aux: block the raw supplied, and an export
+ * of a phone JPEG, which leads with xmp:CreatorTool. The three editors write
+ * the same packet but for the fields marked Lightroom Classic and Lightroom
+ * below and the look's Copyright line. The capture time goes to CreateDate
+ * and DateCreated; the export time to ModifyDate, MetadataDate and the
+ * history entry. History entries are in Adobe's compact attribute form,
+ * followed by DerivedFrom, the four tone curves and PointColors, then the
+ * padding.
  */
 export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport, subsec,
                                  lens, editor, source, scene, aux = {}, crop = null }) {
@@ -695,16 +760,24 @@ export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport,
     if (lens?.auxLens)  A.push(['aux:Lens', xml(lens.auxLens)]);
     if (lens?.model)    A.push(['exifEX:LensModel', xml(lens.model)]);
   }
-  A.push(['photoshop:DateCreated', created],
-         ['xmpMM:DocumentID', `xmp.did:${id}`],
-         ['xmpMM:OriginalDocumentID', original],
+  // Lightroom Classic adds the name the file was imported under (56 of 56 of
+  // its exports from 13.0 with develop settings), and from 13.2 the pick flag
+  // (49 of 49; 13.0.1 and 13.1, 0 of 7), unset as in 43; the 6 a user flagged
+  // are not reproduced.
+  const lrc = editor.kind === 'lrc';
+  const pick = lrc && versionAtLeast(editor.version, '13.2');
+  A.push(['photoshop:DateCreated', created], ['xmpMM:DocumentID', `xmp.did:${id}`]);
+  if (lrc) A.push(['xmpMM:PreservedFileName', xml(source.fileName)]);
+  A.push(['xmpMM:OriginalDocumentID', original],
          ['xmpMM:InstanceID', `xmp.iid:${id}`],
-         ['dc:format', 'image/jpeg'],
-         ['crs:RawFileName', xml(source.fileName)]);
+         ['dc:format', 'image/jpeg']);
+  if (pick) A.push(['xmpDM:pick', '0']);
+  A.push(['crs:RawFileName', xml(source.fileName)]);
   const attrs = A.map(([k, v]) => `   ${k}="${v}"`).join('\n');
   const crs = crsAttributes({ editor, isRaw, scene, profileDigest: source.profileDigest,
                              lensCorrection: source.lensCorrection, crop });
-  const derivedParams = isRaw
+  // A HEIC source is converted like a raw one (10 of 10 real exports of one).
+  const derivedParams = isRaw || source.mime === 'image/heic'
     ? `converted from ${source.mime} to image/jpeg, saved to new location`
     : 'saved to new location';
   // The source's own ID twice and no instance ID: every raw export, and 25 of
@@ -722,12 +795,12 @@ export function buildXmpPacket({ capture, exportAt, offsetCapture, offsetExport,
     xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"
     xmlns:stEvt="http://ns.adobe.com/xap/1.0/sType/ResourceEvent#"
     xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#"
-    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"${pick ? '\n    xmlns:xmpDM="http://ns.adobe.com/xmp/1.0/DynamicMedia/"' : ''}
     xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
 ${attrs}
 ${crs}>
    <xmpMM:History>
-    <rdf:Seq>
+    <rdf:Seq>${editedEvent(editor, capture, offsetCapture, exportAt, offsetExport)}
      <rdf:li
       stEvt:action="derived"
       stEvt:parameters="${derivedParams}"/>

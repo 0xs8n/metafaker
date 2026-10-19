@@ -27,8 +27,9 @@ comments, docs and UI text. Technical terms that describe what is measured
   across images that could link them to each other or to one person.
 - **A non-photo is never given a camera, lens or location.** `js/classify.js`
   decides photo vs. screenshot/graphic before anything is generated.
-- **One pipeline, no user-facing modes.** The output presents as an Adobe Camera
-  Raw (camera bodies) or Lightroom (phones) export.
+- **One pipeline, no user-facing modes.** The output presents as an Adobe
+  Lightroom Classic, Lightroom or Camera Raw export, the editor drawn per image
+  at the shares real exports show (Camera Raw only for camera bodies).
 - **Match real exports, imperfections included.** A genuine Adobe export does
   not pass `exiftool -validate`; the output must produce the same warnings and
   no others, not validate clean.
@@ -38,12 +39,12 @@ comments, docs and UI text. Technical terms that describe what is measured
   touch it.
 - **Facts are measured, not invented.** Camera and Adobe values in `js/data.js`
   and `js/provenance.js` come from real files. Don't add a value without a source.
-- **Keep the Adobe release table current.** `ACR_RELEASES` / `LR_RELEASES` in
-  `js/provenance.js` hold only versions seen in real exports, with the date
-  first seen. As Adobe ships releases, outputs drift behind real exports
-  unless new ones are measured and added. The same goes for the camera list
-  in `js/data.js` (each entry needs `released`, and `firmwareDate` where the
-  entry depends on a firmware).
+- **Keep the Adobe release table current.** `ACR_RELEASES` / `LR_RELEASES` /
+  `LRC_RELEASES` in `js/provenance.js` hold only versions seen in real
+  exports, with the date first seen. As Adobe ships releases, outputs drift
+  behind real exports unless new ones are measured and added. The same goes
+  for the camera list in `js/data.js` (each entry needs `released`, and
+  `firmwareDate` where the entry depends on a firmware).
 - **All randomness goes through `js/rng.js`** (`crypto.getRandomValues`).
 - **Be honest about limits.** The threat model in the README states what is and
   is not proven. Don't claim more than has been measured.
