@@ -603,6 +603,171 @@ async function processInBrowser(page, origin, names) {
   return summary;
 }
 
+// ── Exposure ─────────────────────────────────────────────────────
+
+const EXPOSURE_BATCH = 1000;
+
+/**
+ * Adobe's exposure rounding, run against real exports, and the exposures of
+ * a large batch of generated identities. Returns plain data for the checks
+ * below; `producible` says whether some camera time rounds to that rational
+ * under the one-pass rule (a rounded value need not be a fixed point of it:
+ * 1/1314 becomes 1/1300, which itself would become 1/1250).
+ */
+async function exposureInBrowser(page, origin, n) {
+  return page.evaluate(async (base, n) => {
+    const x = await import('/js/exposure.js');
+    const m = await import('/js/exif.js');
+    const t = await import('/js/exposure-tables.js');
+    const h = await import('/js/helpers.js');
+    const memo = new Map();
+    const producible = (num, den) => {
+      const key = `${num}/${den}`;
+      if (!memo.has(key)) {
+        let ok = false;
+        for (let i = 0; i <= 4000 && !ok; i++) {
+          const [a, b] = x.adobeExposure(num / den * Math.exp((i / 4000 - 0.5) * 0.3)).exposureTime;
+          ok = a === num && b === den;
+        }
+        memo.set(key, ok);
+      }
+      return memo.get(key);
+    };
+    const parseRat = s => { const [a, b] = String(s).split('/').map(Number); return [a, b === undefined ? 1 : b]; };
+    const same = (r, s) => !!s && s !== 'None' && `${r[0]}/${r[1]}` === s;
+
+    const examples = [['1/1215', '1/1200'], ['1/4673', '1/4700'], ['2101/1000000', '1/480'], ['1/364', '1/350'],
+      ['1/1314', '1/1300'], ['1/4', '1/4'], ['166/10000', '1/60'], ['1/16', '1/15']]
+      .map(([from, want]) => { const [a, b] = parseRat(from); const e = x.adobeExposure(a / b).exposureTime; return { from, want, got: `${e[0]}/${e[1]}` }; });
+
+    const fixture = await (await fetch(`${base}/tools/adobe-exposure-times.json`)).json();
+    const real = {};
+    for (const kind of ['phone', 'body']) {
+      const r = { files: 0, producible: 0, ssvFiles: 0, ssvMatch: 0, odd: [] };
+      for (const [key, count] of Object.entries(fixture[kind])) {
+        const [et, ssv] = key.split(' ');
+        const [a, b] = parseRat(et);
+        r.files += count;
+        if (!producible(a, b)) { r.odd.push(`${et} (${count})`); continue; }
+        r.producible += count;
+        // Other tools run after the export rewrite ShutterSpeedValue as a
+        // continued fraction (18113/3133); Adobe's form is over a power of ten.
+        if (!/^-?\d+\/10*$/.test(ssv)) continue;
+        r.ssvFiles += count;
+        if (same(x.encodeExposureTime(a / b).shutterSpeedValue, ssv)) r.ssvMatch += count;
+      }
+      real[kind] = r;
+    }
+
+    const E = window.piexif.ExifIFD;
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      const g = m.generateFake({});
+      const e = g.piexif.Exif;
+      const et = e[E.ExposureTime], f = g.display.FNumber;
+      rows.push({
+        phone: g.cam.type === 'phone', apple: g.cam.writer === 'apple', model: g.cam.model,
+        et: `${et[0]}/${et[1]}`, seconds: et[0] / et[1], iso: e[E.ISOSpeedRatings], f, ev: g.ev,
+        sun: h.sunElevation(g.loc.lat, g.loc.lon, h.wallClockToUtc(g.capture, g.loc.tz)),
+        producible: producible(et[0], et[1]),
+        ssvOk: same(x.encodeExposureTime(et[0] / et[1]).shutterSpeedValue, `${e[E.ShutterSpeedValue][0]}/${e[E.ShutterSpeedValue][1]}`),
+        avOk: same(x.adobeFNumber(f).apertureValue, `${e[E.ApertureValue][0]}/${e[E.ApertureValue][1]}`),
+      });
+    }
+    const tables = { apple: t.PHONE_APPLE, android: t.PHONE_ANDROID, body: t.BODY_ADOBE };
+    return { examples, real, rows, tables };
+  }, origin, n);
+}
+
+/**
+ * Where a generated value falls in the measured distribution it should come
+ * from: the uploader-weighted share of real files below it, among files of
+ * the same table, in the same 1-EV bin, shot within 0.4 stop of the same
+ * f-number. Ties are split at random, so a generator drawing from the
+ * measured distribution gives shares uniform on [0, 1].
+ */
+function exposureRank(files, g, key) {
+  const evOf = x => Math.log2(x.f * x.f / x.t) - Math.log2(x.iso / 100);
+  const bin = Math.floor(g.ev);
+  const ref = files.filter(x => Math.floor(evOf(x)) === bin && Math.abs(2 * Math.log2(x.f / g.f)) <= 0.4);
+  if (ref.length < 20) return null;
+  const v = key === 't' ? g.seconds : g.iso;
+  const tot = ref.reduce((s, x) => s + x.w, 0);
+  const below = ref.filter(x => x[key] < v * (1 - 1e-6)).reduce((s, x) => s + x.w, 0);
+  const at = ref.filter(x => Math.abs(x[key] / v - 1) <= 1e-6).reduce((s, x) => s + x.w, 0);
+  return (below + Math.random() * at) / tot;
+}
+
+function exposureChecks(data) {
+  for (const ex of data.examples) {
+    assert('(exposure)', `snap: Adobe writes a camera's ${ex.from} s as ${ex.want}`, ex.got === ex.want, `got ${ex.got}`);
+  }
+  // The only real values the rule cannot produce are encodings no Adobe
+  // version writes (200/10000, 40/10000), from tools run after the export.
+  const NON_ADOBE = { phone: 1, body: 3 };
+  for (const [kind, r] of Object.entries(data.real)) {
+    assert('(exposure)', `snap: produces the ExposureTime of every real ${kind} export but the non-Adobe encodings`,
+      r.files - r.producible === NON_ADOBE[kind], `${r.producible}/${r.files}; not producible: ${r.odd.join(', ')}`);
+    assert('(exposure)', `snap: ShutterSpeedValue mirrors ExposureTime as in real ${kind} exports`,
+      r.ssvMatch === r.ssvFiles, `${r.ssvMatch}/${r.ssvFiles}`);
+  }
+
+  const rows = data.rows;
+  const bad = (k) => rows.filter(r => !r[k]).map(r => `${r.model} ${r.et}`);
+  const unproducible = bad('producible');
+  assert('(exposure)', `batch: every ExposureTime is one Adobe's rounding produces (${rows.length} identities)`,
+    unproducible.length === 0, `${unproducible.length}: ${[...new Set(unproducible)].slice(0, 8).join(', ')}`);
+  assert('(exposure)', 'batch: ShutterSpeedValue mirrors the written ExposureTime', bad('ssvOk').length === 0, bad('ssvOk').slice(0, 5).join(', '));
+  assert('(exposure)', 'batch: ApertureValue mirrors the written FNumber', bad('avOk').length === 0, bad('avOk').slice(0, 5).join(', '));
+
+  const night = rows.filter(r => r.sun < -6 && r.ev > 11);
+  assert('(exposure)', 'batch: sun check (no EV>11 while sun < -6°)', night.length === 0,
+    night.slice(0, 5).map(r => `${r.model} EV ${fmt(r.ev)} sun ${fmt(r.sun, 1)}°`).join(', '));
+
+  const phones = rows.filter(r => r.phone);
+  const share = (set, pred) => set.filter(pred).length / set.length;
+  const near = n => r => Math.abs(r.seconds * n - 1) <= 0.02;
+  // US phone photos sit at exactly 1/60 s in 11% of files (Apple 13%, Android
+  // 1%) and at 1/50 or 1/100 s, the 50 Hz flicker times, in under 1%. At the
+  // generator's own mix of scenes the expected share at 1/60 is about 10%; a
+  // ladder that floors the phone shutter at 1/60 put 40% there. The bounds sit
+  // more than five standard errors from the expected shares at this batch size.
+  assert('(exposure)', 'batch: phones at exactly 1/60 s under 20%', share(phones, near(60)) < 0.2,
+    `${(100 * share(phones, near(60))).toFixed(1)}% of ${phones.length}`);
+  assert('(exposure)', 'batch: phones at the 50 Hz times 1/50 or 1/100 s under 3%',
+    share(phones, r => near(50)(r) || near(100)(r)) < 0.03,
+    `${(100 * share(phones, r => near(50)(r) || near(100)(r))).toFixed(1)}% of ${phones.length}`);
+
+  // Each generated time and ISO against the real files of its table at the
+  // same EV and f-number: the share of real files below it is uniform when
+  // the draw follows the measured distribution, so the shares below the real
+  // quartiles must be 25%, 50% and 75% within sampling error (4 standard
+  // errors) plus 4 points for the half-stop EV window the draw uses instead
+  // of the fixed 1-EV bins here.
+  const files = {};
+  for (const [name, table] of Object.entries(data.tables)) {
+    files[name] = table.split('|').flatMap(group => {
+      const fs = group.split(' ');
+      return fs.map(s => { const [f, inv, iso] = s.split(',').map(Number); return { f, t: 1 / inv, iso, w: 1 / fs.length }; });
+    });
+  }
+  const groups = { 'Apple phones': rows.filter(r => r.phone && r.apple), 'Android phones': rows.filter(r => r.phone && !r.apple),
+                   'bodies': rows.filter(r => !r.phone) };
+  for (const [label, set] of Object.entries(groups)) {
+    const table = label === 'bodies' ? files.body : label === 'Apple phones' ? files.apple : files.android;
+    for (const key of ['t', 'iso']) {
+      const ranks = set.map(g => exposureRank(table, g, key)).filter(v => v != null);
+      const n = ranks.length;
+      for (const q of [0.25, 0.5, 0.75]) {
+        const got = ranks.filter(v => v < q).length / n;
+        const tol = 4 * Math.sqrt(q * (1 - q) / n) + 0.04;
+        assert('(exposure)', `batch: ${label}' ${key === 't' ? 'exposure time' : 'ISO'} follows the real files at the same EV (${q * 100}% below the real ${q * 100}th percentile)`,
+          Math.abs(got - q) <= tol, `${(100 * got).toFixed(1)}% of ${n}, allowed ${(100 * (q - tol)).toFixed(1)}-${(100 * (q + tol)).toFixed(1)}%`);
+      }
+    }
+  }
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 
 async function main() {
@@ -632,6 +797,11 @@ async function main() {
       items = await processInBrowser(page, server.origin, names);
     } catch (e) {
       assert('(page)', 'app: processing ran without throwing', false, e.message);
+    }
+    try {
+      exposureChecks(await exposureInBrowser(page, server.origin, EXPOSURE_BATCH));
+    } catch (e) {
+      assert('(exposure)', 'exposure checks ran without throwing', false, e.stack || e.message);
     }
 
     // Network privacy: everything must be local.

@@ -126,6 +126,18 @@ extensionless JPEG with no MIME type. Outputs go to `tools/out/`
   is Adobe); no camera photo is taken for a screenshot; the extensionless JPEG
   is accepted and randomized as a photo.
 - **filename** — the input's filename appears nowhere in any output's bytes.
+- **exposure** — the port of Adobe's exposure rounding writes the DNG SDK's
+  worked cases (a camera's 1/1215 s as 1/1200, 2101/1000000 as 1/480) and
+  can produce every `ExposureTime` of the real exports in
+  `tools/adobe-exposure-times.json` except the encodings Adobe never writes,
+  with their `ShutterSpeedValue`. Over 1000 `generateFake()` identities: every
+  `ExposureTime` is one the rule produces, `ShutterSpeedValue` and
+  `ApertureValue` are mirrored from the written `ExposureTime` and `FNumber`,
+  no EV above 11 with the sun below -6°, phones sit at exactly 1/60 s in under
+  20% and at the 50 Hz times 1/50 and 1/100 s in under 3%, and each
+  identity's time and ISO, ranked among the real files of its table at the
+  same EV and f-number, puts 25%, 50% and 75% of the batch below the real
+  quartiles within four standard errors plus 4 points.
 - **exiftool** (when found on PATH or at the known Windows install path;
   otherwise SKIPPED) — `-validate` reports only the warnings a real Adobe
   export produces and no others; Make/Model present; Software is Adobe Camera
@@ -139,6 +151,19 @@ extensionless JPEG with no MIME type. Outputs go to `tools/out/`
 
 Exit code is 1 on any failure; each failure names the file, the assertion and
 the actual value.
+
+### `exposure_tables.py`
+
+    python tools/exposure_tables.py <phone-survey.jsonl> <body-survey.jsonl> [js/exposure-tables.js]
+
+Writes `js/exposure-tables.js`, the real exposures generated photos draw
+from, from Wikimedia Commons API surveys (one JSON object per file, as
+`prop=imageinfo&iiprop=metadata|user` reports it over the "Taken with"
+categories). Phones: f-number, time and ISO of every phone file located in the
+United States that is not an Adobe export, as an Apple and an Android table.
+Bodies: the same three of every Adobe export of a body photo. Files are grouped
+by uploader so the generator can weight each uploader once. Rerun it on a newer
+survey to refresh the tables.
 
 ### `stress.js`
 

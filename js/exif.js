@@ -11,13 +11,15 @@
 import exifr from '../vendor/exifr.esm.js';
 import { ICONS } from './icons.js';
 import {
-  pick, randInt, clamp, cryptoRandInt,
+  pick, randInt, cryptoRandInt,
   jitterLocation, fmtDate, fmtGpsDate,
   wallClockToUtc, tzOffsetString, sunElevation,
   dmsToDec, dataUrlToBlob,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
 import { CAMERAS, LOCATIONS, pickOptics } from './data.js';
+import { PHONE_APPLE, PHONE_ANDROID, BODY_ADOBE } from './exposure-tables.js';
+import { adobeExposure, adobeFNumber } from './exposure.js';
 import { pickEditor, earliestRelease } from './provenance.js';
 import { rnd } from './rng.js';
 
@@ -134,19 +136,6 @@ function ratFloat32(v) {
     a = 1 / (a - ai);
   }
   return [neg ? -h1 : h1, k1];
-}
-
-/** APEX shutter/aperture value, as Adobe rewrites it on export: N/1000000, or N/1 when integral. */
-function apexMicro(v) {
-  const r = Math.round(v);
-  if (Math.abs(v - r) < 1e-9) return [r, 1];
-  return [Math.round(v * 1000000), 1000000];
-}
-
-/** FNumber as every Adobe export writes it: a decimal, 8/1, 56/10, 18/10 (for f/1.78). */
-function adobeFNumber(f) {
-  const tenths = Math.round(f * 10);
-  return tenths % 10 === 0 ? [tenths / 10, 1] : [tenths, 10];
 }
 
 /**
@@ -325,35 +314,65 @@ function pickHour() {
 const HOUR = 36e5, DAY = 864e5;
 
 /**
- * Solve a physically consistent shutter/ISO pair for a scene and aperture:
- * N²/t = (ISO/100)·2^EV. Picking the three independently produced frames no
- * scene could have produced.
+ * Real exposures (exposure-tables.js), each file weighted so that every
+ * uploader counts once. Times are the camera's own, before Adobe rounds them.
  */
-function solveExposure(cam, aperture, ev, focalEquiv) {
-  const isos = [...cam.isos].sort((a, b) => a - b);
-  const seconds = s => s[0] / s[1];
-  const slowest = cam.type === 'phone'
-    ? 1 / 60
-    : clamp(1 / Math.max(focalEquiv, 1), 1 / 250, 1 / 30);
-  const required = iso => 100 * aperture * aperture / (iso * Math.pow(2, ev));
-  let iso = isos[isos.length - 1];
-  for (const candidate of isos) {
-    if (required(candidate) <= slowest) { iso = candidate; break; }
+function parseExposures(table, fields) {
+  return table.split('|').flatMap(group => {
+    const files = group.split(' ');
+    return files.map(file => {
+      const v = Object.fromEntries(file.split(',').map((x, i) => [fields[i], Number(x)]));
+      return { f: v.f, t: 1 / v.inv, iso: v.iso, w: 1 / files.length };
+    });
+  });
+}
+const EXPOSURES = {
+  apple:   parseExposures(PHONE_APPLE, ['f', 'inv', 'iso']),
+  android: parseExposures(PHONE_ANDROID, ['f', 'inv', 'iso']),
+  body:    parseExposures(BODY_ADOBE, ['f', 'inv', 'iso']),
+};
+
+// Samsung, OnePlus and Xiaomi write ISO on the nominal third-stop scale, as
+// their files in the survey do; a Pixel writes any integer.
+const ISO_THIRDS = [10, 12, 16, 20, 25, 32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500,
+  640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800];
+const nearestThird = iso => ISO_THIRDS.reduce((a, b) => Math.abs(Math.log(b / iso)) < Math.abs(Math.log(a / iso)) ? b : a);
+
+const evOf = (f, t, iso) => Math.log2(f * f / t) - Math.log2(iso / 100);
+
+/** The files shot within 0.4 of a stop of f-number `f`, or as far as it takes to hold 100. */
+function filesNearAperture(files, f) {
+  for (let stops = 0.4; ; stops += 0.2) {
+    const near = files.filter(x => Math.abs(2 * Math.log2(x.f / f)) <= stops);
+    if (near.length >= 100) return near;
   }
-  const want = required(iso);
-  let shutter = cam.shutters[0];
-  let bestErr = Infinity;
-  for (const s of cam.shutters) {
-    const err = Math.abs(Math.log2(seconds(s)) - Math.log2(want));
-    if (err < bestErr) { bestErr = err; shutter = s; }
-  }
-  return { shutter, iso };
 }
 
-function cameraEvRange(cam, aperture) {
-  const secs = cam.shutters.map(s => s[0] / s[1]);
-  const evAt = (t, iso) => Math.log2(aperture * aperture / t) - Math.log2(iso / 100);
-  return [evAt(Math.max(...secs), Math.max(...cam.isos)), evAt(Math.min(...secs), Math.min(...cam.isos))];
+/**
+ * The exposure of a photo of a scene of brightness `ev`: a real file's
+ * exposure that gives that EV within half a stop, widened a half stop at a
+ * time when none does. A phone takes the time and ISO of a file shot through
+ * a lens of about its lens's f-number, since a phone exposes its telephoto
+ * and ultra-wide differently from its main camera; a body takes the file's
+ * f-number, time and ISO, among those its lens opens to and its shutter and
+ * ISO range allow.
+ */
+function drawExposure(cam, lens, apertureAtFocal, ev) {
+  const phone = cam.type === 'phone';
+  const files = phone ? (cam.writer === 'apple' ? EXPOSURES.apple : EXPOSURES.android) : EXPOSURES.body;
+  const usable = phone ? filesNearAperture(files, lens.f) : files.filter(x =>
+    x.f >= apertureAtFocal - 0.05 && x.t >= 1 / cam.fastest && x.iso >= cam.isoRange[0] && x.iso <= cam.isoRange[1] &&
+    (!cam.fixedLens || x.f <= Math.max(...cam.apertures)));
+  const fOf = x => phone ? lens.f : x.f;
+  for (let tol = 0.5; tol <= 30; tol += 0.5) {
+    const near = usable.filter(x => Math.abs(evOf(fOf(x), x.t, x.iso) - ev) <= tol);
+    if (!near.length) continue;
+    let r = rnd() * near.reduce((n, x) => n + x.w, 0);
+    const x = near.find(c => (r -= c.w) <= 0) || near[near.length - 1];
+    const iso = phone && cam.writer !== 'apple' && cam.writer !== 'google' ? nearestThird(x.iso) : x.iso;
+    return { aperture: fOf(x), exposureSec: x.t, iso };
+  }
+  throw new Error(`no measured exposure fits ${cam.model}`);
 }
 
 function apexBrightness(aperture, exposureSec, iso) {
@@ -548,7 +567,12 @@ export function generateFake(options = {}) {
   if (!exportAt) exportAt = pickExport(capture, anchor, earliestRelease(editorKind, acrMin));
   const editor = pickEditor(editorKind, exportAt, acrMin);
 
-  const { focalPhys, focalEquiv, aperture, lens } = pickOptics(cam);
+  const { focalPhys, focalEquiv, lens } = pickOptics(cam);
+  const widest = cam.type === 'phone' ? Math.min(...cam.lenses.map(l => l.f)) : Math.min(...cam.apertures);
+  // The widest aperture the lens offers at this focal length; a variable zoom
+  // closes down towards its long end.
+  const apertureAtFocal = !lens || !lens.range || lens.range[1] === lens.range[0] ? (lens ? lens.wide : widest)
+    : lens.wide + (lens.tele - lens.wide) * (focalPhys - lens.range[0]) / (lens.range[1] - lens.range[0]);
 
   const utc          = wallClockToUtc(capture, loc.tz);
   const exportUtc    = wallClockToUtc(exportAt, loc.tz);
@@ -557,11 +581,13 @@ export function generateFake(options = {}) {
 
   const scene = pickScene(sunElevation(loc.lat, loc.lon, utc));
   const flashFired = !!cam.flash && scene.dark && rnd() < (cam.type === 'phone' ? 0.3 : 0.25);
-  const rawEv = scene.evMin + rnd() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
-  const [evLo, evHi] = cameraEvRange(cam, aperture);
-  const ev = clamp(rawEv, evLo, evHi);
-  const { shutter, iso } = solveExposure(cam, aperture, ev, focalEquiv);
-  const exposureSec = shutter[0] / shutter[1];
+  const sceneEv = scene.evMin + rnd() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
+  const { aperture, exposureSec, iso } = drawExposure(cam, lens, apertureAtFocal, sceneEv);
+  const ev = evOf(aperture, exposureSec, iso);
+  // What the export writes: Adobe's rounding of the camera's time, and the
+  // APEX values mirrored from the written ExposureTime and FNumber.
+  const written = adobeExposure(exposureSec);
+  const { fNumber: fnumberRat, apertureValue } = adobeFNumber(aperture);
 
   const flash           = flashFired ? w.flashFired : pick(w.flashOff);
   const meteringMode    = pick(w.metering);
@@ -574,22 +600,13 @@ export function generateFake(options = {}) {
   const colorSpace = rnd() < 0.9 ? 1 : 65535;
   const dpi = editor.dpi;
 
-  const tv = -Math.log2(exposureSec);
-  const av = 2 * Math.log2(aperture);
   const bv = apexBrightness(aperture, exposureSec, iso);
-  const widest = cam.type === 'phone' ? Math.min(...cam.lenses.map(l => l.f)) : Math.min(...cam.apertures);
   const latRef = loc.lat >= 0 ? 'N' : 'S';
   const lonRef = loc.lon >= 0 ? 'E' : 'W';
 
-  // Lens figures: FNumber in the exporter's decimal form; FocalLength as the
-  // firmware writes it, the phone's measured per-lens rational or the body's
-  // own denominator, unreduced.
-  const fnumberRat = adobeFNumber(aperture);
+  // FocalLength as the firmware writes it, the phone's measured per-lens
+  // rational or the body's own denominator, unreduced.
   const focalRat = w.focal === 'lens' ? lens.focalRat : [Math.round(focalPhys * w.focal), w.focal];
-  // The widest aperture the lens offers at this focal length; a variable zoom
-  // closes down towards its long end.
-  const apertureAtFocal = !lens || !lens.range || lens.range[1] === lens.range[0] ? (lens ? lens.wide : widest)
-    : lens.wide + (lens.tele - lens.wide) * (focalPhys - lens.range[0]) / (lens.range[1] - lens.range[0]);
 
   // Lens specification and names.
   let lensSpec = null, lensModel = null, lensMake = null, auxLens = null, adobeLens = null;
@@ -623,7 +640,7 @@ export function generateFake(options = {}) {
     LensMake: lensMake, LensModel: lensModel,
     DateTimeOriginal: capture, DateTime: exportAt, SubSecTimeOriginal: subsec,
     OffsetTimeOriginal: cam.offset !== 'none' ? offsetString : null,
-    ExposureTime: exposureSec, FNumber: aperture, ISO: iso,
+    ExposureTime: written.seconds, FNumber: aperture, ISO: iso,
     FocalLength: focalPhys, FocalLengthIn35mmFormat: w.extras.focalEquiv ? focalEquiv : null,
     Flash: flash, MeteringMode: meteringMode,
     ExposureProgram: exposureProgram, ExposureMode: exposureMode,
@@ -650,7 +667,7 @@ export function generateFake(options = {}) {
   p["0th"][I.Software]       = editor.software;
   p["0th"][I.DateTime]       = exportStr;
 
-  p["Exif"][E.ExposureTime]    = shutter;
+  p["Exif"][E.ExposureTime]    = written.exposureTime;
   p["Exif"][E.FNumber]         = fnumberRat;
   p["Exif"][E.ExposureProgram] = exposureProgram;
   p["Exif"][E.ISOSpeedRatings] = iso;
@@ -667,9 +684,9 @@ export function generateFake(options = {}) {
     if (cam.offset === 'all' || cam.offset === 'two') p["Exif"][TAG_OFFSET_TIME] = exportOffset || offsetString;
     if (cam.offset === 'all') p["Exif"][TAG_OFFSET_TIME_DIGITIZED] = offsetString;
   }
-  // ShutterSpeedValue and ApertureValue: Adobe rewrites both as N/1000000.
-  p["Exif"][E.ShutterSpeedValue] = apexMicro(tv);
-  p["Exif"][E.ApertureValue]     = apexMicro(av);
+  // ShutterSpeedValue and ApertureValue: Adobe rewrites both as N/1000000, reduced by tens.
+  p["Exif"][E.ShutterSpeedValue] = written.shutterSpeedValue;
+  p["Exif"][E.ApertureValue]     = apertureValue;
   if (w.brightness === 'cf')       p["Exif"][E.BrightnessValue] = ratFloat32(bv);
   else if (w.brightness === 2560)  p["Exif"][E.BrightnessValue] = [Math.round(bv * 2560), 2560];
   else if (w.brightness)           p["Exif"][E.BrightnessValue] = ratFixed(bv, w.brightness);
