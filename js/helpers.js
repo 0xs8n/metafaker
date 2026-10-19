@@ -150,6 +150,26 @@ export function sunElevation(lat, lon, utc) {
   return el / RAD;
 }
 
+/**
+ * Sunrise and sunset, as minutes after local midnight, on the wall-clock day
+ * of `day` at a place in zone `tz`; null where the sun does not both rise and
+ * set that day.
+ */
+export function sunriseSunset(lat, lon, day, tz) {
+  const noon = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 12);
+  const midnight = wallClockToUtc(noon, tz).getTime() - 12 * 36e5;
+  const above = m => sunElevation(lat, lon, new Date(midnight + m * 60000)) + 0.833;
+  let rise = null, set = null;
+  for (let m = 0, a = above(0); m < 1440; m += 10) {
+    const b = above(m + 10);
+    const at = m + 10 * a / (a - b);
+    if (a < 0 && b >= 0 && rise === null) rise = at;
+    if (a >= 0 && b < 0) set = at;
+    a = b;
+  }
+  return rise !== null && set !== null && set > rise ? { rise, set } : null;
+}
+
 // ── GPS Coordinate Conversion ────────────────────────────────────
 
 export function decToDMS(deg) {

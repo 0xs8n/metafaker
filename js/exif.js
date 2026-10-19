@@ -13,7 +13,7 @@ import { ICONS } from './icons.js';
 import {
   pick, randInt, clamp, cryptoRandInt,
   pickLocation, fmtDate, fmtGpsDate,
-  wallClockToUtc, utcToWallClock, tzOffsetString, sunElevation,
+  wallClockToUtc, utcToWallClock, tzOffsetString, sunElevation, sunriseSunset,
   dmsToDec,
   fromRat, cleanExifStr, escapeHtml,
 } from './helpers.js';
@@ -308,9 +308,27 @@ function pickScene(sunEl) {
   return { name, ...SCENES[name] };
 }
 
-const HOUR_WEIGHTS = [1, 1, 1, 1, 1, 1, 2, 4, 6, 8, 8, 8, 9, 9, 9, 9, 9, 9, 8, 7, 5, 4, 2, 1.5];
-function pickHour() {
-  return Number(weightedPick(Object.fromEntries(HOUR_WEIGHTS.map((w, i) => [i, w]))));
+// When US phone photos are taken (tools/capture_times.js over the Commons
+// phone survey of 2026-10-18: 2,999 US-located files from 212 uploaders, each
+// uploader weighted once; 10.4% after civil dusk). Percent of photos taken in
+// daylight, by twentieths of the time from sunrise to sunset, and of photos
+// taken after sunset, by half hours since it. They follow the sun rather than
+// the clock: a fixed clock-hour mix, even the measured one, puts 16% of photos
+// after dusk and 30% in December, because people shoot earlier on short days.
+const CAPTURE_DAYLIGHT = [0.83, 0.14, 1.13, 3.25, 2.88, 4.2, 3.95, 4.56, 3.52, 3.4, 5.67, 5.86, 3.25, 5.33, 6.61, 5.73, 5.16, 3.89, 7.26, 5.4];
+const CAPTURE_AFTER_SUNSET = [8.09, 1.46, 1.3, 1.52, 1.13, 1.49, 0.09, 0.15, 0, 0.66, 0.76, 0.24, 0.47, 0.47, 0.06, 0.09];
+const CAPTURE_SLOTS = [...CAPTURE_DAYLIGHT.map((w, i) => ['day', i, w]), ...CAPTURE_AFTER_SUNSET.map((w, i) => ['dark', i, w])];
+
+/** `day` with its time of day set to a drawn capture time at `loc`; past midnight it moves to the next day. */
+function setCaptureTime(day, loc) {
+  let r = rnd() * CAPTURE_SLOTS.reduce((n, s) => n + s[2], 0);
+  const [kind, i] = CAPTURE_SLOTS.find(s => (r -= s[2]) <= 0) || CAPTURE_SLOTS[0];
+  const sun = sunriseSunset(loc.lat, loc.lon, day, loc.tz) || { rise: 360, set: 1080 };
+  const minute = kind === 'day' ? sun.rise + (i + rnd()) / CAPTURE_DAYLIGHT.length * (sun.set - sun.rise)
+    : sun.set + (i + rnd()) * 30;
+  const s = Math.floor(minute * 60);
+  day.setHours(Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60, 0);
+  return day;
 }
 
 const HOUR = 36e5, DAY = 864e5;
@@ -419,24 +437,23 @@ function pickExportHour() {
 const pickAnchor = () => Date.now() - randInt(1, 90) * DAY - Math.floor(rnd() * DAY);
 
 /**
- * Export and capture times for a generated photo. The export comes first: a
- * day in the two years before the anchor, at a measured hour of the day. The
- * capture is then the export minus a measured delay, at a measured hour of
- * its own when the delay is a day or more. Drawn this way round, both the
- * export hours and the delays match the real exports; drawing the capture
- * first and rejecting exports past the anchor cut off the long delays.
+ * Capture and export times for a generated photo taken at `loc`. The delay
+ * comes first, then a capture day early enough for the export to land before
+ * the anchor, at a measured time of day for that place and date; the export
+ * is the capture plus the delay, at a measured export hour when the delay is
+ * a day or more. Real exports made within a day of capture are still of
+ * daytime photos (4.5% of phone and 12% of body captures between 20:00 and
+ * 06:00) while their exports run late, so a capture drawn back from an
+ * export hour put a third of those captures after dusk.
  */
-function pickTimes(anchor) {
+function pickTimes(anchor, loc) {
   const MIN = 30 * 60000;
-  const exportAt = new Date(anchor - rnd() * 700 * DAY);
-  exportAt.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
-  if (exportAt.getTime() > anchor) exportAt.setDate(exportAt.getDate() - 1);
   const lag = drawExportLagMs();
-  let capture = new Date(exportAt.getTime() - lag);
-  // A delay of a day or more lands on an earlier calendar day, so re-drawing
-  // the hour keeps the capture before the export.
-  if (lag >= DAY) capture.setHours(pickHour(), randInt(0, 59), randInt(0, 59), 0);
-  if (exportAt.getTime() - capture.getTime() < MIN) capture = new Date(exportAt.getTime() - MIN - randInt(0, 3600) * 1000);
+  const capture = setCaptureTime(new Date(anchor - lag - rnd() * 700 * DAY), loc);
+  let exportAt = new Date(capture.getTime() + lag);
+  if (lag >= DAY) exportAt.setHours(pickExportHour(), randInt(0, 59), randInt(0, 59), 0);
+  if (exportAt.getTime() - capture.getTime() < MIN) exportAt = new Date(capture.getTime() + MIN + randInt(0, 3600) * 1000);
+  while (exportAt.getTime() > anchor) { capture.setDate(capture.getDate() - 1); exportAt.setDate(exportAt.getDate() - 1); }
   return { capture, exportAt };
 }
 
@@ -530,6 +547,24 @@ function alignAsciiValues(p, px) {
 // ── Serial-number generators (shape matches the measured samples) ──
 
 const digits = n => Array.from({ length: n }, () => '0123456789'[Math.floor(rnd() * 10)]).join('');
+// An iPhone writes DigitalZoomRatio only when the photo was zoomed: 32.7% of
+// US-located iPhone photos on Commons (1,888 files, 194 uploaders, each
+// weighted once; read 2026-10-19). Its value is the frame's short side over the
+// cropped one, reduced (3024/1511; 387 of 462 values), and the 35 mm equivalent
+// is the lens's times it (254 of 290 within 1 mm). Ratio quantiles, uploader-
+// weighted over the 462 zoomed files from 95 uploaders.
+const APPLE_ZOOM_SHARE = 0.327;
+const APPLE_ZOOM = [[0, 1.0003], [0.05, 1.003], [0.1, 1.02], [0.2, 1.03], [0.3, 1.145], [0.4, 1.317], [0.5, 1.538],
+  [0.6, 1.728], [0.7, 1.843], [0.8, 2.541], [0.9, 3.39], [0.95, 4.16], [1, 5.232]];
+function drawAppleZoom(frameShort) {
+  const u = rnd();
+  let i = 1;
+  while (i < APPLE_ZOOM.length - 1 && APPLE_ZOOM[i][0] < u) i++;
+  const [q0, z0] = APPLE_ZOOM[i - 1], [q1, z1] = APPLE_ZOOM[i];
+  const ratio = z0 + (u - q0) / (q1 - q0) * (z1 - z0);
+  return reduce(frameShort, Math.min(frameShort - 1, Math.round(frameShort / ratio)));
+}
+
 function serialFor(writer) {
   if (writer.serial === 12) return digits(12);        // Canon
   if (writer.serial === 7)  return digits(7);         // Nikon
@@ -583,13 +618,13 @@ export function generateFake(options = {}) {
   }
   // A long measured delay can put the capture before every camera here; draw
   // again until at least one existed.
+  if (!loc) loc = pickLocation();
   for (let tries = 0; !pool.length && tries < 50; tries++) {
-    ({ capture, exportAt } = pickTimes(anchor));
+    ({ capture, exportAt } = pickTimes(anchor, loc));
     pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, exportAt));
   }
   const cam = pick(pool);
   const w   = WRITERS[cam.writer];
-  if (!loc) loc = pickLocation();
   const isBody = w.kind === 'body';
   const acrMin = isBody ? cam.acrMin || null : null;
   // Only an editor that had a release able to open the body's raws by then.
@@ -601,7 +636,9 @@ export function generateFake(options = {}) {
   if (!exportAt) exportAt = pickExport(capture, latest, earliestRelease(editorKind, acrMin));
   const editor = pickEditor(editorKind, exportAt, acrMin);
 
-  const { focalPhys, focalEquiv, lens } = pickOptics(cam);
+  const { focalPhys, focalEquiv: lensEquiv, lens } = pickOptics(cam);
+  const zoom = w.extras.digitalZoom === 'zoom' && rnd() < APPLE_ZOOM_SHARE ? drawAppleZoom(cam.modes[0][1]) : null;
+  const focalEquiv = zoom ? Math.round(lensEquiv * zoom[0] / zoom[1]) : lensEquiv;
   const widest = cam.type === 'phone' ? Math.min(...cam.lenses.map(l => l.f)) : Math.min(...cam.apertures);
   // The widest aperture the lens offers at this focal length; a variable zoom
   // closes down towards its long end.
@@ -771,7 +808,7 @@ export function generateFake(options = {}) {
   p["Exif"][E.WhiteBalance] = whiteBalance;
   if (Array.isArray(w.extras.digitalZoom)) p["Exif"][E.DigitalZoomRatio] = w.extras.digitalZoom;
   else if (w.extras.digitalZoom === 'always') p["Exif"][E.DigitalZoomRatio] = [1, 1];
-  else if (w.extras.digitalZoom === 'zoom' && rnd() < 0.25) p["Exif"][E.DigitalZoomRatio] = ratFloat32(1 + rnd());
+  else if (zoom) p["Exif"][E.DigitalZoomRatio] = zoom;
   if (w.extras.focalEquiv) p["Exif"][E.FocalLengthIn35mmFilm] = focalEquiv;
   p["Exif"][E.SceneCaptureType] = sceneCapture;
   if (w.extras.gainControl) p["Exif"][E.GainControl] = iso < 400 ? 0 : iso < 1600 ? 1 : 2;
