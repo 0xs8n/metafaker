@@ -597,7 +597,9 @@ export function generateFake(options = {}) {
   const sceneCapture    = scene.name === 'night' ? 3 : 0;
   const biasStops       = cam.type === 'phone' ? 0 : pick([0, 0, 0, 1 / 3, -1 / 3, 2 / 3, -2 / 3, 1, -1]);
   const subsec = cam.subsec ? String(cryptoRandInt(0, Math.pow(10, cam.subsec) - 1)).padStart(cam.subsec, '0') : null;
-  const colorSpace = rnd() < 0.9 ? 1 : 65535;
+  // The ICC profile embedded below is always the sRGB one, so ColorSpace must
+  // say so too: real exports never pair Uncalibrated with an sRGB profile.
+  const colorSpace = 1;
   const dpi = editor.dpi;
 
   const bv = apexBrightness(aperture, exposureSec, iso);

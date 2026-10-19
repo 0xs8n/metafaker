@@ -366,6 +366,19 @@
       accent-color: var(--accent);
       cursor: pointer;
     }
+    .option-warning {
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: var(--warning);
+      background: rgba(245,158,11,0.08);
+      border: 1px solid rgba(245,158,11,0.25);
+      border-radius: 6px;
+      padding: 6px 8px;
+      margin: -2px 0 8px;
+    }
+    [data-theme="dark"] .option-warning {
+      background: rgba(245,158,11,0.12);
+    }
 
     /* --- Buttons --- */
     .btn {

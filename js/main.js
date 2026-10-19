@@ -73,3 +73,13 @@ if (strip) {
     if (item?.dataset.id) App.select(item.dataset.id);
   });
 }
+
+// "Keep original date" links the output to the source photo, which a
+// title="" tooltip never shows on a touch device — show it inline instead.
+const chkKeepDate = document.getElementById('chkKeepDate');
+const keepDateWarning = document.getElementById('keepDateWarning');
+if (chkKeepDate && keepDateWarning) {
+  const sync = () => { keepDateWarning.hidden = !chkKeepDate.checked; };
+  chkKeepDate.addEventListener('change', sync);
+  sync();
+}
