@@ -134,10 +134,14 @@ extensionless JPEG with no MIME type. Outputs go to `tools/out/`
   `ExposureTime` is one the rule produces, `ShutterSpeedValue` and
   `ApertureValue` are mirrored from the written `ExposureTime` and `FNumber`,
   no EV above 11 with the sun below -6°, phones sit at exactly 1/60 s in under
-  20% and at the 50 Hz times 1/50 and 1/100 s in under 3%, and each
+  20% and at the 50 Hz times 1/50 and 1/100 s in under 4%, and each
   identity's time and ISO, ranked among the real files of its table at the
-  same EV and f-number, puts 25%, 50% and 75% of the batch below the real
-  quartiles within four standard errors plus 4 points.
+  same EV (within half a stop) and f-number, written as an export of them
+  writes them and, for a body, within its shutter and ISO range, puts 25%,
+  50% and 75% of the batch below the real quartiles within four standard
+  errors plus 4 points. `node tools/check.js --exposure-runs 100` runs only
+  these checks, on 100 batches, and reports how many fail, the pooled shares,
+  and how many of 20,000 batches resampled from the pooled identities fail.
 - **gps** — 3,000 locations drawn from the shipped generator all lie on US
   land, tested against `tools/us-land.json`.
 - **exiftool** (when found on PATH or at the known Windows install path;
