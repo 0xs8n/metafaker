@@ -91,10 +91,11 @@
 
       <div class="action-card">
         <div class="action-card-title">Actions</div>
-        <label class="option-row" title="Keeps the original calendar day in the generated metadata. Use only when the day is not sensitive: it links the output to the original.">
+        <label class="option-row">
           <input type="checkbox" id="chkKeepDate">
           <span>Keep original date</span>
         </label>
+        <p class="option-warning" id="keepDateWarning" hidden>This links the output to the original photo, and to every other output kept from the same day.</p>
         <button class="btn btn-primary" id="btnRandom">Randomize Current</button>
         <button class="btn btn-secondary" id="btnRandomAll">Randomize Entire Batch</button>
         <button class="btn btn-danger" id="btnClear">Strip Current Metadata</button>

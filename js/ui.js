@@ -652,6 +652,20 @@ export const App = {
     if (dropped) {
       showToast(`${dropped} image${dropped === 1 ? ' has' : 's have'} an original date older than every camera the tool can name, so new dates were generated for ${dropped === 1 ? 'it' : 'them'}.`, 'warning');
     }
+    // "Keep original date" was ticked: images from the same day keep that
+    // day, which links them to each other, not only to their originals.
+    if (document.getElementById('chkKeepDate')?.checked) {
+      const byDay = new Map();
+      for (const item of S.items) {
+        if (!(item.fakeDate instanceof Date) || isNaN(item.fakeDate)) continue;
+        const day = item.fakeDate.toDateString();
+        byDay.set(day, (byDay.get(day) || 0) + 1);
+      }
+      const shared = [...byDay.values()].filter(n => n > 1).reduce((sum, n) => sum + n, 0);
+      if (shared) {
+        showToast(`${shared} output${shared === 1 ? '' : 's'} share a calendar day with another output in this batch, which links them to each other.`, 'warning');
+      }
+    }
     if (failed.length) {
       showToast(`Could not process ${failed.length} file${failed.length === 1 ? '' : 's'}: ${failed.slice(0, 3).join('; ')}${failed.length > 3 ? '; …' : ''}`, 'error');
     }
