@@ -13,7 +13,7 @@ import { dumpExifSafe } from './exif-writer.js';
 import { buildXmpPacket, xmpSegment, buildPhotoshopApp13 } from './provenance.js';
 import {
   generateFake, generateGraphic, readBackExifStrict,
-  parseFileExif, renderMeta,
+  parseFileExif, readUserComment, renderMeta,
 } from './exif.js';
 import { classifyInput, sniffFormat, measureContent } from './classify.js';
 import { ICONS } from './icons.js';
@@ -335,7 +335,7 @@ async function hydrateItem(file, format) {
   const info = await readImageInfo(file);
   // SVG has no bitmap decode here, but an <img> shows it at any size.
   item.previewUrl = URL.createObjectURL(info.preview || file);
-  item.inputClass = classifyInput({ format, exif: item.origExif, content: info.content });
+  item.inputClass = classifyInput({ format, exif: item.origExif, userComment: await readUserComment(file), content: info.content });
   item.processing = false;
   return item;
 }

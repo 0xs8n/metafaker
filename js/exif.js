@@ -34,6 +34,27 @@ export async function parseFileExif(file) {
   }
 }
 
+/**
+ * The EXIF or XMP UserComment, read on its own: parseFileExif's options skip
+ * both, and iOS and macOS write "Screenshot" there on their screenshots.
+ */
+export async function readUserComment(file) {
+  try {
+    const r = await exifr.parse(file, { ifd0: false, exif: true, xmp: true, userComment: true });
+    const v = r?.userComment ?? r?.UserComment;
+    if (v instanceof Uint8Array) {
+      const unicode = String.fromCharCode(...v.subarray(0, 7)) === 'UNICODE';
+      const body = v.subarray(8);
+      const text = unicode ? new TextDecoder(body[0] === 0 ? 'utf-16be' : 'utf-16le').decode(body) : new TextDecoder().decode(body);
+      return text.replace(/\0/g, '').trim();
+    }
+    // Some writers store it as text, its 8-byte character-code prefix included.
+    return String(v?.value ?? v ?? '').replace(/^(ASCII|UNICODE|JIS)\0*/, '').replace(/\0/g, '').trim();
+  } catch {
+    return '';
+  }
+}
+
 export function piexifToDisplay(pxData) {
   const px = window.piexif;
   const z = pxData?.["0th"]  || {};
