@@ -615,10 +615,10 @@ async function processInBrowser(page, origin, names) {
     }));
   }, origin, names, BATCH_SIZE);
 
-  // Independence: every image in a batch draws its own identity. With 36
-  // cameras and 58 cities, three independent draws all landing on the same
-  // camera and the same city happens about once in two million runs, so a
-  // shared camera+city across the whole batch means a shared identity.
+  // Independence: every image in a batch draws its own identity. With dozens
+  // of cameras and thousands of places, three independent draws all landing
+  // on the same camera and the same place almost never happens, so a shared
+  // camera+place across the whole batch means a shared identity.
   const b = summary.filter(it => it.batch && it.mode === 'randomized');
   assert('(batch)', 'batch: every image randomized', b.length === BATCH_SIZE, `${b.length}/${BATCH_SIZE}`);
   if (b.length > 1) {

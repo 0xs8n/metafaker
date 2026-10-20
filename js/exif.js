@@ -906,8 +906,8 @@ export function generateFake(options = {}) {
   if (lensSerial) p["Exif"][TAG_LENS_SERIAL] = lensSerial;
 
   // GPS, in the exporter's coordinate encoding. The exporter normalises
-  // GPSVersionID: Camera Raw writes 2.3.0.0 (7 of 7 real exports), Lightroom
-  // 2.2.0.0 (3 of 3) and Lightroom Classic 2.2.0.0 (14 of 16).
+  // GPSVersionID: Camera Raw writes 2.3.0.0, Lightroom and Lightroom Classic
+  // 2.2.0.0 (the README gives the measured counts).
   p["GPS"][G.GPSVersionID] = editorKind === 'acr' ? [2, 3, 0, 0] : [2, 2, 0, 0];
   p["GPS"][G.GPSLatitudeRef]  = latRef;
   p["GPS"][G.GPSLatitude]     = adobeGps(Math.abs(loc.lat));

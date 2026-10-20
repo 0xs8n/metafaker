@@ -54,8 +54,9 @@ comments, docs and UI text. Technical terms that describe what is measured
     node tools/check.js                  # end-to-end harness (headless Chrome; exiftool if installed)
     node tools/build.js                  # rebuild dist/metafaker.html; run after any source change
     node tools/stress.js <in> <out>      # edge-case inputs through both paths
+    node tools/classify-eval.js <corpus> # measure js/classify.js on labelled photos and screenshots
     node tools/build-places.js           # regenerate js/places.js and tools/us-land.json (downloads public data)
 
-Node 22+, no npm dependencies. The tools drive headless Chrome over the DevTools
+Node 22+, no npm dependencies. The browser tools drive headless Chrome over the DevTools
 protocol through `tools/lib/cdp.js`. `dist/metafaker.html` is generated: edit the
 sources and rebuild, never edit it by hand.

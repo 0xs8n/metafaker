@@ -1,11 +1,15 @@
 # Measurement tools
 
-Pixel-domain checks for comparing MetaFaker's output against real camera files.
-Metadata is only half of what can identify a photo; the pixels are the other
-half. These check that the pixels carry no trace that would link an output back
-to its original or set it apart from an ordinary photo.
+The harness, the build, the table generators, and the measurements behind the
+README's figures.
 
-Requires `numpy`, `scipy`, `pillow`. Run them against your own JPEGs — no sample
+The first three scripts are pixel-domain checks for comparing MetaFaker's output
+against real camera files. Metadata is only half of what can identify a photo;
+the pixels are the other half. These check that the pixels carry no trace that
+would link an output back to its original or set it apart from an ordinary
+photo.
+
+They require `numpy`, `scipy`, `pillow`. Run them against your own JPEGs — no sample
 images are committed here, because the useful ones are other people's
 photographs.
 
@@ -51,11 +55,15 @@ quantization tables; against any other reference the tables alone shift the
 chroma figure. Measured 2026-10-18 on 44 Commons files: the phone outputs'
 chroma excess fell from +0.24 to +0.05 and the RGB-correlation gap from -0.26
 to -0.02 once the noise was rebuilt as a smoothed luminance field plus a weaker
-chroma field.
+chroma field. Outputs were then at most 3,200 px on the long edge; the
+measurement has not been rerun since they are drawn at real export sizes.
 
 ## Reference measurements
 
-Taken 2026-09-25 against unmodified originals from Wikimedia Commons.
+Taken 2026-09-25 against unmodified originals from Wikimedia Commons. The
+"our output" row predates the current pipeline (the warp and denoise, the
+rebuilt noise, the re-quantiser's tie rounding and the output sizes) and has not
+been re-measured.
 
 | file | resample | blockiness | ghost | CFA |
 |---|---|---|---|---|
@@ -76,8 +84,10 @@ PRNU is covered separately by `prnu.py` below.
 
 ## Browser harness and offline build
 
-Two Node scripts (Node 22+, no npm packages) that drive the real app in
-headless Chrome over the DevTools protocol. Chrome is found automatically in
+Node scripts (Node 22+, no npm packages). All but `build-places.js` and
+`capture_times.js` drive the real app in headless Chrome over the DevTools
+protocol. `exposure_tables.py`, documented here beside the tools that use its
+output, is Python and needs only the standard library. Chrome is found automatically in
 its usual install locations, or set `CHROME=/path/to/chrome`. The launch and
 protocol plumbing is shared in `tools/lib/cdp.js`.
 
@@ -90,13 +100,15 @@ images carrying sensor-like noise), puts the first three through Randomize
 Entire Batch and the rest through Randomize one by one, and strips one extra
 copy of the first image. It then randomizes a set of non-photo cases (a PNG
 screenshot, the same screenshot as JPEG, a PNG renamed `.jpg`, an SVG, a
-transparent WebP, and the tool's own screenshot output loaded again) and an
-extensionless JPEG with no MIME type. Outputs go to `tools/out/`
-(git-ignored). Then it asserts:
+transparent WebP, the tool's own screenshot output loaded again, and a photo
+JPEG labelled "Screenshot" in its `UserComment`), a photo on a clipped black
+background, and an extensionless JPEG with no MIME type. Outputs go to
+`tools/out/` (git-ignored). Then it asserts:
 
 - **privacy** — every network request the page made went to `127.0.0.1`,
   `blob:` or `data:`; no uncaught exceptions, `console.error` calls or
-  error-level log entries (CSP violations, failed loads).
+  error-level log entries (CSP violations, failed loads); every preview the
+  page shows is at most 1600 px on the long edge.
 - **bytes** (own JPEG segment walker) — no APP0, one DQT carrying two tables,
   APP14 Adobe, baseline SOF0 with three 1x1 components (4:4:4), DHT and SOS.
   Randomized files carry three SOI markers before SOS (the image plus the IFD1
@@ -111,7 +123,8 @@ extensionless JPEG with no MIME type. Outputs go to `tools/out/`
   carries no camera Make or Model, no lens and no GPS (any `Software` it names
   is Adobe); no camera photo is taken for a screenshot; the extensionless JPEG
   is accepted and randomized as a photo.
-- **filename** — the input's filename appears nowhere in any output's bytes.
+- **filename** — the input's filename appears nowhere in any output's bytes,
+  and no download name carries a date within a day of the run.
 - **exposure** — the port of Adobe's exposure rounding writes the DNG SDK's
   worked cases (a camera's 1/1215 s as 1/1200, 2101/1000000 as 1/480) and
   can produce every `ExposureTime` of the real exports in
@@ -120,8 +133,14 @@ extensionless JPEG with no MIME type. Outputs go to `tools/out/`
   `ExposureTime` is one the rule produces, `ShutterSpeedValue` and
   `ApertureValue` are mirrored from the written `ExposureTime` and `FNumber`,
   no EV above 11 with the sun below -6°, phones sit at exactly 1/60 s in under
-  20% and at the 50 Hz times 1/50 and 1/100 s in under 4%, and each
-  identity's time and ISO, ranked among the real files of its table at the
+  20% and at the 50 Hz times 1/50 and 1/100 s in under 4%, no real file
+  carries more than a fifth of the draws at any EV for any camera and lens,
+  and, each within four standard errors of the real share, phones fall after
+  civil dusk as often as US phone photos (10.4%), bodies between 09:00 and
+  18:00 sit at EV 13 or brighter as often as body exports (19.3%), and iPhones
+  with and without a telephoto use their main camera as often as real ones
+  (69.3% and 90.5%). A zoomed iPhone's 35 mm equivalent must follow its
+  `DigitalZoomRatio`. Each identity's time and ISO, ranked among the real files of its table at the
   same EV (within half a stop) and f-number, written as an export of them
   writes them and, for a body, within its shutter and ISO range, puts 25%,
   50% and 75% of the batch below the real quartiles within four standard
@@ -130,14 +149,40 @@ extensionless JPEG with no MIME type. Outputs go to `tools/out/`
   and how many of 20,000 batches resampled from the pooled identities fail.
 - **gps** — 3,000 locations drawn from the shipped generator all lie on US
   land, tested against `tools/us-land.json`.
-- **exiftool** (when found on PATH or at the known Windows install path;
-  otherwise SKIPPED) — `-validate` reports only the warnings a real Adobe
-  export produces and no others; Make/Model present; Software is Adobe Camera
-  Raw or Lightroom; ModifyDate >= DateTimeOriginal; the XMP CreateDate matches
+- **size** — 200 output sizes drawn at each listed camera's own frame are all
+  downscaled by at least 8%, none above 16 MP, the aspect ratio kept, and the
+  share longer than 3,200 px within 0.15 of real exports' (0.68 for phones,
+  0.69 for bodies).
+- **packets** — 400 generated XMP packets, built in the page: phone editors
+  85% Lightroom Classic and 15% Lightroom, body editors 61%, 28% and 10%
+  Camera Raw; every body carries Adobe Standard, its own measured profile
+  digest and the Adobe Color look, and names a release new enough to open its
+  raws; `ColorVariance` exactly from `crs:Version` 17.5 and
+  `CropConstrainToUnitSquare` exactly from 17.3; lens-profile correction only
+  with the profile measured for that lens, and on in some exports;
+  `DerivedFrom` the source ID twice with no instance ID; the AutoToneDigest
+  pair at the measured share, never repeated; `PreservedFileName` and the pick
+  flag exactly on Lightroom Classic, the `edited` event exactly on Lightroom
+  for Windows, the look's Copyright line exactly where the editor writes it;
+  iPhone sources named `IMG_nnnn` with `.HEIC`, `.JPG`, `.jpeg` or `.JPEG`,
+  HEIC at about 40% and recorded as converted.
+- **keep date** — with `Keep original date and time`, 150 identities each from
+  an old and a recent kept date keep the exact Date Taken, export after the
+  capture with a drawn delay, never later than now in the place's zone, on a
+  camera released by then; a future date and one older than every camera are
+  replaced and reported. One of the run's own outputs, loaded again with the
+  box ticked, keeps its Date Taken through the page.
+- **exiftool** (when found on PATH or at a usual install location, including
+  the per-user one under `LOCALAPPDATA`; otherwise SKIPPED) — `-validate`
+  reports only the warnings a real Adobe export produces and no others, and all
+  four of its missing-tag warnings; Make/Model present; Software is Adobe
+  Camera Raw, Lightroom or Lightroom Classic; ModifyDate >= DateTimeOriginal; the XMP CreateDate matches
   DateTimeOriginal; the GPS position on US land, tested against
   `tools/us-land.json`; the exposure triangle agrees with the APEX tags within
   0.75 EV; an IFD1 thumbnail present; no JFIF or Google ICC tags;
-  ExifImageWidth/Height absent, as Adobe drops them; and the sun is not below
+  ExifImageWidth/Height absent, as Adobe drops them; ColorSpace sRGB whenever
+  the ICC profile is; the XMP crop rectangle and angle, applied to the input,
+  give the output's shape; and the sun is not below
   -6° at the GPS position and time when the exposure indicates bright daylight
   (EV > 11). Stripped files must carry no metadata groups and validate clean.
 
@@ -189,7 +234,7 @@ processes cleanly given its own Chrome.
 
 ### `classify-eval.js`
 
-    node tools/classify-eval.js <corpus> [--holdout g1,g2] [--json rows.jsonl] [--misses]
+    node tools/classify-eval.js <corpus> [--holdout g1,g2] [--jobs N] [--json rows.jsonl] [--misses]
 
 Measures `js/classify.js` on a labelled corpus laid out as
 `<corpus>/photo/<group>/*` (real camera photos) and `<corpus>/screen/<group>/*`
@@ -202,7 +247,7 @@ screenshots caught and the number of photos taken for a screenshot, and exits 1
 if any photo copy is. Groups named in `--holdout` are reported apart, so a
 threshold tuned on the other groups is checked on sources it never saw: hold
 out whole categories (a camera, a Commons category), never copies of one image.
-`--json` writes every measurement, for trying a threshold change offline before
+`--jobs N` classifies on N pages at once. `--json` writes every measurement, for trying a threshold change offline before
 running it again. No corpus is committed; the useful files are other people's
 images. The corpus behind the README's figures is described there.
 
@@ -243,7 +288,9 @@ current pipeline was then measured against real phones instead of a synthetic
 fingerprint (VISION dataset: iPhone 6 and Huawei P9, maximum-likelihood
 fingerprints from flat-field shots): processed photos still match their camera
 (22 of 22 iPhone 6 outputs), and the downscale, warp, denoise and noise weaken
-the pattern only about twofold. The README's threat model reports the numbers.
+the pattern only about twofold. Both measurements predate outputs drawn at real
+export sizes (2026-10-19) and have not been rerun. The README's threat model
+reports the numbers.
 
 ### `build-places.js`
 
