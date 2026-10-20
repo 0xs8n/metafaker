@@ -7,6 +7,14 @@
  * and 6.5, Lightroom Classic 13.4 and 14.0.1). Where a secondary phone lens
  * was not among the samples its figures are marked `approx`.
  *
+ * Eight secondary lenses were measured on 2026-10-20 from unedited originals
+ * on Commons (FocalLength, FNumber, ApertureValue, FocalLengthIn35mmFilm and
+ * ImageUniqueID through the API, LensModel from the files' EXIF): the Pixel 8
+ * Pro's ultra-wide (46 files, 14 uploaders) and telephoto (20, 8), the Pixel
+ * 6a's ultra-wide (96, 5), the OnePlus 12's ultra-wide (13, 5) and telephoto
+ * (6, 4), and the Galaxy S24 Ultra's ultra-wide and two telephotos (one
+ * uploader, 4 to 14 files each). Their `approx` marks are gone.
+ *
  * The models released from mid-2024 on (iPhone 16, 16 Pro, 17 Pro, Pixel 9,
  * 9 Pro, Galaxy S25 Ultra, EOS R5 Mark II, Z6III, X-T50) and the R6 Mark II,
  * Z f and A7C II were added on 2026-10-18 from 43 camera originals, five or
@@ -191,10 +199,10 @@ export const CAMERAS = [
   { make:"samsung", model:"Galaxy S24 Ultra", released:"2024-01-31", firmwareDate:"2025-03-01", sw:"S928BXXU4BYCG", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE, modes:[[4000,3000]],
     exifVersion:"0220", offset:'two', subsec:3, flash:true, altitude:false,
     lenses:[
-      { equiv:13,  phys:2.2,  f:2.2, focalRat:[220, 100],  fRat:[220, 100], apex:[227, 100], id:"H12XSQE01PM", approx:true },
+      { equiv:13,  phys:2.2,  f:2.2, focalRat:[220, 100],  fRat:[220, 100], apex:[227, 100], id:"K12XSPE01YM" },
       { equiv:23,  phys:6.3,  f:1.7, focalRat:[630, 100],  fRat:[170, 100], apex:[153, 100], id:"HK0XLQE00SM" },
-      { equiv:67,  phys:7.9,  f:2.4, focalRat:[790, 100],  fRat:[240, 100], apex:[253, 100], id:"H50XSQE00SM", approx:true },
-      { equiv:111, phys:13.0, f:3.4, focalRat:[1300, 100], fRat:[340, 100], apex:[353, 100], id:"HK0XLQE00VM", approx:true },
+      { equiv:69,  phys:7.9,  f:2.4, focalRat:[790, 100],  fRat:[240, 100], apex:[252, 100], id:"H12XSQE01PM" },
+      { equiv:115, phys:18.6, f:3.4, focalRat:[1860, 100], fRat:[340, 100], apex:[353, 100], id:"H50XSQE00SM" },
     ] },
 
   { make:"samsung", model:"Galaxy S23+", released:"2023-02-17", firmwareDate:"2024-11-01", sw:"S916BXXS7CXK6", type:"phone", writer:"samsung", aspects:ASPECTS_PHONE, modes:[[4000,3000]],
@@ -243,9 +251,9 @@ export const CAMERAS = [
   { make:"Google", model:"Pixel 8 Pro", released:"2023-10-12", sw:"HDR+ 1.0.695519190zm", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4080,3072]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true,
     lenses:[
-      { equiv:13,  phys:1.95, f:1.95, focalRat:[1950, 1000],  fRat:[195, 100], apex:[193, 100], model:"Pixel 8 Pro back camera 1.95mm f/1.95", approx:true },
+      { equiv:12,  phys:2.23, f:1.95, focalRat:[2230, 1000],  fRat:[195, 100], apex:[193, 100], model:"Pixel 8 Pro back camera 2.23mm f/1.95" },
       { equiv:24,  phys:6.9,  f:1.68, focalRat:[6900, 1000],  fRat:[168, 100], apex:[150, 100], model:"Pixel 8 Pro back camera 6.9mm f/1.68" },
-      { equiv:113, phys:12.5, f:2.8,  focalRat:[12500, 1000], fRat:[280, 100], apex:[297, 100], model:"Pixel 8 Pro back camera 12.5mm f/2.8", approx:true },
+      { equiv:110, phys:18,   f:2.8,  focalRat:[18000, 1000], fRat:[280, 100], apex:[297, 100], model:"Pixel 8 Pro back camera 18.0mm f/2.8" },
     ] },
 
   { make:"Google", model:"Pixel 7a", released:"2023-05-11", sw:"HDR+ 1.0.748116481zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4624,3472]],
@@ -258,7 +266,7 @@ export const CAMERAS = [
   { make:"Google", model:"Pixel 6a", released:"2022-07-28", sw:"HDR+ 1.0.641377693zd", type:"phone", writer:"google", aspects:ASPECTS_PHONE, modes:[[4032,3024]],
     exifVersion:"0232", offset:'all', subsec:3, flash:true,
     lenses:[
-      { equiv:13, phys:1.8,  f:2.2,  focalRat:[1800, 1000], fRat:[220, 100], apex:[228, 100], model:"Pixel 6a back camera 1.8mm f/2.2", approx:true },
+      { equiv:16, phys:2.35, f:2.2,  focalRat:[2350, 1000], fRat:[220, 100], apex:[228, 100], model:"Pixel 6a back camera 2.35mm f/2.2" },
       { equiv:27, phys:4.38, f:1.73, focalRat:[4380, 1000], fRat:[173, 100], apex:[158, 100], model:"Pixel 6a back camera 4.38mm f/1.73" },
     ] },
 
@@ -266,9 +274,9 @@ export const CAMERAS = [
   { make:"OnePlus", model:"OnePlus 12", released:"2024-01-23", type:"phone", writer:"oneplus", aspects:ASPECTS_PHONE, modes:[[4096,3072]],
     exifVersion:"0220", offset:'orig', subsec:3, flash:true,
     lenses:[
-      { equiv:14, phys:2.2,  f:2.2, focalRat:[2200, 1000], fRat:[22, 10], apex:[227, 100], model:"OnePlus 12 back camera 2.2mm f/2.2", approx:true },
+      { equiv:14, phys:2.62, f:2.2, focalRat:[2620, 1000], fRat:[22, 10], apex:[227, 100], model:"OnePlus 12 back camera 2.62mm f/2.2" },
       { equiv:23, phys:6.06, f:1.6, focalRat:[6060, 1000], fRat:[16, 10], apex:[135, 100], model:"OnePlus 12 back camera 6.06mm f/1.6" },
-      { equiv:73, phys:8.6,  f:2.6, focalRat:[8600, 1000], fRat:[26, 10], apex:[276, 100], model:"OnePlus 12 back camera 8.6mm f/2.6", approx:true },
+      { equiv:70, phys:13.3, f:2.6, focalRat:[13300, 1000], fRat:[26, 10], apex:[275, 100], model:"OnePlus 12 back camera 13.30mm f/2.6" },
     ] },
 
   // ── Xiaomi: Model is the device code, ExifVersion 0230, ISOSpeed with SensitivityType 3, LightSource 21, no LensModel ──

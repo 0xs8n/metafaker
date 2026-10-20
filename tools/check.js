@@ -755,14 +755,27 @@ async function exposureInBrowser(page, origin, n) {
       });
     }
     const evOf = (f, sec, iso) => Math.log2(f * f / sec) - Math.log2(iso / 100);
+
+    const { CAMERAS } = await import('/js/data.js');
+    let heaviest = { share: 0 };
+    for (const cam of CAMERAS) {
+      for (const lens of cam.type === 'phone' ? cam.lenses : [null]) {
+        for (let ev = 0; ev <= 17; ev += 0.5) {
+          const { weights } = m.exposureCandidates(cam, lens, lens ? lens.f : Math.min(...cam.apertures), ev);
+          const share = Math.max(...weights) / weights.reduce((s, v) => s + v, 0);
+          if (share > heaviest.share) heaviest = { share, model: cam.model, f: lens ? lens.f : null, ev };
+        }
+      }
+    }
     /**
      * Where each generated time and ISO falls among the real files it should
      * come from, as the uploader-weighted share of them below it, [lo, hi]
      * across ties: files of its table, shot within 0.4 stop of its f-number,
      * whose exposure gives its EV within the half stop the draw allows and,
      * for a body, within its shutter and ISO range, each as this camera would
-     * write it. A phone uses a file's time and ISO at its own lens's f-number,
-     * so a file's EV is taken there. Null below 20 files.
+     * write it, weighted as the draw weighs them (no file over a fifth). A
+     * phone uses a file's time and ISO at its own lens's f-number, so a file's
+     * EV is taken there. Null below 20 files.
      */
     const ranks = (g, f, seconds, iso) => {
       const cam = g.cam, phone = cam.type === 'phone';
@@ -771,10 +784,11 @@ async function exposureInBrowser(page, origin, n) {
         (phone || (r.t >= 1 / cam.fastest && r.iso >= cam.isoRange[0] && r.iso <= cam.isoRange[1])) &&
         Math.abs(evOf(phone ? f : r.f, r.t, m.writtenIso(cam, r.iso)) - g.ev) <= 0.5);
       if (ref.length < 20) return { t: null, iso: null };
-      const tot = ref.reduce((s, r) => s + r.w, 0);
+      const w = m.capShares(ref.map(r => r.w));
+      const tot = w.reduce((s, v) => s + v, 0);
       const span = (v, of) => {
-        const below = ref.filter(r => of(r) < v * (1 - 1e-6)).reduce((s, r) => s + r.w, 0);
-        const at = ref.filter(r => Math.abs(of(r) / v - 1) <= 1e-6).reduce((s, r) => s + r.w, 0);
+        const below = ref.reduce((s, r, i) => s + (of(r) < v * (1 - 1e-6) ? w[i] : 0), 0);
+        const at = ref.reduce((s, r, i) => s + (Math.abs(of(r) / v - 1) <= 1e-6 ? w[i] : 0), 0);
         return [below / tot, (below + at) / tot];
       };
       return { t: span(seconds, r => r.written), iso: span(iso, r => m.writtenIso(cam, r.iso)) };
@@ -788,7 +802,7 @@ async function exposureInBrowser(page, origin, n) {
       const et = e[E.ExposureTime], f = g.display.FNumber, iso = e[E.ISOSpeedRatings];
       rows.push({
         phone: g.cam.type === 'phone', apple: g.cam.writer === 'apple', model: g.cam.model,
-        et: `${et[0]}/${et[1]}`, seconds: et[0] / et[1], iso, f, ev: g.ev,
+        et: `${et[0]}/${et[1]}`, seconds: et[0] / et[1], iso, f, ev: g.ev, hour: g.capture.getHours(),
         sun: h.sunElevation(g.loc.lat, g.loc.lon, h.wallClockToUtc(g.capture, g.loc.tz)),
         producible: producible(et[0], et[1]),
         ssvOk: same(x.encodeExposureTime(et[0] / et[1]).shutterSpeedValue, `${e[E.ShutterSpeedValue][0]}/${e[E.ShutterSpeedValue][1]}`),
@@ -809,7 +823,7 @@ async function exposureInBrowser(page, origin, n) {
         })() : {}),
       });
     }
-    return { examples, real, rows };
+    return { examples, real, rows, heaviest };
   }, origin, n);
 }
 
@@ -826,6 +840,13 @@ function exposureChecks(data) {
     assert('(exposure)', `snap: ShutterSpeedValue mirrors ExposureTime as in real ${kind} exports`,
       r.ssvMatch === r.ssvFiles, `${r.ssvMatch}/${r.ssvFiles}`);
   }
+
+  // Every uploader weighs one, so where few uploaders shot an EV a single
+  // file could carry most of the draws there: 89% of the Android weight at
+  // EV 8, one exposure repeated across the outputs at that brightness.
+  const h = data.heaviest;
+  assert('(exposure)', 'draw: no real file carries more than a fifth of the draws at any EV, for any camera and lens',
+    h.share <= 0.2 + 1e-9, `${(100 * h.share).toFixed(1)}% for ${h.model}${h.f ? ` f/${h.f}` : ''} at EV ${h.ev}`);
 
   const rows = data.rows;
   const bad = (k) => rows.filter(r => !r[k]).map(r => `${r.model} ${r.et}`);
@@ -866,6 +887,17 @@ function exposureChecks(data) {
   assert('(exposure)', 'batch: phones after civil dusk at the share real US phone photos are',
     Math.abs(dusk - 0.104) <= duskTol, `${(100 * dusk).toFixed(1)}% of ${phones.length}, allowed ${(100 * (0.104 - duskTol)).toFixed(1)}-${(100 * (0.104 + duskTol)).toFixed(1)}%`);
 
+  // Camera-body exports taken between 09:00 and 18:00 are at EV 13 or
+  // brighter in 19.3% of files (95 uploaders, each weighted once; 3.5 points
+  // standard error by resampling uploaders). The bound is 4 standard errors of
+  // that and of the batch together; the phones' scene model gave bodies 42 to
+  // 45% there.
+  const day = rows.filter(r => !r.phone && r.hour >= 9 && r.hour < 18);
+  const bright = share(day, r => r.ev >= 13);
+  const brightTol = 4 * Math.hypot(0.035, Math.sqrt(0.193 * 0.807 / day.length));
+  assert('(exposure)', 'batch: bodies in the daytime at EV 13 or brighter as often as real body exports',
+    Math.abs(bright - 0.193) <= brightTol, `${(100 * bright).toFixed(1)}% of ${day.length}, allowed ${(100 * (0.193 - brightTol)).toFixed(1)}-${(100 * (0.193 + brightTol)).toFixed(1)}%`);
+
   // Main-camera share of US-located iPhone photos on Commons (FocalLength per
   // model, front cameras left out, each uploader weighted once; standard error
   // by resampling uploaders): 69.3% (4.0) on models with a telephoto, 90.5%
@@ -891,10 +923,11 @@ function exposureChecks(data) {
   // uniform when the draw follows the measured distribution, so the shares
   // below the real quartiles must be 25%, 50% and 75% within sampling error
   // (4 standard errors) plus 4 points for where within the half stop the
-  // drawn file's EV falls, which the reference does not weigh. Over 100
-  // batches the largest pooled offset was 4.1 points, none failed, and 10 of
+  // drawn file's EV falls, which the reference does not weigh, nor the draw's
+  // wider window where one file would carry more than a fifth. Over 30
+  // batches the largest pooled offset was 5.0 points, none failed, and 25 of
   // 20,000 batches resampled from their identities failed any exposure
-  // assertion (`node tools/check.js --exposure-runs 100`). Ranked against the
+  // assertion (`node tools/check.js --exposure-runs 30`). Ranked against the
   // camera's own times instead, before Adobe's rounding (1/233.4 s against a
   // written 1/230), half of all batches failed.
   const groups = { 'Apple phones': rows.filter(r => r.phone && r.apple), 'Android phones': rows.filter(r => r.phone && !r.apple),

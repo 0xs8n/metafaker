@@ -16,7 +16,8 @@ flicker: US photos sit at 1/60 and 1/120 s and almost never at 1/50 or 1/100,
 the other way round from photos taken where mains is 50 Hz. Two tables: Apple,
 and Android (every non-Apple make).
 
-Camera bodies: (f-number, exposure time, ISO) of every Adobe export of a body.
+Camera bodies: (f-number, exposure time, ISO, local hour of capture) of every
+Adobe export of a body.
 
 Rows are grouped by uploader, so the generator can weight every uploader
 equally, as every other measured share in the project is weighted.
@@ -94,11 +95,12 @@ def main(phone_path, body_path, out_path):
         phones[make_family(r)][r['user']].append(r)
     bodies = collections.defaultdict(list)
     for r in rows(body_path):
-        if adobe(r): bodies[r['user']].append(r)
+        if adobe(r) and re.match(r'\d{4}:\d\d:\d\d \d\d', str(r.get('DateTimeOriginal'))): bodies[r['user']].append(r)
 
     inv = lambda r: num(1 / r['t'], 4)
     iso = lambda r: num(r['iso'], 6)
     fno = lambda r: num(r['f'], 3)
+    hour = lambda r: str(int(str(r.get('DateTimeOriginal'))[11:13]))
     count = lambda g: (sum(len(v) for v in g.values()), len(g))
     a, an, b = count(phones['apple']), count(phones['android']), count(bodies)
     js = f"""/**
@@ -116,16 +118,16 @@ def main(phone_path, body_path, out_path):
  * uploaders (Pixel 6a to 8 Pro, Galaxy S21 to S24 Ultra and A54, OnePlus 12;
  * almost all of the US files are Pixels).
  *
- * BODY_ADOBE: "f-number,1/t,ISO" of {b[0]} Adobe exports of camera-body photos
- * from {b[1]} uploaders (14 "Taken with" body categories: Canon, Nikon, Sony,
- * Fujifilm).
+ * BODY_ADOBE: "f-number,1/t,ISO,hour" of {b[0]} Adobe exports of camera-body
+ * photos from {b[1]} uploaders (14 "Taken with" body categories: Canon, Nikon,
+ * Sony, Fujifilm), the hour being DateTimeOriginal's, the camera's clock.
  */
 
 export const PHONE_APPLE = '{encode(phones['apple'], (fno, inv, iso))}';
 
 export const PHONE_ANDROID = '{encode(phones['android'], (fno, inv, iso))}';
 
-export const BODY_ADOBE = '{encode(bodies, (fno, inv, iso))}';
+export const BODY_ADOBE = '{encode(bodies, (fno, inv, iso, hour))}';
 """
     open(out_path, 'w', encoding='utf-8', newline='\n').write(js)
     print(f'apple {a}, android {an}, bodies {b}; {len(js)} bytes -> {out_path}')

@@ -318,7 +318,7 @@ function weightedPick(weights) {
   return entries[0][0];
 }
 
-/** The scene follows the sun's elevation at the claimed place and time. */
+/** A phone's scene follows the sun's elevation at the claimed place and time. */
 function pickScene(sunEl) {
   let w;
   if      (sunEl > 25) w = { daylight: 55, overcast: 25, indoor: 20 };
@@ -363,15 +363,37 @@ function parseExposures(table, fields) {
     const files = group.split(' ');
     return files.map(file => {
       const v = Object.fromEntries(file.split(',').map((x, i) => [fields[i], Number(x)]));
-      return { f: v.f, t: 1 / v.inv, iso: v.iso, w: 1 / files.length };
+      return { f: v.f, t: 1 / v.inv, iso: v.iso, hour: v.hour, w: 1 / files.length };
     });
   });
 }
 const EXPOSURES = {
   apple:   parseExposures(PHONE_APPLE, ['f', 'inv', 'iso']),
   android: parseExposures(PHONE_ANDROID, ['f', 'inv', 'iso']),
-  body:    parseExposures(BODY_ADOBE, ['f', 'inv', 'iso']),
+  body:    parseExposures(BODY_ADOBE, ['f', 'inv', 'iso', 'hour']),
 };
+
+// With every uploader counted once, a file from a single-file uploader weighs
+// as much as all of another uploader's files, and where few uploaders shot a
+// given EV it carries most of the draws there: 89% of the Android weight at
+// EV 8, so most outputs at that brightness repeated one exposure.
+const MAX_FILE_SHARE = 0.2;
+
+/**
+ * Weights `w` with none above MAX_FILE_SHARE of their total, the excess spread
+ * over the others in proportion to their weight. Needs at least
+ * 1 / MAX_FILE_SHARE weights.
+ */
+export function capShares(w) {
+  const sorted = [...w].sort((a, b) => b - a);
+  let rest = sorted.reduce((n, v) => n + v, 0);
+  for (let k = 0; ; k++) {
+    const cap = MAX_FILE_SHARE * rest / (1 - k * MAX_FILE_SHARE);
+    // At k = 4 the cap is the rest itself; the tolerance keeps rounding from passing it.
+    if (sorted[k] <= cap * (1 + 1e-12)) return w.map(v => Math.min(v, cap));
+    rest -= sorted[k];
+  }
+}
 
 // Samsung, OnePlus and Xiaomi write ISO on the nominal third-stop scale, as
 // their files in the survey do; a Pixel writes any integer.
@@ -392,29 +414,69 @@ function filesNearAperture(files, f) {
 }
 
 /**
- * The exposure of a photo of a scene of brightness `ev`: a real file's
- * exposure that gives that EV within half a stop, widened a half stop at a
- * time when none does. A phone takes the time and ISO of a file shot through
- * a lens of about its lens's f-number, since a phone exposes its telephoto
- * and ultra-wide differently from its main camera; a body takes the file's
- * f-number, time and ISO, among those its lens opens to and its shutter and
- * ISO range allow.
+ * The real files the exposure of a photo of a scene of brightness `ev` is
+ * drawn from, with their weights: those whose exposure gives that EV within
+ * half a stop, widened a quarter stop at a time until five do and, up to a
+ * stop, until no file carries more than a fifth of their weight; past that
+ * the weights are capped (capShares). A phone takes the time and
+ * ISO of a file shot through a lens of about its lens's f-number, since a
+ * phone exposes its telephoto and ultra-wide differently from its main camera;
+ * a body takes the file's f-number, time and ISO, among those its lens opens
+ * to and its shutter and ISO range allow.
  */
-function drawExposure(cam, lens, apertureAtFocal, ev) {
+export function exposureCandidates(cam, lens, apertureAtFocal, ev) {
   const phone = cam.type === 'phone';
   const files = phone ? (cam.writer === 'apple' ? EXPOSURES.apple : EXPOSURES.android) : EXPOSURES.body;
   const usable = phone ? filesNearAperture(files, lens.f) : files.filter(x =>
     x.f >= apertureAtFocal - 0.05 && x.t >= 1 / cam.fastest && x.iso >= cam.isoRange[0] && x.iso <= cam.isoRange[1] &&
     (!cam.fixedLens || x.f <= Math.max(...cam.apertures)));
-  const fOf = x => phone ? lens.f : x.f;
-  for (let tol = 0.5; tol <= 30; tol += 0.5) {
-    const near = usable.filter(x => Math.abs(evOf(fOf(x), x.t, x.iso) - ev) <= tol);
-    if (!near.length) continue;
-    let r = rnd() * near.reduce((n, x) => n + x.w, 0);
-    const x = near.find(c => (r -= c.w) <= 0) || near[near.length - 1];
-    return { aperture: fOf(x), exposureSec: x.t, iso: writtenIso(cam, x.iso) };
+  for (let tol = 0.5; tol <= 30; tol += 0.25) {
+    const near = usable.filter(x => Math.abs(evOf(phone ? lens.f : x.f, x.t, x.iso) - ev) <= tol);
+    if (near.length < 1 / MAX_FILE_SHARE) continue;
+    const w = near.map(x => x.w), total = w.reduce((n, v) => n + v, 0);
+    if (tol < 1 && w.some(v => v > MAX_FILE_SHARE * total)) continue;
+    return { files: near, weights: capShares(w) };
   }
   throw new Error(`no measured exposure fits ${cam.model}`);
+}
+
+function pickWeighted(items, weights) {
+  let r = rnd() * weights.reduce((n, v) => n + v, 0);
+  let i = 0;
+  while (i < items.length - 1 && (r -= weights[i]) > 0) i++;
+  return items[i];
+}
+
+// A camera body's scene brightness is that of a real body export taken at
+// the same time of day. The phones' scene model does not fit bodies: between
+// 09:00 and 18:00, 19% of body exports are at EV 13 or brighter, against over
+// 40% of the bodies that model gave, and in each three hours of that day the
+// darkest quarter of them is at EV 7 or below, where the darkest quarter of
+// US phone photos starts at EV 8 to 11 (2,144 exports from 119 uploaders, each
+// weighted once). Bodies go to talks, events and museums. Most of the exports
+// are not located, so they are measured against the clock, not the sun; the
+// night, 21:00 to 06:00, is one band because few uploaders shot in it.
+const HOUR_BANDS = [6, 12, 15, 18, 21];
+const bandOf = h => HOUR_BANDS.filter(b => h >= b).length % HOUR_BANDS.length;
+const BODY_BY_HOUR = HOUR_BANDS.map((_, i) => EXPOSURES.body.filter(x => bandOf(x.hour) === i));
+
+/**
+ * A body's scene at local hour `hour` with the sun at `sunEl`. After dusk
+ * only exports at EV 10 or darker, so that the exposure drawn within a stop
+ * of it is no daylight one.
+ */
+function bodyScene(hour, sunEl) {
+  const files = BODY_BY_HOUR[bandOf(hour)].filter(x => sunEl >= -6 || evOf(x.f, x.t, x.iso) <= 10);
+  const x = pickWeighted(files, capShares(files.map(x => x.w)));
+  const ev = evOf(x.f, x.t, x.iso);
+  const name = sunEl >= -6 && ev >= 13 ? 'daylight' : sunEl >= -6 && ev >= 10 ? 'overcast' : ev >= 6 ? 'indoor' : ev >= 3 ? 'dim' : 'night';
+  return { name, ...SCENES[name], evMin: ev, evMax: ev };
+}
+
+function drawExposure(cam, lens, apertureAtFocal, ev) {
+  const { files, weights } = exposureCandidates(cam, lens, apertureAtFocal, ev);
+  const x = pickWeighted(files, weights);
+  return { aperture: cam.type === 'phone' ? lens.f : x.f, exposureSec: x.t, iso: writtenIso(cam, x.iso) };
 }
 
 function apexBrightness(aperture, exposureSec, iso) {
@@ -671,7 +733,8 @@ export function generateFake(options = {}) {
   const offsetString = tzOffsetString(utc, loc.tz);
   const exportOffset = tzOffsetString(exportUtc, loc.tz);
 
-  const scene = pickScene(sunElevation(loc.lat, loc.lon, utc));
+  const sunEl = sunElevation(loc.lat, loc.lon, utc);
+  const scene = isBody ? bodyScene(capture.getHours(), sunEl) : pickScene(sunEl);
   const flashFired = !!cam.flash && scene.dark && rnd() < (cam.type === 'phone' ? 0.3 : 0.25);
   const sceneEv = scene.evMin + rnd() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
   const { aperture, exposureSec, iso } = drawExposure(cam, lens, apertureAtFocal, sceneEv);
