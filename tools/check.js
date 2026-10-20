@@ -1030,26 +1030,28 @@ async function keepDateInBrowser(page) {
       old: at(now - 2 * 365 * DAY), recent: at(now - 30 * 36e5),
       future: at(now + DAY), ancient: new Date(2001, 5, 1, 12, 0, 0),
     };
+    const row = (g, kept) => ({
+      kept, capture: g.capture.getTime(), exportAt: g.exportAt.getTime(),
+      captureUtc: wallClockToUtc(g.capture, g.loc.tz).getTime(), exportUtc: wallClockToUtc(g.exportAt, g.loc.tz).getTime(),
+      released: g.cam.released, dropped: g.keepDateDropped, how: g.kept,
+    });
     const out = {};
     for (const [k, kept] of Object.entries(fixtures)) {
-      out[k] = Array.from({ length: k === 'old' || k === 'recent' ? n : 20 }, () => {
-        const g = generateFake({ originalDate: kept });
-        return {
-          kept: kept.getTime(), capture: g.capture.getTime(), exportAt: g.exportAt.getTime(),
-          captureUtc: wallClockToUtc(g.capture, g.loc.tz).getTime(), exportUtc: wallClockToUtc(g.exportAt, g.loc.tz).getTime(),
-          released: g.cam.released, dropped: g.keepDateDropped,
-        };
-      });
+      out[k] = Array.from({ length: k === 'old' || k === 'recent' ? n : 20 }, () =>
+        row(generateFake({ keep: { at: kept } }), kept.getTime()));
     }
-    return { now: Date.now(), out };
+    out.today = Array.from({ length: 20 }, () => row(generateFake({ keep: { today: true } }), null));
+    const d = new Date(now), today0 = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const todayReached = wallClockToUtc(today0, 'America/New_York').getTime() <= now - 36e5;
+    return { now: Date.now(), out, today0: today0.getTime(), todayReached };
   }, KEEP_DRAWS);
 }
 
-function keepDateChecks({ now, out }) {
+function keepDateChecks({ now, out, today0, todayReached }) {
   const F = '(keep date)';
   for (const k of ['old', 'recent']) {
     const rows = out[k];
-    const bad = rows.filter(r => r.dropped || r.capture !== r.kept);
+    const bad = rows.filter(r => r.dropped || r.how !== 'exact' || r.capture !== r.kept);
     assert(F, `keep date (${k}): Date Taken is the original date and time exactly`, bad.length === 0, `${bad.length} of ${rows.length} differ`);
     const order = rows.filter(r => !(r.exportAt > r.capture) || r.captureUtc > now || r.exportUtc > now);
     assert(F, `keep date (${k}): exported after capture, neither later than now in the place's zone`, order.length === 0,
@@ -1062,6 +1064,19 @@ function keepDateChecks({ now, out }) {
   for (const [k, why] of [['future', 'future'], ['ancient', 'old']]) {
     const bad = out[k].filter(r => r.dropped !== why || r.capture === r.kept || r.captureUtc > now);
     assert(F, `keep date (${k}): replaced by a drawn date and reported as '${why}'`, bad.length === 0, `${bad.length} of ${out[k].length}`);
+  }
+  const rows = out.today, day = new Date(today0).toDateString();
+  if (todayReached) {
+    const bad = rows.filter(r => r.dropped || r.how !== 'today' || new Date(r.capture).toDateString() !== day);
+    assert(F, 'keep date (no date in file): Date Taken is today', bad.length === 0,
+      bad.slice(0, 2).map(r => `${new Date(r.capture).toISOString()} (${r.how || r.dropped})`).join(' | '));
+    const order = rows.filter(r => r.captureUtc > now || !(r.exportAt > r.capture) || r.exportUtc > now);
+    assert(F, "keep date (no date in file): captured and exported before now in the place's zone", order.length === 0,
+      order.slice(0, 2).map(r => `capture ${new Date(r.capture).toISOString()} export ${new Date(r.exportAt).toISOString()}`).join(' | '));
+    assert(F, 'keep date (no date in file): the time of day is drawn', new Set(rows.map(r => r.capture)).size > 1, 'all equal');
+  } else {
+    const bad = rows.filter(r => r.dropped !== 'future');
+    assert(F, "keep date (no date in file): today not yet an hour old in any US zone, reported as 'future'", bad.length === 0, `${bad.length} of ${rows.length}`);
   }
 }
 
@@ -1105,6 +1120,29 @@ async function keepDateEndToEnd(page) {
     const got = out.DateTimeOriginal, modified = out.ModifyDate;
     const t = d => d instanceof Date ? d.getTime() : NaN;
     return { want: t(want), got: t(got), modified: t(modified), dropped: it.keepDateDropped, error: it.error };
+  });
+}
+
+/** The real UI path for a file with no capture date: a test image, which carries no EXIF. */
+async function keepDateTodayEndToEnd(page) {
+  return page.evaluate(async () => {
+    const { parseFileExif } = await import('/js/exif.js');
+    const { wallClockToUtc } = await import('/js/helpers.js');
+    const blob = await (await fetch('/testimg/landscape_normal.jpg')).blob();
+    App.reset();
+    await App.loadFiles([new File([blob], 'no-date-input.jpg', { type: 'image/jpeg' })]);
+    const it = S.items[S.items.length - 1];
+    App.select(it.id);
+    document.getElementById('chkKeepDate').checked = true;
+    await App.randomize();
+    document.getElementById('chkKeepDate').checked = false;
+    const now = new Date(), today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const got = it.modBlob ? (await parseFileExif(it.modBlob)).DateTimeOriginal : null;
+    return {
+      isPhoto: !!it.inputClass?.isPhoto, error: it.error, dropped: it.keepDateDropped,
+      got: got instanceof Date ? got.toDateString() : String(got), want: today0.toDateString(),
+      reached: wallClockToUtc(today0, 'America/New_York').getTime() <= now.getTime() - 36e5,
+    };
   });
 }
 
@@ -1379,6 +1417,14 @@ async function main() {
         e2e.error || `want ${new Date(e2e.want).toISOString()} got ${new Date(e2e.got).toISOString()} (${e2e.dropped})`);
       assert('(keep date)', "keep date: the UI output's Date Modified is after its Date Taken", e2e.modified > e2e.got,
         `taken ${new Date(e2e.got).toISOString()} modified ${new Date(e2e.modified).toISOString()}`);
+      const td = await keepDateTodayEndToEnd(page);
+      assert('(keep date)', 'keep date: the no-date test image is classified as a photo', td.isPhoto && !td.error, td.error || 'not a photo');
+      if (td.reached) {
+        assert('(keep date)', "keep date: the UI gives a file with no capture date today's Date Taken", !td.dropped && td.got === td.want,
+          `want ${td.want} got ${td.got} (${td.dropped})`);
+      } else {
+        assert('(keep date)', "keep date: the UI reports today as not yet reached in a US zone", td.dropped === 'future', String(td.dropped));
+      }
     } catch (e) {
       assert('(keep date)', 'keep date: checks ran without throwing', false, e.stack || e.message);
     }
