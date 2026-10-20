@@ -27,7 +27,7 @@ const ROOT = path.resolve(__dirname, '..');
 const OUT_DIR = path.join(__dirname, 'out');
 const TESTIMG = path.join(ROOT, 'testimg');
 const EXIFTOOL_FALLBACKS = [
-  'C:\\Users\\USERNAME\\AppData\\Local\\Programs\\ExifTool\\ExifTool.exe',
+  ...(process.env.LOCALAPPDATA ? [path.join(process.env.LOCALAPPDATA, 'Programs', 'ExifTool', 'ExifTool.exe')] : []),
   'C:\\Program Files\\ExifTool\\exiftool.exe',
   'C:\\Windows\\exiftool.exe',
   '/usr/local/bin/exiftool',
