@@ -53,20 +53,6 @@ chroma excess fell from +0.24 to +0.05 and the RGB-correlation gap from -0.26
 to -0.02 once the noise was rebuilt as a smoothed luminance field plus a weaker
 chroma field.
 
-## `pipeline_sim.py`
-
-    python tools/pipeline_sim.py photo.jpg
-
-An offline port of the pixel stages in `js/helpers.js` — crop, rotate, resize,
-colour profile, ISP, lens, noise. It exists because injecting a photo into the
-browser means re-encoding it first, which contaminates the compression history
-the measurements are trying to read. This way a full-resolution original can go
-through the same stages untouched.
-
-It is a port, not the shipped code: the resampling kernel and RNG differ, and
-it predates the non-rigid warp and denoise stages, so treat its output as
-indicative rather than exact.
-
 ## Reference measurements
 
 Taken 2026-09-25 against unmodified originals from Wikimedia Commons.

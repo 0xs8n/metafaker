@@ -16,7 +16,6 @@ export function iccApp2Segment() {
 
 export { rnd, pick, randInt };
 export const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
-export const cryptoRandFloat = rnd;
 export const cryptoRandInt = randInt;
 
 // ── GPS Utilities ────────────────────────────────────────────────
@@ -118,10 +117,6 @@ export function fmtGpsDate(d) {
   return `${d.getUTCFullYear()}:${p(d.getUTCMonth() + 1)}:${p(d.getUTCDate())}`;
 }
 
-export function gpsTimeStamp(d) {
-  return [[d.getUTCHours(), 1], [d.getUTCMinutes(), 1], [d.getUTCSeconds(), 1]];
-}
-
 // ── Sun position ─────────────────────────────────────────────────
 
 /**
@@ -171,15 +166,6 @@ export function sunriseSunset(lat, lon, day, tz) {
 }
 
 // ── GPS Coordinate Conversion ────────────────────────────────────
-
-export function decToDMS(deg) {
-  const a = Math.abs(deg);
-  const d = Math.floor(a);
-  const mf = (a - d) * 60;
-  const m = Math.floor(mf);
-  const s = Math.round((mf - m) * 60 * 1000);
-  return [[d, 1], [m, 1], [s, 1000]];
-}
 
 export function dmsToDec(dms, ref) {
   if (!Array.isArray(dms) || dms.length < 3) return null;

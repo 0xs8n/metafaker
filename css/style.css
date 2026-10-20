@@ -552,12 +552,6 @@
     .no-meta-icon { font-size: 36px; margin-bottom: 10px; opacity: 0.3; }
     .no-meta p { font-size: 14px; }
 
-    .changed-from {
-      font-size: 11px;
-      color: var(--text-muted);
-      text-decoration: line-through;
-      margin-left: 6px;
-    }
 
     /* --- Responsive --- */
     @media (max-width: 800px) {
@@ -610,18 +604,6 @@
     [data-theme="dark"] #toast.toast-error   { background: #451a1a; color: #fca5a5; }
     [data-theme="dark"] #toast.toast-warning { background: #422006; color: #fcd34d; }
 
-    /* --- Spinner --- */
-    .spinner {
-      display: inline-block;
-      width: 14px;
-      height: 14px;
-      border: 2px solid rgba(0,0,0,0.1);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin 0.7s linear infinite;
-    }
-    [data-theme="dark"] .spinner { border-color: rgba(255,255,255,0.15); border-top-color: var(--accent-light); }
-    @keyframes spin { to { transform: rotate(360deg); } }
 
     /* --- Footer --- */
     footer {

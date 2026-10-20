@@ -352,7 +352,7 @@ function setCaptureTime(day, loc) {
   return day;
 }
 
-const HOUR = 36e5, DAY = 864e5;
+const DAY = 864e5;
 
 /**
  * Real exposures (exposure-tables.js), each file weighted so that every
