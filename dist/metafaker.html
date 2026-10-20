@@ -3248,7 +3248,7 @@ SOFTWARE.
           <input type="checkbox" id="chkKeepDate">
           <span>Keep original date and time</span>
         </label>
-        <p class="option-warning" id="keepDateWarning" hidden>The output keeps the original's exact date and time. This links it to the original photo, and to every other output kept from the same day.</p>
+        <p class="option-warning" id="keepDateWarning" hidden>The output keeps the original's exact date and time. This links it to the original photo, and to every other output kept from the same day. A file with no capture date gets today's date instead, which links it to the day you processed it.</p>
         <button class="btn btn-primary" id="btnRandom">Randomize Current</button>
         <button class="btn btn-secondary" id="btnRandomAll">Randomize Entire Batch</button>
         <button class="btn btn-danger" id="btnClear">Strip Current Metadata</button>
@@ -11877,6 +11877,21 @@ function pickExport(capture, latest, earliest) {
   return new Date(lo + rnd() * (hi - lo));
 }
 
+/**
+ * A drawn place where the wall clock `wall` passed at least `margin` ms ago,
+ * and that place's wall clock now as `latest`; null when no place drawn has
+ * reached it yet, as US zones run hours behind much of the world.
+ */
+function placeWhereReached(wall, margin) {
+  for (let i = 0; i < 200; i++) {
+    const loc = pickLocation();
+    if (wallClockToUtc(wall, loc.tz).getTime() <= Date.now() - margin) {
+      return { loc, latest: utcToWallClock(Date.now(), loc.tz).getTime() };
+    }
+  }
+  return null;
+}
+
 /** Whether this camera, and the firmware it reports, existed by `date`. */
 const existedBy = (cam, date) =>
   new Date(`${cam.released}T00:00:00`) <= date &&
@@ -11986,34 +12001,46 @@ function generateFake(options = {}) {
   const px = window.piexif;
   registerTags(px);
   // The capture comes first, so the camera can be one that existed by then.
-  // A kept original date and time is the capture exactly; every other date is
-  // drawn to fit after it. One that cannot be told consistently (older than
-  // every camera here, or later than now) is replaced by a drawn date and the
-  // caller is told why (keepDateDropped).
+  // A kept original date and time is the capture exactly; a file with no
+  // capture date to keep gets today's date. Every other date is drawn to fit
+  // after it. One that cannot be told consistently (older than every camera
+  // here, or later than now) is replaced by a drawn date and the caller is
+  // told why (keepDateDropped).
   const anchor = pickAnchor();
-  const kept = options.originalDate instanceof Date && !isNaN(options.originalDate) ? options.originalDate : null;
-  let capture = null, exportAt = null, pool = [], keepDateDropped = null, latest = anchor, loc = null;
-  if (kept) {
-    if (kept.getTime() >= Date.now()) keepDateDropped = 'future';
-    else if (kept.getTime() < anchor - DAY) capture = new Date(kept.getTime());
-    else {
-      // The anchor keeps the newest date from saying when the tool ran, but a
-      // photo taken after it has to be exported after it, so the bound is now,
-      // read in the place's own zone: the kept wall clock must already have
-      // happened there, or the file would claim a capture in the future.
-      for (let i = 0; i < 200 && !loc; i++) {
-        const l = pickLocation();
-        if (wallClockToUtc(kept, l.tz).getTime() < Date.now() - 60000) loc = l;
+  const keep = options.keep || {};
+  const at = keep.at instanceof Date && !isNaN(keep.at) ? keep.at : null;
+  let capture = null, exportAt = null, pool = [], keepDateDropped = null, kept = null, latest = anchor, loc = null;
+  // The anchor keeps the newest date from saying when the tool ran, but a
+  // photo taken after it has to be exported after it, so the bound is now,
+  // read in the place's own zone: the kept wall clock must already have
+  // happened there, or the file would claim a capture in the future.
+  let reached = null;
+  if (at) {
+    if (at.getTime() >= Date.now()) keepDateDropped = 'future';
+    else if (at.getTime() < anchor - DAY) { capture = new Date(at.getTime()); kept = 'exact'; }
+    else if ((reached = placeWhereReached(at, 60000))) {
+      ({ loc, latest } = reached);
+      capture = new Date(at.getTime());
+      kept = 'exact';
+    } else keepDateDropped = 'future';
+  } else if (keep.today) {
+    const now = new Date();
+    const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // An hour of today leaves room for a capture and a 30-minute export.
+    if ((reached = placeWhereReached(today0, 60 * 60000))) {
+      ({ loc, latest } = reached);
+      const bound = latest - 30 * 60000;
+      for (let i = 0; i < 20 && !capture; i++) {
+        const c = setCaptureTime(new Date(today0), loc);
+        if (c.getTime() <= bound) capture = c;
       }
-      if (loc) {
-        capture = new Date(kept.getTime());
-        latest = utcToWallClock(Date.now(), loc.tz).getTime();
-      } else keepDateDropped = 'future';
-    }
-    if (capture) {
-      pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, new Date(latest)));
-      if (!pool.length) { keepDateDropped = 'old'; capture = null; loc = null; latest = anchor; }
-    }
+      if (!capture) capture = new Date(today0.getTime() + rnd() * (bound - today0.getTime()));
+      kept = 'today';
+    } else keepDateDropped = 'future';
+  }
+  if (capture) {
+    pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, new Date(latest)));
+    if (!pool.length) { keepDateDropped = 'old'; kept = null; capture = null; loc = null; latest = anchor; }
   }
   // A long measured delay can put the capture before every camera here; draw
   // again until at least one existed.
@@ -12258,7 +12285,7 @@ function generateFake(options = {}) {
 
   return {
     display, piexif: p, cam, loc, iso, lens, editor,
-    capture, exportAt, offset: offsetString, exportOffset, subsec, keepDateDropped,
+    capture, exportAt, offset: offsetString, exportOffset, subsec, kept, keepDateDropped,
     scene: scene.name, ev: Number(ev.toFixed(2)),
     lensMeta, source, aux,
   };
@@ -12916,7 +12943,6 @@ function originalCaptureDate(exif) {
 }
 
 const KEEP_DATE_DROPPED = {
-  missing: 'its metadata carries no capture date to keep',
   old: 'its original date is older than every camera the tool can name',
   future: 'its original date and time have not happened yet in a US time zone',
 };
@@ -13244,10 +13270,12 @@ async function processRandomizeItem(item, options = {}) {
 
   try {
     const keepDate = !!document.getElementById('chkKeepDate')?.checked;
-    const originalDate = keepDate ? originalCaptureDate(item.origExif) : null;
+    const orig = keepDate ? originalCaptureDate(item.origExif) : null;
+    const keep = keepDate ? (orig ? { at: orig } : { today: true }) : undefined;
 
-    const fake = generateFake({ originalDate });
-    item.keepDateDropped = keepDate ? (originalDate ? fake.keepDateDropped : 'missing') : null;
+    const fake = generateFake({ keep });
+    item.keepDateDropped = fake.keepDateDropped;
+    item.keptToday = fake.kept === 'today';
     // Render the pixel container and wrap the Adobe metadata segments around it.
     const { verified, preview, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
     fake.display.PixelXDimension = width;
@@ -13274,6 +13302,8 @@ async function processRandomizeItem(item, options = {}) {
       showToast(`${verified.warning} Some sites strip metadata on upload.`, 'warning');
     } else if (item.keepDateDropped && !quiet) {
       showToast(`${item.file.name}: ${KEEP_DATE_DROPPED[item.keepDateDropped]}, so a new date was generated instead.`, 'warning');
+    } else if (item.keptToday && !quiet) {
+      showToast(`${item.file.name}: its metadata carries no capture date to keep, so today's date was used, at a time already past in the generated place.`, 'info');
     } else if (!quiet) {
       showToast(`Randomized ${item.file.name}${locTxt}`, 'info');
     }
@@ -13387,7 +13417,7 @@ const App = {
     S.busy = true;
     const run = S.run;
     const failed = [];
-    let photos = 0, cleaned = 0, dropped = 0;
+    let photos = 0, cleaned = 0, dropped = 0, today = 0;
     updateActionButtons();
 
     // Every image gets its own independent identity — camera, lens, city,
@@ -13403,6 +13433,7 @@ const App = {
           if (S.run !== run) { releaseProcessedResources(item); break; }
           if (item.inputClass?.isPhoto) photos++; else cleaned++;
           if (item.keepDateDropped) dropped++;
+          if (item.keptToday) today++;
           if ((photos + cleaned) % 4 === 0) {
             renderCurrentItem();
             await new Promise(resolve => setTimeout(resolve, 0));
@@ -13425,8 +13456,11 @@ const App = {
       const msg = parts.join(' and ');
       showToast(msg.charAt(0).toUpperCase() + msg.slice(1) + '.', 'success');
     }
+    if (today) {
+      showToast(`${today} image${today === 1 ? '' : 's'} carried no capture date, so today's date was used, at a time already past in each generated place.`, 'info');
+    }
     if (dropped) {
-      showToast(`${dropped} image${dropped === 1 ? '' : 's'} could not keep ${dropped === 1 ? 'its' : 'their'} original date (none in the metadata, older than every camera the tool can name, or not yet reached in a US time zone), so new dates were generated.`, 'warning');
+      showToast(`${dropped} image${dropped === 1 ? '' : 's'} could not keep ${dropped === 1 ? 'its' : 'their'} original date (older than every camera the tool can name, or not yet reached in a US time zone), so new dates were generated.`, 'warning');
     }
     // "Keep original date" was ticked: images from the same day keep that
     // day, which links them to each other, not only to their originals.
