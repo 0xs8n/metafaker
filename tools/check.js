@@ -782,7 +782,7 @@ async function exposureInBrowser(page, origin, n) {
       const et = e[E.ExposureTime], f = g.display.FNumber, iso = e[E.ISOSpeedRatings];
       rows.push({
         phone: g.cam.type === 'phone', apple: g.cam.writer === 'apple', model: g.cam.model,
-        et: `${et[0]}/${et[1]}`, seconds: et[0] / et[1], iso, f, ev: g.ev,
+        et: `${et[0]}/${et[1]}`, seconds: et[0] / et[1], iso, f, ev: g.ev, hour: g.capture.getHours(),
         sun: h.sunElevation(g.loc.lat, g.loc.lon, h.wallClockToUtc(g.capture, g.loc.tz)),
         producible: producible(et[0], et[1]),
         ssvOk: same(x.encodeExposureTime(et[0] / et[1]).shutterSpeedValue, `${e[E.ShutterSpeedValue][0]}/${e[E.ShutterSpeedValue][1]}`),
@@ -866,6 +866,17 @@ function exposureChecks(data) {
   const duskTol = 4 * Math.hypot(0.019, Math.sqrt(0.104 * 0.896 / phones.length));
   assert('(exposure)', 'batch: phones after civil dusk at the share real US phone photos are',
     Math.abs(dusk - 0.104) <= duskTol, `${(100 * dusk).toFixed(1)}% of ${phones.length}, allowed ${(100 * (0.104 - duskTol)).toFixed(1)}-${(100 * (0.104 + duskTol)).toFixed(1)}%`);
+
+  // Camera-body exports taken between 09:00 and 18:00 are at EV 13 or
+  // brighter in 19.3% of files (95 uploaders, each weighted once; 3.5 points
+  // standard error by resampling uploaders). The bound is 4 standard errors of
+  // that and of the batch together; the phones' scene model gave bodies 42 to
+  // 45% there.
+  const day = rows.filter(r => !r.phone && r.hour >= 9 && r.hour < 18);
+  const bright = share(day, r => r.ev >= 13);
+  const brightTol = 4 * Math.hypot(0.035, Math.sqrt(0.193 * 0.807 / day.length));
+  assert('(exposure)', 'batch: bodies in the daytime at EV 13 or brighter as often as real body exports',
+    Math.abs(bright - 0.193) <= brightTol, `${(100 * bright).toFixed(1)}% of ${day.length}, allowed ${(100 * (0.193 - brightTol)).toFixed(1)}-${(100 * (0.193 + brightTol)).toFixed(1)}%`);
 
   // Main-camera share of US-located iPhone photos on Commons (FocalLength per
   // model, front cameras left out, each uploader weighted once; standard error

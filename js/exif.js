@@ -297,7 +297,7 @@ function weightedPick(weights) {
   return entries[0][0];
 }
 
-/** The scene follows the sun's elevation at the claimed place and time. */
+/** A phone's scene follows the sun's elevation at the claimed place and time. */
 function pickScene(sunEl) {
   let w;
   if      (sunEl > 25) w = { daylight: 55, overcast: 25, indoor: 20 };
@@ -342,14 +342,14 @@ function parseExposures(table, fields) {
     const files = group.split(' ');
     return files.map(file => {
       const v = Object.fromEntries(file.split(',').map((x, i) => [fields[i], Number(x)]));
-      return { f: v.f, t: 1 / v.inv, iso: v.iso, w: 1 / files.length };
+      return { f: v.f, t: 1 / v.inv, iso: v.iso, hour: v.hour, w: 1 / files.length };
     });
   });
 }
 const EXPOSURES = {
   apple:   parseExposures(PHONE_APPLE, ['f', 'inv', 'iso']),
   android: parseExposures(PHONE_ANDROID, ['f', 'inv', 'iso']),
-  body:    parseExposures(BODY_ADOBE, ['f', 'inv', 'iso']),
+  body:    parseExposures(BODY_ADOBE, ['f', 'inv', 'iso', 'hour']),
 };
 
 // With every uploader counted once, a file from a single-file uploader weighs
@@ -419,12 +419,42 @@ export function exposureCandidates(cam, lens, apertureAtFocal, ev) {
   throw new Error(`no measured exposure fits ${cam.model}`);
 }
 
-function drawExposure(cam, lens, apertureAtFocal, ev) {
-  const { files, weights } = exposureCandidates(cam, lens, apertureAtFocal, ev);
+function pickWeighted(items, weights) {
   let r = rnd() * weights.reduce((n, v) => n + v, 0);
   let i = 0;
-  while (i < files.length - 1 && (r -= weights[i]) > 0) i++;
-  const x = files[i];
+  while (i < items.length - 1 && (r -= weights[i]) > 0) i++;
+  return items[i];
+}
+
+// A camera body's scene brightness is that of a real body export taken at
+// the same time of day. The phones' scene model does not fit bodies: between
+// 09:00 and 18:00, 19% of body exports are at EV 13 or brighter, against over
+// 40% of the bodies that model gave, and in each three hours of that day the
+// darkest quarter of them is at EV 7 or below, where the darkest quarter of
+// US phone photos starts at EV 8 to 11 (2,144 exports from 119 uploaders, each
+// weighted once). Bodies go to talks, events and museums. Most of the exports
+// are not located, so they are measured against the clock, not the sun; the
+// night, 21:00 to 06:00, is one band because few uploaders shot in it.
+const HOUR_BANDS = [6, 12, 15, 18, 21];
+const bandOf = h => HOUR_BANDS.filter(b => h >= b).length % HOUR_BANDS.length;
+const BODY_BY_HOUR = HOUR_BANDS.map((_, i) => EXPOSURES.body.filter(x => bandOf(x.hour) === i));
+
+/**
+ * A body's scene at local hour `hour` with the sun at `sunEl`. After dusk
+ * only exports at EV 10 or darker, so that the exposure drawn within a stop
+ * of it is no daylight one.
+ */
+function bodyScene(hour, sunEl) {
+  const files = BODY_BY_HOUR[bandOf(hour)].filter(x => sunEl >= -6 || evOf(x.f, x.t, x.iso) <= 10);
+  const x = pickWeighted(files, capShares(files.map(x => x.w)));
+  const ev = evOf(x.f, x.t, x.iso);
+  const name = sunEl >= -6 && ev >= 13 ? 'daylight' : sunEl >= -6 && ev >= 10 ? 'overcast' : ev >= 6 ? 'indoor' : ev >= 3 ? 'dim' : 'night';
+  return { name, ...SCENES[name], evMin: ev, evMax: ev };
+}
+
+function drawExposure(cam, lens, apertureAtFocal, ev) {
+  const { files, weights } = exposureCandidates(cam, lens, apertureAtFocal, ev);
+  const x = pickWeighted(files, weights);
   return { aperture: cam.type === 'phone' ? lens.f : x.f, exposureSec: x.t, iso: writtenIso(cam, x.iso) };
 }
 
@@ -682,7 +712,8 @@ export function generateFake(options = {}) {
   const offsetString = tzOffsetString(utc, loc.tz);
   const exportOffset = tzOffsetString(exportUtc, loc.tz);
 
-  const scene = pickScene(sunElevation(loc.lat, loc.lon, utc));
+  const sunEl = sunElevation(loc.lat, loc.lon, utc);
+  const scene = isBody ? bodyScene(capture.getHours(), sunEl) : pickScene(sunEl);
   const flashFired = !!cam.flash && scene.dark && rnd() < (cam.type === 'phone' ? 0.3 : 0.25);
   const sceneEv = scene.evMin + rnd() * (scene.evMax - scene.evMin) + (flashFired ? 3 : 0);
   const { aperture, exposureSec, iso } = drawExposure(cam, lens, apertureAtFocal, sceneEv);
