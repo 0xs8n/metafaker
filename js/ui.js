@@ -137,7 +137,6 @@ function originalCaptureDate(exif) {
 }
 
 const KEEP_DATE_DROPPED = {
-  missing: 'its metadata carries no capture date to keep',
   old: 'its original date is older than every camera the tool can name',
   future: 'its original date and time have not happened yet in a US time zone',
 };
@@ -465,10 +464,12 @@ async function processRandomizeItem(item, options = {}) {
 
   try {
     const keepDate = !!document.getElementById('chkKeepDate')?.checked;
-    const originalDate = keepDate ? originalCaptureDate(item.origExif) : null;
+    const orig = keepDate ? originalCaptureDate(item.origExif) : null;
+    const keep = keepDate ? (orig ? { at: orig } : { today: true }) : undefined;
 
-    const fake = generateFake({ originalDate });
-    item.keepDateDropped = keepDate ? (originalDate ? fake.keepDateDropped : 'missing') : null;
+    const fake = generateFake({ keep });
+    item.keepDateDropped = fake.keepDateDropped;
+    item.keptToday = fake.kept === 'today';
     // Render the pixel container and wrap the Adobe metadata segments around it.
     const { verified, preview, width, height } = await assembleAdobeExport(item, fake, { ...fake.cam, iso: fake.display.ISO });
     fake.display.PixelXDimension = width;
@@ -495,6 +496,8 @@ async function processRandomizeItem(item, options = {}) {
       showToast(`${verified.warning} Some sites strip metadata on upload.`, 'warning');
     } else if (item.keepDateDropped && !quiet) {
       showToast(`${item.file.name}: ${KEEP_DATE_DROPPED[item.keepDateDropped]}, so a new date was generated instead.`, 'warning');
+    } else if (item.keptToday && !quiet) {
+      showToast(`${item.file.name}: its metadata carries no capture date to keep, so today's date was used, at a time already past in the generated place.`, 'info');
     } else if (!quiet) {
       showToast(`Randomized ${item.file.name}${locTxt}`, 'info');
     }
@@ -608,7 +611,7 @@ export const App = {
     S.busy = true;
     const run = S.run;
     const failed = [];
-    let photos = 0, cleaned = 0, dropped = 0;
+    let photos = 0, cleaned = 0, dropped = 0, today = 0;
     updateActionButtons();
 
     // Every image gets its own independent identity — camera, lens, city,
@@ -624,6 +627,7 @@ export const App = {
           if (S.run !== run) { releaseProcessedResources(item); break; }
           if (item.inputClass?.isPhoto) photos++; else cleaned++;
           if (item.keepDateDropped) dropped++;
+          if (item.keptToday) today++;
           if ((photos + cleaned) % 4 === 0) {
             renderCurrentItem();
             await new Promise(resolve => setTimeout(resolve, 0));
@@ -646,8 +650,11 @@ export const App = {
       const msg = parts.join(' and ');
       showToast(msg.charAt(0).toUpperCase() + msg.slice(1) + '.', 'success');
     }
+    if (today) {
+      showToast(`${today} image${today === 1 ? '' : 's'} carried no capture date, so today's date was used, at a time already past in each generated place.`, 'info');
+    }
     if (dropped) {
-      showToast(`${dropped} image${dropped === 1 ? '' : 's'} could not keep ${dropped === 1 ? 'its' : 'their'} original date (none in the metadata, older than every camera the tool can name, or not yet reached in a US time zone), so new dates were generated.`, 'warning');
+      showToast(`${dropped} image${dropped === 1 ? '' : 's'} could not keep ${dropped === 1 ? 'its' : 'their'} original date (older than every camera the tool can name, or not yet reached in a US time zone), so new dates were generated.`, 'warning');
     }
     // "Keep original date" was ticked: images from the same day keep that
     // day, which links them to each other, not only to their originals.

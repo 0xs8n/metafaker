@@ -561,6 +561,21 @@ function pickExport(capture, latest, earliest) {
   return new Date(lo + rnd() * (hi - lo));
 }
 
+/**
+ * A drawn place where the wall clock `wall` passed at least `margin` ms ago,
+ * and that place's wall clock now as `latest`; null when no place drawn has
+ * reached it yet, as US zones run hours behind much of the world.
+ */
+function placeWhereReached(wall, margin) {
+  for (let i = 0; i < 200; i++) {
+    const loc = pickLocation();
+    if (wallClockToUtc(wall, loc.tz).getTime() <= Date.now() - margin) {
+      return { loc, latest: utcToWallClock(Date.now(), loc.tz).getTime() };
+    }
+  }
+  return null;
+}
+
 /** Whether this camera, and the firmware it reports, existed by `date`. */
 const existedBy = (cam, date) =>
   new Date(`${cam.released}T00:00:00`) <= date &&
@@ -670,34 +685,46 @@ export function generateFake(options = {}) {
   const px = window.piexif;
   registerTags(px);
   // The capture comes first, so the camera can be one that existed by then.
-  // A kept original date and time is the capture exactly; every other date is
-  // drawn to fit after it. One that cannot be told consistently (older than
-  // every camera here, or later than now) is replaced by a drawn date and the
-  // caller is told why (keepDateDropped).
+  // A kept original date and time is the capture exactly; a file with no
+  // capture date to keep gets today's date. Every other date is drawn to fit
+  // after it. One that cannot be told consistently (older than every camera
+  // here, or later than now) is replaced by a drawn date and the caller is
+  // told why (keepDateDropped).
   const anchor = pickAnchor();
-  const kept = options.originalDate instanceof Date && !isNaN(options.originalDate) ? options.originalDate : null;
-  let capture = null, exportAt = null, pool = [], keepDateDropped = null, latest = anchor, loc = null;
-  if (kept) {
-    if (kept.getTime() >= Date.now()) keepDateDropped = 'future';
-    else if (kept.getTime() < anchor - DAY) capture = new Date(kept.getTime());
-    else {
-      // The anchor keeps the newest date from saying when the tool ran, but a
-      // photo taken after it has to be exported after it, so the bound is now,
-      // read in the place's own zone: the kept wall clock must already have
-      // happened there, or the file would claim a capture in the future.
-      for (let i = 0; i < 200 && !loc; i++) {
-        const l = pickLocation();
-        if (wallClockToUtc(kept, l.tz).getTime() < Date.now() - 60000) loc = l;
+  const keep = options.keep || {};
+  const at = keep.at instanceof Date && !isNaN(keep.at) ? keep.at : null;
+  let capture = null, exportAt = null, pool = [], keepDateDropped = null, kept = null, latest = anchor, loc = null;
+  // The anchor keeps the newest date from saying when the tool ran, but a
+  // photo taken after it has to be exported after it, so the bound is now,
+  // read in the place's own zone: the kept wall clock must already have
+  // happened there, or the file would claim a capture in the future.
+  let reached = null;
+  if (at) {
+    if (at.getTime() >= Date.now()) keepDateDropped = 'future';
+    else if (at.getTime() < anchor - DAY) { capture = new Date(at.getTime()); kept = 'exact'; }
+    else if ((reached = placeWhereReached(at, 60000))) {
+      ({ loc, latest } = reached);
+      capture = new Date(at.getTime());
+      kept = 'exact';
+    } else keepDateDropped = 'future';
+  } else if (keep.today) {
+    const now = new Date();
+    const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // An hour of today leaves room for a capture and a 30-minute export.
+    if ((reached = placeWhereReached(today0, 60 * 60000))) {
+      ({ loc, latest } = reached);
+      const bound = latest - 30 * 60000;
+      for (let i = 0; i < 20 && !capture; i++) {
+        const c = setCaptureTime(new Date(today0), loc);
+        if (c.getTime() <= bound) capture = c;
       }
-      if (loc) {
-        capture = new Date(kept.getTime());
-        latest = utcToWallClock(Date.now(), loc.tz).getTime();
-      } else keepDateDropped = 'future';
-    }
-    if (capture) {
-      pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, new Date(latest)));
-      if (!pool.length) { keepDateDropped = 'old'; capture = null; loc = null; latest = anchor; }
-    }
+      if (!capture) capture = new Date(today0.getTime() + rnd() * (bound - today0.getTime()));
+      kept = 'today';
+    } else keepDateDropped = 'future';
+  }
+  if (capture) {
+    pool = OFFERED.filter(c => existedBy(c, capture) && rawSupportedBy(c, new Date(latest)));
+    if (!pool.length) { keepDateDropped = 'old'; kept = null; capture = null; loc = null; latest = anchor; }
   }
   // A long measured delay can put the capture before every camera here; draw
   // again until at least one existed.
@@ -942,7 +969,7 @@ export function generateFake(options = {}) {
 
   return {
     display, piexif: p, cam, loc, iso, lens, editor,
-    capture, exportAt, offset: offsetString, exportOffset, subsec, keepDateDropped,
+    capture, exportAt, offset: offsetString, exportOffset, subsec, kept, keepDateDropped,
     scene: scene.name, ev: Number(ev.toFixed(2)),
     lensMeta, source, aux,
   };
