@@ -12971,7 +12971,9 @@ function setTabs() {
 
 function updateTabCounts() {
   const current = getActiveItem();
-  const displayExif = current?.fakeExif || current?.origExif;
+  // A stripped or cleaned output has no fields to count, whatever the
+  // original carried.
+  const displayExif = hasProcessedOutput(current) ? current.fakeExif : current?.origExif;
   S.fieldCounts.orig = displayExif && Object.keys(displayExif).length
     ? renderMeta(displayExif, !!current?.fakeExif).count
     : 0;

@@ -517,6 +517,19 @@ async function processInBrowser(page, origin, names) {
     await App.loadFiles([dup]);
     App.select(S.items[S.items.length - 1].id);
     await App.clear();
+    // The panel's field count must describe the output on show, not the
+    // original it came from: a stripped output has nothing to count. The
+    // test images carry no EXIF, so strip one of this run's own randomized
+    // outputs, which does, and read the count the panel then shows.
+    const withExif = S.items.find(it => it.modBlob && it.fakeExif);
+    await App.loadFiles([new File([withExif.modBlob], 'had-metadata.jpg', { type: 'image/jpeg' })]);
+    const reloaded = S.items[S.items.length - 1];
+    App.select(reloaded.id);
+    const countBeforeStrip = document.getElementById('countOrig')?.textContent;
+    await App.clear();
+    const strippedCount = document.getElementById('countOrig')?.textContent;
+    S.items.splice(S.items.indexOf(reloaded), 1);
+    App.select(S.items[S.items.length - 1].id);
 
     // Non-photo cases: Randomize must classify each as a non-photo and clean
     // it (a plain strip or an exported graphic, chosen at random), never give
@@ -602,6 +615,7 @@ async function processInBrowser(page, origin, names) {
       hasBlob: !!it.modBlob,
       size: it.modBlob ? it.modBlob.size : 0,
       mode: nonPhoto.has(it.id) ? 'nonphoto' : (it.fakeExif ? 'randomized' : 'stripped'),
+      strippedCount, countBeforeStrip,
       isPhoto: it.inputClass ? it.inputClass.isPhoto : null,
       reason: it.inputClass ? it.inputClass.reason : '',
       nonPhotoCase: nonPhoto.get(it.id) || null,
@@ -621,6 +635,10 @@ async function processInBrowser(page, origin, names) {
   // camera+place across the whole batch means a shared identity.
   const b = summary.filter(it => it.batch && it.mode === 'randomized');
   assert('(batch)', 'batch: every image randomized', b.length === BATCH_SIZE, `${b.length}/${BATCH_SIZE}`);
+  const stripped = summary.find(it => it.mode === 'stripped');
+  assert('(panel)', "panel: a stripped output shows a field count of 0, not the original's",
+    Number(stripped?.countBeforeStrip) > 0 && stripped?.strippedCount === '0',
+    `count before strip: ${stripped?.countBeforeStrip}, after: ${stripped?.strippedCount}`);
   if (b.length > 1) {
     const ids = new Set(b.map(it => `${it.camera} @ ${it.city}`));
     assert('(batch)', 'batch: images do not share one identity', ids.size > 1, [...ids].join(' | '));
